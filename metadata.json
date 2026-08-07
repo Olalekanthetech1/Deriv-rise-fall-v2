@@ -1,0 +1,8 @@
+{
+  "name": "Remix Deriv Rise-Fall Replicator",
+  "description": "Import, configure, and build an identical version of the Deriv Rise-Fall project with all dependencies and environment variables.",
+  "requestFramePermissions": [],
+  "majorCapabilities": [
+    "MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"
+  ]
+}

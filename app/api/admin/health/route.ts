@@ -1,0 +1,40 @@
+import { NextResponse } from 'next/server';
+import { getRateLimitBlocks } from '@/lib/health';
+import { getDb } from '@/lib/db';
+import { xgboostDaemon } from '@/lib/xgboost-daemon';
+
+export async function GET() {
+  let dbStatus = false;
+  let dbLatencyMs: number | null = null;
+  try {
+    const sql = getDb();
+    if (sql) {
+      const dbStart = Date.now();
+      await sql`SELECT 1`;
+      dbLatencyMs = Date.now() - dbStart;
+      dbStatus = true;
+    }
+  } catch (err) {}
+
+  let pythonStatus = false;
+  let daemonLatencyMs: number | null = null;
+  try {
+    const daemonStart = Date.now();
+    const pingRes = await xgboostDaemon.sendCommand('ping');
+    daemonLatencyMs = Date.now() - daemonStart;
+    if (pingRes && pingRes.success) {
+      pythonStatus = true;
+    }
+  } catch (err) {}
+
+  const blocks = await getRateLimitBlocks();
+
+  return NextResponse.json({
+    db: dbStatus ? 'online' : 'offline',
+    dbLatencyMs,
+    pythonDaemon: pythonStatus ? 'online' : 'offline',
+    daemonLatencyMs,
+    rateLimitBlocks: blocks,
+    rateLimiterStatus: 'Active (Sliding Window)',
+  });
+}
