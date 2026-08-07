@@ -74,6 +74,9 @@ export function OpenPositionCard({
       {/* Row 1: Symbol + Direction */}
       <div className="flex items-center justify-between">
         <div className="flex items-center gap-2">
+          <div className="flex items-center gap-1 bg-muted rounded px-1.5 py-0.5">
+            <span className="text-xs font-bold text-foreground">{pos.underlying_symbol}</span>
+          </div>
           <span className="text-sm font-semibold text-foreground leading-tight">
             {getSymbolDisplayName(pos.underlying_symbol)}
           </span>

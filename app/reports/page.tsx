@@ -10,7 +10,6 @@ import { ThemeToggle } from '@/components/custom/theme-toggle';
 import { Footer } from '@/components/custom/footer';
 import Link from 'next/link';
 import { PositionsTable } from '@/components/custom/positions-table';
-import { getSymbolDisplayName } from '@/lib/active-symbols-display-names';
 import { MarketCategorySelector } from '@/components/admin/market-category-selector';
 import { Download, ArrowLeft, TrendingUp, TrendingDown, DollarSign, Award, Percent, BarChart3, ShieldCheck } from 'lucide-react';
 import { toast } from 'sonner';
@@ -116,7 +115,7 @@ export default function ReportsPage() {
       const sellPrice = typeof p.sell_price === 'number' ? p.sell_price : parseFloat(String(p.sell_price) || '0');
       return [
         p.contract_id,
-        getSymbolDisplayName(p.underlying_symbol),
+        p.underlying_symbol,
         p.contract_type,
         buyPrice,
         sellPrice,
