@@ -1,25 +1,69 @@
-FROM node:20-alpine AS base
-RUN apk add --no-cache python3 python3-dev py3-pip py3-numpy py3-scikit-learn build-base libc6-compat
-WORKDIR /app
-COPY requirements.txt ./
-RUN pip3 install --no-cache-dir -r requirements.txt --break-system-packages
+# ============================================================
+# BASE
+# ============================================================
+FROM node:20-bookworm-slim AS base
 
-# Step 1: Install dependencies
+# Install Python and native dependencies
+RUN apt-get update && apt-get install -y \
+    python3 \
+    python3-dev \
+    python3-venv \
+    build-essential \
+    git \
+    && rm -rf /var/lib/apt/lists/*
+
+# Create isolated Python environment
+RUN python3 -m venv /opt/venv
+
+ENV PATH="/opt/venv/bin:$PATH"
+
+WORKDIR /app
+
+# Upgrade Python packaging tools
+RUN python -m pip install --upgrade \
+    pip \
+    setuptools \
+    wheel
+
+# Install Python ML dependencies
+COPY requirements.txt ./
+
+RUN python -m pip install \
+    --no-cache-dir \
+    -r requirements.txt
+
+
+# ============================================================
+# STEP 1 — NODE DEPENDENCIES
+# ============================================================
 FROM base AS deps
+
+WORKDIR /app
 
 COPY package.json package-lock.json* bun.lock* ./
 COPY packages/core/package.json ./packages/core/package.json
+
 RUN npm install
+
 COPY packages ./packages
 COPY scripts ./scripts
 
-# Step 2: Build the Next.js application with Option A Next.js API Routes
+
+# ============================================================
+# STEP 2 — NEXT.JS BUILD
+# ============================================================
 FROM base AS builder
+
 WORKDIR /app
+
 COPY --from=deps /app/node_modules ./node_modules
+
 COPY . .
 
-# Support dynamic build args for Render build time
+# ------------------------------------------------------------
+# Render build arguments
+# ------------------------------------------------------------
+
 ARG NEXT_PUBLIC_DERIV_APP_ID
 ENV NEXT_PUBLIC_DERIV_APP_ID=$NEXT_PUBLIC_DERIV_APP_ID
 
@@ -41,31 +85,43 @@ ENV NEXT_PUBLIC_DERIV_ENV=$NEXT_PUBLIC_DERIV_ENV
 ARG NEXT_PUBLIC_FONT_FAMILY
 ENV NEXT_PUBLIC_FONT_FAMILY=$NEXT_PUBLIC_FONT_FAMILY
 
+# ------------------------------------------------------------
+# Next.js production build
+# ------------------------------------------------------------
+
 ENV NEXT_TELEMETRY_DISABLED=1
 ENV NODE_ENV=production
 
 RUN npm run build
 
-# Step 3: Production runner
+
+# ============================================================
+# STEP 3 — PRODUCTION RUNNER
+# ============================================================
 FROM base AS runner
+
 WORKDIR /app
 
 ENV NODE_ENV=production
 ENV NEXT_TELEMETRY_DISABLED=1
+ENV PORT=3000
+ENV HOSTNAME=0.0.0.0
 
-RUN addgroup --system --gid 1001 nodejs
-RUN adduser --system --uid 1001 nextjs
+# Create non-root user
+RUN groupadd --system --gid 1001 nodejs && \
+    useradd --system --uid 1001 --gid nodejs nextjs
 
+# Next.js production files
 COPY --from=builder /app/public ./public
 COPY --from=builder /app/.next ./.next
 COPY --from=builder /app/node_modules ./node_modules
 COPY --from=builder /app/package.json ./package.json
 
+# Python ML dependencies and environment are inherited
+# from the base image.
+
 USER nextjs
 
 EXPOSE 3000
-
-ENV PORT=3000
-ENV HOSTNAME="0.0.0.0"
 
 CMD ["npm", "run", "start"]
