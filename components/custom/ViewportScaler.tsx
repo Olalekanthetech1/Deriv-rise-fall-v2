@@ -43,22 +43,19 @@ export default function ViewportScaler({ children }: { children: React.ReactNode
     updateScale();
   }, [isAdmin]);
 
-  // If on admin route, render a responsive scrollable wrapper with zero transform
-  if (isAdmin) {
-    return <div className="w-full max-w-full min-h-screen overflow-x-hidden overflow-y-auto">{children}</div>;
-  }
-
   // React to content height changes (fonts loading, dynamic data, images)
   useEffect(() => {
+    if (isAdmin) return;
     const el = containerRef.current;
     if (!el) return;
     const ro = new ResizeObserver(() => updateScale());
     ro.observe(el);
     return () => ro.disconnect();
-  }, []);
+  }, [isAdmin]);
 
   // Debounced window resize + orientation-change listener
   useEffect(() => {
+    if (isAdmin) return;
     let timer: ReturnType<typeof setTimeout>;
     const handler = () => {
       clearTimeout(timer);
@@ -71,7 +68,12 @@ export default function ViewportScaler({ children }: { children: React.ReactNode
       window.removeEventListener('resize', handler);
       window.removeEventListener('orientationchange', handler);
     };
-  }, []);
+  }, [isAdmin]);
+
+  // If on admin route, render a responsive scrollable wrapper with zero transform
+  if (isAdmin) {
+    return <div className="w-full max-w-full min-h-screen overflow-x-hidden overflow-y-auto">{children}</div>;
+  }
 
   const isMobile = typeof scale === 'number';
   const isReady = scale !== null;

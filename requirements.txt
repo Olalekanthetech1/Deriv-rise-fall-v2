@@ -1,4 +1,5 @@
 numpy
-xgboost
 scikit-learn
+xgboost
 onnxmltools
+onnxruntime
