@@ -40,29 +40,29 @@ export async function incrementRedisBlock() {
   }
 }
 
-// 10 req/min for ML
+// Generous, high-throughput rate limits for ML operations, live WebSocket ticks, and general APIs
 const mlRatelimit = redisClient
   ? new Ratelimit({
       redis: redisClient,
-      limiter: Ratelimit.slidingWindow(10, '1 m'),
+      limiter: Ratelimit.slidingWindow(300, '1 m'),
       ephemeralCache: new Map(),
     })
   : null;
 
-// 30 req/min for General API
+// 600 req/min for General API
 const apiRatelimit = redisClient
   ? new Ratelimit({
       redis: redisClient,
-      limiter: Ratelimit.slidingWindow(30, '1 m'),
+      limiter: Ratelimit.slidingWindow(600, '1 m'),
       ephemeralCache: new Map(),
     })
   : null;
 
-// 100 req/min for WS feed / Ticks (High volume)
+// 3000 req/min for WS feed / Ticks (High volume)
 const wsRatelimit = redisClient
   ? new Ratelimit({
       redis: redisClient,
-      limiter: Ratelimit.slidingWindow(100, '1 m'),
+      limiter: Ratelimit.slidingWindow(3000, '1 m'),
       ephemeralCache: new Map(),
     })
   : null;
@@ -74,19 +74,19 @@ export async function checkRateLimit(key: string, type: 'ml' | 'api' | 'ws' = 'a
     if (mlRatelimit) {
       result = await mlRatelimit.limit(key);
     } else {
-      result = getInMemoryRateLimit(key, 10, 60000);
+      result = getInMemoryRateLimit(key, 300, 60000);
     }
   } else if (type === 'ws') {
     if (wsRatelimit) {
       result = await wsRatelimit.limit(key);
     } else {
-      result = getInMemoryRateLimit(key, 100, 60000);
+      result = getInMemoryRateLimit(key, 3000, 60000);
     }
   } else {
     if (apiRatelimit) {
       result = await apiRatelimit.limit(key);
     } else {
-      result = getInMemoryRateLimit(key, 30, 60000);
+      result = getInMemoryRateLimit(key, 600, 60000);
     }
   }
 

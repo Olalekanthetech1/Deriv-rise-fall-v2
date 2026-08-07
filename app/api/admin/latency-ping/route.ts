@@ -21,28 +21,25 @@ export async function POST(req: NextRequest) {
     // 1. Measure Feature Extraction Latency
     const startFeat = process.hrtime.bigint();
 
-    // Generate synthetic recent tick stream to measure real feature calculation overhead
-    const mockTicks: { price: number; timestamp: number }[] = [];
-    let basePrice = 1000 + Math.random() * 50;
-    const now = Date.now();
-    for (let i = 0; i < 50; i++) {
-      basePrice += (Math.random() - 0.49) * 0.8;
-      mockTicks.push({ price: Number(basePrice.toFixed(4)), timestamp: now - (50 - i) * 1000 });
+    // Get real tick sequence from database / tick engine
+    const { getTicksHistory, initDbSchema } = await import('@/lib/db');
+    await initDbSchema();
+    let ticks = await getTicksHistory(symbol, 50);
+
+    if (!ticks || ticks.length < 5) {
+      const { generateSyntheticTicks } = await import('@/lib/ticks-helper');
+      ticks = generateSyntheticTicks(symbol, 50);
     }
 
-    const featureObj = extract37TickFeatures(mockTicks, { symbol });
+    const featureObj = extract37TickFeatures(ticks, { symbol });
     const features = Object.values(featureObj);
     const endFeat = process.hrtime.bigint();
     const featureExtractTimeMs = Number(endFeat - startFeat) / 1_000_000;
 
-    // 2. Measure Model Inference Overhead
+    // 2. Measure Model Inference Overhead using actual XGBoost ML Engine
     const startInference = process.hrtime.bigint();
-
-    // Simulate ONNX / XGBoost decision matrix evaluation over extracted features
-    let modelResult = 0;
-    for (let k = 0; k < features.length; k++) {
-      modelResult += Math.sin(features[k] * 0.1) * 0.05 + Math.cos(features[k] * 0.05) * 0.02;
-    }
+    const { xgboostModel } = await import('@/lib/xgboost-engine');
+    const prediction = xgboostModel.predict(ticks, { symbol });
     const endInference = process.hrtime.bigint();
     const modelInferenceTimeMs = Number(endInference - startInference) / 1_000_000;
 

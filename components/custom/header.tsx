@@ -3,7 +3,6 @@
 import { useState } from 'react';
 import Link from 'next/link';
 import { ShieldCheck } from 'lucide-react';
-import { BrainCircuit } from 'lucide-react';
 import { Button } from '@/components/ui/button';
 import { Popover, PopoverTrigger, PopoverContent } from '@/components/ui/popover';
 import { cn } from '@/lib/utils';
@@ -88,14 +87,6 @@ export function Header({
       </div>
       <div className="flex items-center gap-3">
         {actions}
-        <Link
-          href="/admin"
-          className="flex items-center gap-1.5 px-3 py-1.5 rounded-lg bg-purple-500/10 hover:bg-purple-500/20 text-purple-600 dark:text-purple-400 border border-purple-500/20 text-xs font-bold transition-all shadow-sm"
-          title="Open XGBoost ML Admin Dashboard"
-        >
-          <BrainCircuit className="w-3.5 h-3.5" />
-          <span className="hidden sm:inline">Admin Hub</span>
-        </Link>
         {isAuthenticated && activeAccount && (
           <Popover open={accountSwitcherOpen} onOpenChange={setAccountSwitcherOpen}>
             <PopoverTrigger asChild>

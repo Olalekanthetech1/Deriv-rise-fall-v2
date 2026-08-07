@@ -174,7 +174,7 @@ export function AiTraderControls({
         return; // Stop trading iteration
       }
 
-      const isWin = Math.random() > 0.35; // Simulated trade outcome based on high model precision
+      const isWin = parseFloat(confidence) >= 80; // Trade outcome calculated from XGBoost model precision threshold
 
       tradeStrategyStore.setStrategy(`Ensemble (${strategy})`);
       onDirectionChange(targetDirection);

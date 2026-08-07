@@ -1,7 +1,8 @@
 import { NextRequest, NextResponse } from 'next/server';
 import { xgboostModel } from '@/lib/xgboost-engine';
 import { extract37TickFeatures, TickPoint } from '@/lib/ml-feature-extractor';
-import { getTicksHistory, initDbSchema, getDb } from '@/lib/db';
+import { initDbSchema, getDb } from '@/lib/db';
+import { ensureMinTicks } from '@/lib/ticks-helper';
 
 export interface DurationPrediction {
   value: number;
@@ -45,12 +46,9 @@ export async function POST(req: NextRequest) {
 
     let tickList: TickPoint[] = Array.isArray(ticks) && ticks.length > 0 ? ticks : [];
 
-    // Fallback if ticks array is too small: load from database
+    // Fallback if ticks array is too small: load from DB or fetch directly from Deriv WS
     if (tickList.length < 5) {
-      const dbTicks = await getTicksHistory(symbol, 100);
-      if (dbTicks.length > 0) {
-        tickList = dbTicks;
-      }
+      tickList = await ensureMinTicks(symbol, 100);
     }
 
     if (tickList.length < 5) {

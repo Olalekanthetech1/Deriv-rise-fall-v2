@@ -1,7 +1,8 @@
 import { NextRequest, NextResponse } from 'next/server';
 import { BacktestSchema } from '@/lib/validation-schemas';
-import { getTicksHistory, initDbSchema, saveBacktestResults } from '@/lib/db';
+import { initDbSchema, saveBacktestResults } from '@/lib/db';
 import { xgboostDaemon } from '@/lib/xgboost-daemon';
+import { ensureMinTicks } from '@/lib/ticks-helper';
 
 export async function POST(req: NextRequest) {
   try {
@@ -18,11 +19,7 @@ export async function POST(req: NextRequest) {
 
     const { symbol, horizons, sampleLimit } = parseResult.data;
 
-    const ticks = await getTicksHistory(symbol, sampleLimit);
-
-    if (!ticks || ticks.length < 50) {
-      throw new Error(`Insufficient historical ticks for backtesting ${symbol}. Minimum 50 required.`);
-    }
+    const ticks = await ensureMinTicks(symbol, sampleLimit || 1000);
 
     const backtestRes = await xgboostDaemon.sendCommand('backtest', {
       symbol,

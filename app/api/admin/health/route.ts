@@ -1,9 +1,19 @@
-import { NextResponse } from 'next/server';
+import { NextRequest, NextResponse } from 'next/server';
 import { getRateLimitBlocks } from '@/lib/health';
 import { getDb } from '@/lib/db';
 import { xgboostDaemon } from '@/lib/xgboost-daemon';
+import { verifySessionToken } from '../auth/route';
 
-export async function GET() {
+function isAuthValid(req: NextRequest): boolean {
+  const cookieToken = req.cookies.get('admin_session_token')?.value;
+  const headerToken = req.headers.get('x-admin-token') || req.headers.get('authorization')?.replace('Bearer ', '');
+  return verifySessionToken(cookieToken) || verifySessionToken(headerToken);
+}
+
+export async function GET(req: NextRequest) {
+  if (!isAuthValid(req)) {
+    return NextResponse.json({ error: 'Unauthorized admin access.' }, { status: 401 });
+  }
   let dbStatus = false;
   let dbLatencyMs: number | null = null;
   try {

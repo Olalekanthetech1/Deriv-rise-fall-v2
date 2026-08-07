@@ -1,7 +1,8 @@
 import { NextRequest, NextResponse } from 'next/server';
 import { TrainSchema } from '@/lib/validation-schemas';
 import { xgboostModel } from '@/lib/xgboost-engine';
-import { initDbSchema, getTicksHistory, getDb, registerModelInDb } from '@/lib/db';
+import { initDbSchema, getDb, registerModelInDb } from '@/lib/db';
+import { ensureMinTicks } from '@/lib/ticks-helper';
 
 const CATEGORY_MAP: Record<string, string[]> = {
 
@@ -63,11 +64,7 @@ export async function POST(req: NextRequest) {
     const sql = getDb();
 
     for (const sym of targetSymbols) {
-      const dbTicks = await getTicksHistory(sym, 500);
-
-      if (!dbTicks || dbTicks.length < 50) {
-        throw new Error(`Insufficient historical ticks to train ${sym}. Need at least 50.`);
-      }
+      const dbTicks = await ensureMinTicks(sym, 50);
 
       let trainResult: any = null;
 

@@ -1,8 +1,8 @@
 import { RateLimiterMemory } from 'rate-limiter-flexible';
 
-// 100 messages max per 60 seconds per IP / key
+// 3000 messages max per 60 seconds per IP / key for high-frequency tick streams
 const wsLimiter = new RateLimiterMemory({
-  points: 100,
+  points: 3000,
   duration: 60,
 });
 

@@ -1,8 +1,19 @@
 import { NextRequest, NextResponse } from 'next/server';
 import { xgboostModel } from '@/lib/xgboost-engine';
 import { initDbSchema, getTicksHistory } from '@/lib/db';
+import { verifySessionToken } from '../auth/route';
+
+function isAuthValid(req: NextRequest): boolean {
+  const cookieToken = req.cookies.get('admin_session_token')?.value;
+  const headerToken = req.headers.get('x-admin-token') || req.headers.get('authorization')?.replace('Bearer ', '');
+  return verifySessionToken(cookieToken) || verifySessionToken(headerToken);
+}
 
 export async function POST(req: NextRequest) {
+  if (!isAuthValid(req)) {
+    return NextResponse.json({ error: 'Unauthorized admin access.' }, { status: 401 });
+  }
+
   try {
     await initDbSchema();
     const body = await req.json().catch(() => ({}));
@@ -26,16 +37,11 @@ export async function POST(req: NextRequest) {
       });
     }
 
-    let ticks = await getTicksHistory(symbol, 400);
+    const { ensureMinTicks } = await import('@/lib/ticks-helper');
+    let ticks = await getTicksHistory(symbol, 1000);
 
-    if (ticks.length < 60) {
-      const now = Date.now();
-      let price = symbol === 'FRXEURUSD' ? 1.085 : 1000.0;
-      ticks = [];
-      for (let i = 0; i < 250; i++) {
-        price += (Math.random() - 0.485) * (symbol === 'FRXEURUSD' ? 0.0003 : 0.35);
-        ticks.push({ price: parseFloat(price.toFixed(4)), timestamp: now - (250 - i) * 1000 });
-      }
+    if (ticks.length < 100) {
+      ticks = await ensureMinTicks(symbol, 1000);
     }
 
     const backtestData = xgboostModel.backtest(ticks, {

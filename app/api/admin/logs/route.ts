@@ -1,8 +1,19 @@
-import { NextResponse } from 'next/server';
+import { NextRequest, NextResponse } from 'next/server';
 import { initDbSchema, getDb } from '@/lib/db';
 import { redisClient } from '@/lib/rate-limiter';
+import { verifySessionToken } from '../auth/route';
 
-export async function GET() {
+function isAuthValid(req: NextRequest): boolean {
+  const cookieToken = req.cookies.get('admin_session_token')?.value;
+  const headerToken = req.headers.get('x-admin-token') || req.headers.get('authorization')?.replace('Bearer ', '');
+  return verifySessionToken(cookieToken) || verifySessionToken(headerToken);
+}
+
+export async function GET(req: NextRequest) {
+  if (!isAuthValid(req)) {
+    return NextResponse.json({ error: 'Unauthorized admin access.' }, { status: 401 });
+  }
+
   try {
     const isDbConnected = await initDbSchema();
     const sql = getDb();

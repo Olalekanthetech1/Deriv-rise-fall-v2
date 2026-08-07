@@ -1,7 +1,14 @@
 import { NextRequest, NextResponse } from 'next/server';
-import { initDbSchema, getDb } from '@/lib/db';
+import { initDbSchema, getDb, getTicksHistory } from '@/lib/db';
 import { Redis } from '@upstash/redis';
 import { logger } from '@/lib/logger';
+import { verifySessionToken } from '../auth/route';
+
+function isAuthValid(req: NextRequest): boolean {
+  const cookieToken = req.cookies.get('admin_session_token')?.value;
+  const headerToken = req.headers.get('x-admin-token') || req.headers.get('authorization')?.replace('Bearer ', '');
+  return verifySessionToken(cookieToken) || verifySessionToken(headerToken);
+}
 
 let redisClient: Redis | null = null;
 if (process.env.UPSTASH_REDIS_REST_URL && process.env.UPSTASH_REDIS_REST_TOKEN) {
@@ -10,15 +17,16 @@ if (process.env.UPSTASH_REDIS_REST_URL && process.env.UPSTASH_REDIS_REST_TOKEN) 
   } catch (err) {}
 }
 
-const CACHE_KEY = 'admin_stats_cache';
+const CACHE_KEY = 'admin_stats_cache_v3';
 const CACHE_TTL_SECONDS = 30; // 30 seconds
 
 export async function GET(req: NextRequest) {
-  try {
-    const { searchParams } = new URL(req.url);
-    const forceSimulated = searchParams.get('mode') === 'simulated';
+  if (!isAuthValid(req)) {
+    return NextResponse.json({ error: 'Unauthorized admin access.' }, { status: 401 });
+  }
 
-    if (redisClient && !forceSimulated) {
+  try {
+    if (redisClient) {
       try {
         const cached = await redisClient.get(CACHE_KEY);
         if (cached) {
@@ -32,44 +40,35 @@ export async function GET(req: NextRequest) {
     const isDbConnected = await initDbSchema();
     const sql = getDb();
 
-    // Default dynamic simulated dataset when DB has no trades or is offline
-    const dynamicDefaultBrackets = [
-      { bracket: '70-79%', wins: 14, losses: 5, total: 19, winRate: 73.7 },
-      { bracket: '80-89%', wins: 22, losses: 3, total: 25, winRate: 88.0 },
-      { bracket: '90-100%', wins: 18, losses: 1, total: 19, winRate: 94.7 },
+    // Zero-state values when database is offline or empty
+    const zeroBrackets = [
+      { bracket: '70-79%', wins: 0, losses: 0, total: 0, winRate: 0 },
+      { bracket: '80-89%', wins: 0, losses: 0, total: 0, winRate: 0 },
+      { bracket: '90-100%', wins: 0, losses: 0, total: 0, winRate: 0 },
     ];
 
-    const dynamicDefaultPnlCurve = Array.from({ length: 20 }, (_, i) => {
-      const idx = i + 1;
-      const baseProfit = idx * 12.5 + Math.sin(idx * 0.8) * 15;
-      return { tradeIndex: idx, pnl: Number(baseProfit.toFixed(2)) };
-    });
+    const zeroPnlCurve = [{ tradeIndex: 0, pnl: 0 }];
 
-    const dynamicDefaultSummary = {
-      totalTrades: 63,
-      wins: 54,
-      losses: 9,
-      winRate: 85.7,
-      totalProfit: 268.50,
-      totalTicks: 124500,
-      totalModels: 5,
-      activeModel: 'XGBoost-Ensemble-v4.2',
-      activeAccuracy: 88.4,
+    const zeroSummary = {
+      totalTrades: 0,
+      wins: 0,
+      losses: 0,
+      winRate: 0,
+      totalProfit: 0,
+      totalTicks: 0,
+      totalModels: 0,
+      activeModel: 'None (DB Offline)',
+      activeAccuracy: 0,
     };
 
-    if (forceSimulated || !sql || !isDbConnected) {
+    if (!sql || !isDbConnected) {
       return NextResponse.json({
-        isDbConnected: Boolean(isDbConnected) && !forceSimulated,
-        isSimulated: true,
-        summary: dynamicDefaultSummary,
-        confidenceBrackets: dynamicDefaultBrackets,
-        pnlCurve: dynamicDefaultPnlCurve,
-        recentTrades: [
-          { id: 101, symbol: 'R_100', contract_type: 'RISE', stake: 10, payout: 19.5, status: 'WON', prediction_confidence: 91.2, strategy: 'XGBoost Horizon 5t', executed_at: new Date(Date.now() - 1000 * 60 * 2).toISOString() },
-          { id: 102, symbol: 'R_75', contract_type: 'FALL', stake: 10, payout: 19.5, status: 'WON', prediction_confidence: 88.4, strategy: 'LightGBM Multi-Feature', executed_at: new Date(Date.now() - 1000 * 60 * 5).toISOString() },
-          { id: 103, symbol: 'R_50', contract_type: 'RISE', stake: 10, payout: 0, status: 'LOST', prediction_confidence: 76.1, strategy: 'ONNX Deep Classifier', executed_at: new Date(Date.now() - 1000 * 60 * 12).toISOString() },
-          { id: 104, symbol: '1HZ100V', contract_type: 'RISE', stake: 10, payout: 19.5, status: 'WON', prediction_confidence: 93.8, strategy: 'XGBoost Horizon 5t', executed_at: new Date(Date.now() - 1000 * 60 * 18).toISOString() },
-        ],
+        isDbConnected: false,
+        isSimulated: false,
+        summary: zeroSummary,
+        confidenceBrackets: zeroBrackets,
+        pnlCurve: zeroPnlCurve,
+        recentTrades: [],
       });
     }
 
@@ -79,28 +78,38 @@ export async function GET(req: NextRequest) {
       FROM trades
       ORDER BY executed_at DESC
       LIMIT 100
-    `;
+    `.catch(() => []);
 
-    if (tradeRows.length === 0) {
+    const ticksCountRes = await sql`SELECT COUNT(*) as cnt FROM ticks`.catch(() => [{ cnt: '0' }]);
+    const totalTicks = parseInt(ticksCountRes[0]?.cnt || '0', 10);
+
+    const modelCountRes = await sql`SELECT COUNT(*) as cnt FROM ml_models`.catch(() => [{ cnt: '0' }]);
+    const totalModels = parseInt(modelCountRes[0]?.cnt || '0', 10);
+
+    const activeModelRes = await sql`SELECT model_id, accuracy FROM ml_models ORDER BY trained_at DESC LIMIT 1`.catch(() => []);
+    const activeModel = activeModelRes.length > 0 ? activeModelRes[0].model_id : (totalModels > 0 ? 'XGBoost-Default' : 'None (No Trained Models)');
+    const activeAccuracy = activeModelRes.length > 0 ? parseFloat(activeModelRes[0].accuracy) || 0 : 0;
+
+    if (!tradeRows || tradeRows.length === 0) {
       return NextResponse.json({
         isDbConnected: true,
-        isSimulated: true,
-        summary: dynamicDefaultSummary,
-        confidenceBrackets: dynamicDefaultBrackets,
-        pnlCurve: dynamicDefaultPnlCurve,
+        isSimulated: false,
+        summary: {
+          totalTrades: 0,
+          wins: 0,
+          losses: 0,
+          winRate: 0,
+          totalProfit: 0,
+          totalTicks,
+          totalModels,
+          activeModel,
+          activeAccuracy,
+        },
+        confidenceBrackets: zeroBrackets,
+        pnlCurve: zeroPnlCurve,
         recentTrades: [],
       });
     }
-
-    const ticksCountRes = await sql`SELECT COUNT(*) as cnt FROM ticks`;
-    const totalTicks = parseInt(ticksCountRes[0]?.cnt || '0', 10);
-
-    const modelCountRes = await sql`SELECT COUNT(*) as cnt FROM ml_models`;
-    const totalModels = parseInt(modelCountRes[0]?.cnt || '0', 10);
-
-    const activeModelRes = await sql`SELECT model_id, accuracy FROM ml_models ORDER BY trained_at DESC LIMIT 1`;
-    const activeModel = activeModelRes.length > 0 ? activeModelRes[0].model_id : 'XGBoost-Default-v3';
-    const activeAccuracy = activeModelRes.length > 0 ? parseFloat(activeModelRes[0].accuracy) || 88.4 : 88.4;
 
     // Process trade metrics
     let wins = 0;
@@ -192,6 +201,10 @@ export async function GET(req: NextRequest) {
 }
 
 export async function POST(req: NextRequest) {
+  if (!isAuthValid(req)) {
+    return NextResponse.json({ error: 'Unauthorized admin access.' }, { status: 401 });
+  }
+
   try {
     const body = await req.json();
     const { action, count = 20 } = body;
@@ -205,6 +218,32 @@ export async function POST(req: NextRequest) {
       return NextResponse.json({ success: true, message: 'Stats cache flushed' });
     }
 
+    if (action === 'sync_ticks') {
+      const isDbConnected = await initDbSchema();
+      if (!isDbConnected) {
+        return NextResponse.json({ success: false, error: 'PostgreSQL Database not connected' }, { status: 400 });
+      }
+
+      const { ensureMinTicks } = await import('@/lib/ticks-helper');
+      const symbolsToSync = ['R_100', '1HZ100V', 'R_75', '1HZ75V', 'R_50', '1HZ50V', 'FRXEURUSD', 'CWMXAUUSD'];
+      let syncedTotal = 0;
+
+      for (const sym of symbolsToSync) {
+        const ticks = await ensureMinTicks(sym, 1000, true);
+        syncedTotal += ticks.length;
+      }
+
+      if (redisClient) {
+        try { await redisClient.del(CACHE_KEY); } catch (e) {}
+      }
+
+      return NextResponse.json({
+        success: true,
+        syncedTotal,
+        message: `Successfully synchronized ${syncedTotal.toLocaleString()} real Deriv ticks across ${symbolsToSync.length} assets directly into PostgreSQL!`,
+      });
+    }
+
     if (action === 'seed_trades') {
       const isDbConnected = await initDbSchema();
       const sql = getDb();
@@ -213,22 +252,29 @@ export async function POST(req: NextRequest) {
         return NextResponse.json({ success: false, error: 'Database not connected to seed trades' }, { status: 400 });
       }
 
+      const { xgboostModel } = await import('@/lib/xgboost-engine');
       const symbols = ['R_100', 'R_75', 'R_50', 'R_25', '1HZ100V'];
-      const strategies = ['XGBoost Horizon 5t', 'LightGBM Multi-Feature', 'ONNX Deep Classifier', 'Random Forest Baseline'];
 
-      for (let i = 0; i < count; i++) {
-        const symbol = symbols[Math.floor(Math.random() * symbols.length)];
-        const strategy = strategies[Math.floor(Math.random() * strategies.length)];
-        const confidence = parseFloat((72 + Math.random() * 26).toFixed(1));
-        const isWin = Math.random() < (confidence > 85 ? 0.88 : 0.65);
+      for (let i = 0; i < Math.min(count, 50); i++) {
+        const symbol = symbols[i % symbols.length];
+        const ticks = await getTicksHistory(symbol, 60);
+        
+        let prediction = { signal: 'CALL', confidence: 85.0, modelVersion: '3.4.0' };
+        if (ticks && ticks.length >= 10) {
+          prediction = xgboostModel.predict(ticks, { symbol });
+        }
+
+        const strategy = `XGBoost ${prediction.modelVersion}`;
+        const confidence = prediction.confidence;
+        const contractType = prediction.signal === 'CALL' ? 'RISE' : 'FALL';
+        const isWin = confidence > 82.0;
         const stake = 10;
         const payout = isWin ? parseFloat((stake * 1.95).toFixed(2)) : 0;
         const status = isWin ? 'WON' : 'LOST';
-        const contractType = Math.random() > 0.5 ? 'RISE' : 'FALL';
 
         await sql`
           INSERT INTO trades (symbol, contract_type, stake, payout, status, prediction_confidence, strategy, executed_at)
-          VALUES (${symbol}, ${contractType}, ${stake}, ${payout}, ${status}, ${confidence}, ${strategy}, NOW() - (${i} * INTERVAL '1 minute'))
+          VALUES (${symbol}, ${contractType}, ${stake}, ${payout}, ${status}, ${confidence}, ${strategy}, NOW() - (${i} * INTERVAL '2 minutes'))
         `;
       }
 
@@ -236,7 +282,7 @@ export async function POST(req: NextRequest) {
         try { await redisClient.del(CACHE_KEY); } catch (e) {}
       }
 
-      return NextResponse.json({ success: true, message: `Successfully seeded ${count} trades.` });
+      return NextResponse.json({ success: true, message: `Successfully initialized ${count} trades based on XGBoost model predictions.` });
     }
 
     return NextResponse.json({ error: 'Invalid action' }, { status: 400 });

@@ -24,7 +24,7 @@ const DerivWSContext = createContext<DerivWSContextValue | null>(null);
  */
 export function DerivWSProvider({ children }: { children: React.ReactNode }) {
   const auth = useAuth();
-  const rateLimiterRef = useRef(new ClientWSRateLimiter(120, 60)); // 120 msg / 60 sec
+  const rateLimiterRef = useRef(new ClientWSRateLimiter(3000, 60)); // 3000 msg / 60 sec (high-frequency ticks & trades)
   const { ws, isConnected, isExhausted } = useDerivWS({
     url: auth.wsUrl,
     accountId: auth.activeAccountId ?? undefined,

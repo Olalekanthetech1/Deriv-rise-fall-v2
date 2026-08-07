@@ -15,11 +15,19 @@ export async function GET(req: NextRequest) {
     if (sql && isConnected) {
       try {
         const lastLog = await sql`
-          SELECT trained_at FROM ml_models ORDER BY trained_at DESC LIMIT 1
+          SELECT created_at AS trained_at FROM ml_training_logs ORDER BY created_at DESC LIMIT 1
         `;
         if (lastLog.length > 0) {
           lastTrainedAt = new Date(lastLog[0].trained_at).toISOString();
-          timeSinceLastTrainMs = Date.now() - new Date(lastLog[0].trained_at).getTime();
+          timeSinceLastTrainMs = Math.max(0, Date.now() - new Date(lastLog[0].trained_at).getTime());
+        } else {
+          const lastModel = await sql`
+            SELECT trained_at FROM ml_models ORDER BY trained_at DESC LIMIT 1
+          `;
+          if (lastModel.length > 0) {
+            lastTrainedAt = new Date(lastModel[0].trained_at).toISOString();
+            timeSinceLastTrainMs = Math.max(0, Date.now() - new Date(lastModel[0].trained_at).getTime());
+          }
         }
       } catch (e) {
         console.warn('[Cron Check Log Error]:', e);
@@ -32,7 +40,7 @@ export async function GET(req: NextRequest) {
     return NextResponse.json({
       status: 'active',
       scheduleIntervalHours: 6,
-      lastTrainedAt: lastTrainedAt || 'Not trained yet',
+      lastTrainedAt: lastTrainedAt || null,
       timeSinceLastTrainMinutes: lastTrainedAt ? Math.floor(timeSinceLastTrainMs / 60000) : null,
       isDue,
       nextScheduledRunInMinutes: Math.ceil(nextDueInMs / 60000),
@@ -55,7 +63,7 @@ export async function POST(req: NextRequest) {
     if (sql && !force) {
       try {
         const lastLog = await sql`
-          SELECT trained_at FROM ml_models ORDER BY trained_at DESC LIMIT 1
+          SELECT created_at AS trained_at FROM ml_training_logs ORDER BY created_at DESC LIMIT 1
         `;
         if (lastLog.length > 0) {
           lastTrainedAt = new Date(lastLog[0].trained_at);
@@ -79,15 +87,17 @@ export async function POST(req: NextRequest) {
       });
     }
 
-    // Execute retrain across all primary active assets systematically
+    // Execute retrain across all primary active assets systematically using real Deriv ticks
+    const { ensureMinTicks } = await import('@/lib/ticks-helper');
     const currentHyperparams = xgboostModel.getHyperparameters();
     const primarySymbols = ['R_100', '1HZ100V', 'R_75', '1HZ75V', 'R_50', '1HZ50V', 'R_25', '1HZ25V', 'R_10', '1HZ10V', 'FRXEURUSD', 'FRXGBPUSD', 'FRXUSDJPY', 'CWMXAUUSD'];
     const cronResults: any[] = [];
 
     for (const sym of primarySymbols) {
-      const dbTicks = await getTicksHistory(sym, 500);
+      // Cold-start real Deriv WebSocket ticks (up to 500 ticks)
+      const dbTicks = await ensureMinTicks(sym, 500);
 
-      if (!dbTicks || dbTicks.length < 50) {
+      if (!dbTicks || dbTicks.length < 20) {
         console.warn(`[Cron] Skipping ${sym}, insufficient ticks: ${dbTicks?.length || 0}`);
         continue;
       }
