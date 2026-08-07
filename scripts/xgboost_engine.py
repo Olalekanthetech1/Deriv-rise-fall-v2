@@ -1,6 +1,5 @@
 """Production ML daemon entrypoint."""
-from ml_runtime_entry import *
+from ml_runtime_entry import main
 
 if __name__ == "__main__":
-    # ml_runtime_entry starts the dispatcher after applying the sequence-training patch.
-    pass
+    main()
