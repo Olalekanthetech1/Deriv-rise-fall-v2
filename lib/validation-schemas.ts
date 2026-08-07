@@ -2,24 +2,23 @@ import { z } from 'zod';
 
 export const PredictSchema = z.object({
   symbol: z.string().regex(/^[A-Za-z0-9_]+$/).max(50).default('R_100'),
-  ticks: z.array(
-    z.object({
-      price: z.number(),
-      timestamp: z.number().int().positive().optional(),
-    })
-  ).optional().default([]),
+  ticks: z.array(z.object({ price: z.number().finite(), timestamp: z.number().int().positive().optional() })).optional().default([]),
   durationSecs: z.number().int().min(1).max(3600).default(5),
-  assetCategory: z.number().int().optional().default(0),
+  assetCategory: z.number().int().min(0).max(2).optional().default(0),
 });
 
 export const TrainSchema = z.object({
   symbol: z.string().regex(/^[A-Za-z0-9_]+$/).max(50).default('R_100'),
   category: z.string().optional(),
   retrainAll: z.boolean().optional().default(false),
-  maxDepth: z.number().int().optional().default(6),
-  learningRate: z.number().optional().default(0.05),
-  numEstimators: z.number().int().optional().default(100),
-  subsample: z.number().optional().default(0.8),
+  modelType: z.enum(['xgboost','lightgbm','catboost','tcn','lstm','transformer','hmm','isolation_forest','all']).default('xgboost'),
+  durationSecs: z.number().int().min(1).max(3600).default(5),
+  maxDepth: z.number().int().min(2).max(12).default(6),
+  learningRate: z.number().min(0.0001).max(1).default(0.05),
+  numEstimators: z.number().int().min(10).max(1000).default(100),
+  subsample: z.number().min(0.5).max(1).default(0.8),
+  epochs: z.number().int().min(1).max(100).default(8),
+  batchSize: z.number().int().min(8).max(512).default(64),
 });
 
 export const BacktestSchema = z.object({
