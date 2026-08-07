@@ -4,5 +4,6 @@ xgboost
 lightgbm
 catboost
 hmmlearn
+torch
 onnxmltools
 onnxruntime
