@@ -28,11 +28,13 @@ import { EnvCheck } from './env-check';
 export function TemplateLayout({ children }: { children: React.ReactNode }) {
   return (
     <Providers>
-      <DerivWSProvider>
-        <ViewportScaler>{children}</ViewportScaler>
-      </DerivWSProvider>
-      <Toaster />
-      <EnvCheck />
+      <>
+        <DerivWSProvider>
+          <ViewportScaler>{children}</ViewportScaler>
+        </DerivWSProvider>
+        <Toaster />
+        <EnvCheck />
+      </>
     </Providers>
   );
 }

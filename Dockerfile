@@ -1,5 +1,5 @@
 FROM node:20-alpine AS base
-RUN apk add --no-cache python3 py3-pip py3-numpy py3-scikit-learn build-base libc6-compat
+RUN apk add --no-cache python3 python3-dev py3-pip py3-numpy py3-scikit-learn build-base libc6-compat
 WORKDIR /app
 COPY requirements.txt ./
 RUN pip3 install --no-cache-dir -r requirements.txt --break-system-packages
