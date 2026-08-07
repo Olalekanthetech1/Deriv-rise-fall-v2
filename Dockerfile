@@ -16,7 +16,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     && rm -rf /var/lib/apt/lists/*
 
 # ------------------------------------------------------------
-# Create isolated Python environment
+# Create isolated Python virtual environment
 # ------------------------------------------------------------
 RUN python3 -m venv /opt/venv
 
@@ -50,38 +50,55 @@ FROM base AS deps
 WORKDIR /app
 
 # ------------------------------------------------------------
-# Copy dependency manifests first
+# Copy package manifest
+#
+# IMPORTANT:
+# This project currently does NOT have package-lock.json,
+# therefore use npm install rather than npm ci.
 # ------------------------------------------------------------
-COPY package.json package-lock.json ./
+COPY package.json ./
 
 # Workspace/package manifest
 COPY packages/core/package.json ./packages/core/package.json
 
 # ------------------------------------------------------------
-# Install Node dependencies WITHOUT lifecycle scripts.
+# Copy scripts BEFORE npm install.
 #
-# This is important because package.json contains:
+# package.json contains:
 #
 # "postinstall": "node scripts/copy-smartcharts-assets.js"
 #
-# We intentionally wait until scripts/ and packages/ exist.
-# ------------------------------------------------------------
-RUN npm ci --ignore-scripts
-
-# ------------------------------------------------------------
-# Now copy the files required by postinstall
+# Therefore the scripts directory must exist before npm
+# lifecycle scripts are allowed to execute.
 # ------------------------------------------------------------
 COPY scripts ./scripts
+
+# ------------------------------------------------------------
+# Copy packages required by the project
+# ------------------------------------------------------------
 COPY packages ./packages
 
 # ------------------------------------------------------------
-# Run the project's postinstall AFTER the required files exist
+# Install Node dependencies.
+#
+# --ignore-scripts prevents postinstall from executing during
+# dependency installation.
+# ------------------------------------------------------------
+RUN npm install --ignore-scripts
+
+# ------------------------------------------------------------
+# Now run the project's postinstall explicitly.
+#
+# At this point:
+#   /app/scripts exists
+#   /app/packages exists
+#   /app/node_modules exists
 # ------------------------------------------------------------
 RUN npm run postinstall
 
 
 # ============================================================
-# STEP 2 — NEXT.JS BUILD
+# STEP 2 — NEXT.JS BUILDER
 # ============================================================
 FROM base AS builder
 
@@ -92,16 +109,19 @@ WORKDIR /app
 # ------------------------------------------------------------
 COPY --from=deps /app/node_modules ./node_modules
 
-# Copy package manifests
+# ------------------------------------------------------------
+# Copy package configuration
+# ------------------------------------------------------------
 COPY --from=deps /app/package.json ./package.json
-COPY --from=deps /app/package-lock.json ./package-lock.json
 
-# Copy packages and scripts already prepared by deps stage
+# ------------------------------------------------------------
+# Copy packages and scripts prepared by deps stage
+# ------------------------------------------------------------
 COPY --from=deps /app/packages ./packages
 COPY --from=deps /app/scripts ./scripts
 
 # ------------------------------------------------------------
-# Copy remaining application source
+# Copy the rest of the application
 # ------------------------------------------------------------
 COPY . .
 
@@ -133,11 +153,11 @@ ENV NEXT_PUBLIC_FONT_FAMILY=$NEXT_PUBLIC_FONT_FAMILY
 # ------------------------------------------------------------
 # Next.js production configuration
 # ------------------------------------------------------------
-ENV NEXT_TELEMETRY_DISABLED=1
 ENV NODE_ENV=production
+ENV NEXT_TELEMETRY_DISABLED=1
 
 # ------------------------------------------------------------
-# Build Next.js
+# Build application
 # ------------------------------------------------------------
 RUN npm run build
 
@@ -159,45 +179,39 @@ ENV HOSTNAME=0.0.0.0
 ENV PATH="/opt/venv/bin:$PATH"
 
 # ------------------------------------------------------------
-# Create non-root user
+# Create non-root runtime user
 # ------------------------------------------------------------
 RUN groupadd --system --gid 1001 nodejs && \
     useradd --system --uid 1001 --gid nodejs nextjs
 
 # ------------------------------------------------------------
-# Next.js production files
+# Next.js production output
 # ------------------------------------------------------------
 COPY --from=builder /app/public ./public
 COPY --from=builder /app/.next ./.next
 
+# ------------------------------------------------------------
 # Node dependencies
+# ------------------------------------------------------------
 COPY --from=builder /app/node_modules ./node_modules
 
+# ------------------------------------------------------------
 # Application metadata
+# ------------------------------------------------------------
 COPY --from=builder /app/package.json ./package.json
-COPY --from=builder /app/package-lock.json ./package-lock.json
 
 # ------------------------------------------------------------
-# Application packages/scripts
-#
-# Keep these if your runtime/API routes or postinstall-generated
-# assets depend on them.
+# Application packages
 # ------------------------------------------------------------
 COPY --from=builder /app/packages ./packages
+
+# ------------------------------------------------------------
+# Scripts
+# ------------------------------------------------------------
 COPY --from=builder /app/scripts ./scripts
 
 # ------------------------------------------------------------
-# If your application has Python runtime files, copy them here.
-#
-# Adjust this section if your repository uses a specific
-# Python service directory such as /ml, /python, /api/ml, etc.
-# ------------------------------------------------------------
-
-# Example:
-# COPY --from=builder /app/ml ./ml
-
-# ------------------------------------------------------------
-# Give application directory ownership to runtime user
+# Ensure runtime user owns application files
 # ------------------------------------------------------------
 RUN chown -R nextjs:nodejs /app
 
