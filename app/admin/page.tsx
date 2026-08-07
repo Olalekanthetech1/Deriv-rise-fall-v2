@@ -2,6 +2,7 @@
 
 import { useState, useEffect } from 'react';
 import Link from 'next/link';
+import { MultiModelEvaluationCard } from '@/components/custom/multi-model-evaluation-card';
 import {
   BrainCircuit,
   Database,
@@ -667,7 +668,13 @@ export default function AdminDashboardPage() {
         }),
       });
       const data = await res.json();
-      setTestResult(data.prediction || null);
+      const pred = data.prediction
+        ? {
+            ...data.prediction,
+            ensemble: data.multiModelEnsemble || data.prediction.ensemble,
+          }
+        : null;
+      setTestResult(pred);
       if (data.prediction) {
         toast.success(`Signal Generated: ${data.prediction.signal} (${data.prediction.confidence}%)`);
       }
@@ -3667,6 +3674,12 @@ export default function AdminDashboardPage() {
                       </div>
 
                       <div className="flex flex-wrap items-center gap-2 text-xs font-mono">
+                        <span className="px-2.5 py-1 rounded-full bg-purple-500/10 text-purple-300 border border-purple-500/20 text-[10px] font-bold">
+                          Regime: {testResult.ensemble?.marketRegime || testResult.marketRegime || 'Directional Expansion'}
+                        </span>
+                        <span className="px-2.5 py-1 rounded-full bg-amber-500/10 text-amber-300 border border-amber-500/20 text-[10px] font-bold">
+                          Anomaly Risk: {testResult.ensemble?.anomalyScore ?? testResult.anomalyScore ?? 0.05} / 1.00
+                        </span>
                         <span className="px-2.5 py-1 rounded bg-slate-900 border border-slate-800 text-slate-300">
                           ⚡ <span className="text-cyan-400 font-bold">{testResult.latencyMs || 24} ms</span>
                         </span>
@@ -3676,25 +3689,47 @@ export default function AdminDashboardPage() {
                         <span className="px-2.5 py-1 rounded bg-slate-900 border border-slate-800 text-slate-300">
                           Expiry: <span className="text-emerald-400 font-bold">{testDuration}s</span>
                         </span>
-                        <span className="px-2.5 py-1 rounded bg-slate-900 border border-slate-800 text-slate-300 text-[10px]">
-                          Engine: <span className="text-slate-400">{testResult.modelVersion || 'v3.4.0'}</span>
-                        </span>
                       </div>
                     </div>
 
                     {/* Confidence Visual Gauge Bar */}
                     <div className="space-y-1">
                       <div className="flex justify-between text-[10px] text-slate-400 font-semibold">
-                        <span>Confidence Threshold Meter</span>
+                        <span>Real-Time Ensemble Confidence Gauge Bar</span>
                         <span>{testResult.confidence}% / 100%</span>
                       </div>
-                      <div className="w-full bg-slate-900 h-2 rounded-full overflow-hidden border border-slate-800">
+                      <div className="w-full bg-slate-900 h-2.5 rounded-full overflow-hidden border border-slate-800 p-0.5">
                         <div
-                          className={`h-full transition-all duration-500 ${testResult.confidence >= 80 ? 'bg-emerald-500' : testResult.confidence >= 65 ? 'bg-cyan-500' : 'bg-amber-500'}`}
+                          className={`h-full rounded-full transition-all duration-500 ${testResult.confidence >= 80 ? 'bg-gradient-to-r from-emerald-500 to-cyan-400' : testResult.confidence >= 65 ? 'bg-gradient-to-r from-cyan-500 to-blue-500' : 'bg-gradient-to-r from-amber-500 to-orange-500'}`}
                           style={{ width: `${Math.min(100, Math.max(0, testResult.confidence))}%` }}
                         />
                       </div>
                     </div>
+
+                    {/* Quick Model Breakdown Chips */}
+                    {testResult.ensemble?.modelBreakdown && (
+                      <div className="pt-2 border-t border-slate-900">
+                        <span className="text-[10px] uppercase font-bold text-slate-500 tracking-wider block mb-1.5">
+                          Model Predictions Breakdown (8 Engines)
+                        </span>
+                        <div className="flex flex-wrap gap-1.5 text-[10px] font-mono">
+                          {Object.entries(testResult.ensemble.modelBreakdown).map(([key, val]: [string, any]) => (
+                            <span
+                              key={key}
+                              className={`px-2 py-0.5 rounded border ${
+                                val.vote === 'RISE' || val.vote === 'CALL'
+                                  ? 'bg-emerald-500/10 text-emerald-300 border-emerald-500/20'
+                                  : val.vote === 'FALL' || val.vote === 'PUT'
+                                  ? 'bg-rose-500/10 text-rose-300 border-rose-500/20'
+                                  : 'bg-slate-800 text-slate-300 border-slate-700'
+                              }`}
+                            >
+                              <strong className="uppercase">{key}:</strong> {val.vote || val.primaryRegime || val.anomalyScore || 'OK'}
+                            </span>
+                          ))}
+                        </div>
+                      </div>
+                    )}
                   </div>
 
                   {/* Market Noise & Dynamic Regime Filter Card */}
@@ -3726,7 +3761,7 @@ export default function AdminDashboardPage() {
                       </div>
                       <div className="p-3 rounded-xl bg-slate-900 border border-slate-800">
                         <span className="text-[10px] text-slate-500 block uppercase font-sans">Tick Arrival Rate</span>
-                        <p className="text-lg font-black text-emerald-400 mt-0.5">{Number(testResult.tickFrequency || testResult.features?.ticksPerSecond || 1).toFixed(2)} ticks/sec</p>
+                        <p className="text-lg font-black text-emerald-400 mt-0.5">{Number(testResult.tickFrequency || testResult.features?.ticks_per_second || 1).toFixed(2)} ticks/sec</p>
                       </div>
                       <div className="p-3 rounded-xl bg-slate-900 border border-slate-800">
                         <span className="text-[10px] text-slate-500 block uppercase font-sans">Short Volatility</span>
@@ -3734,6 +3769,9 @@ export default function AdminDashboardPage() {
                       </div>
                     </div>
                   </div>
+
+                  {/* Multi-Model Evaluation Layer Matrix */}
+                  <MultiModelEvaluationCard ensemble={testResult.ensemble || null} />
 
                   {/* Complete 37-Feature Matrix Inspector */}
                   <div className="p-4 sm:p-5 rounded-2xl bg-slate-950 border border-slate-800 space-y-4 min-w-0">

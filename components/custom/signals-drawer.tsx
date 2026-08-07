@@ -1,6 +1,6 @@
 'use client';
 
-import { useState } from 'react';
+import { useState, useEffect } from 'react';
 import {
   Radio,
   X,
@@ -17,9 +17,14 @@ import {
   Clock,
   Target,
   Layers,
+  Cpu,
+  BrainCircuit,
+  RefreshCw,
 } from 'lucide-react';
 import type { ActiveSymbol } from '@deriv/core';
 import type { TradeSignal, DurationPrediction } from '@/hooks/use-realtime-signals';
+import { MultiModelEvaluationCard } from './multi-model-evaluation-card';
+import { EnsembleEvaluationResult } from '@/lib/multi-model-evaluator';
 
 interface SignalsDrawerProps {
   isOpen: boolean;
@@ -52,6 +57,39 @@ export function SignalsDrawer({
 }: SignalsDrawerProps) {
   const [executingId, setExecutingId] = useState<string | null>(null);
   const [selectedDurationFilter, setSelectedDurationFilter] = useState<string>('ALL');
+  const [activeTab, setActiveTab] = useState<'signals' | 'multimodel'>('signals');
+  const [ensembleData, setEnsembleData] = useState<EnsembleEvaluationResult | null>(null);
+  const [isEvaluating, setIsEvaluating] = useState<boolean>(false);
+
+  useEffect(() => {
+    if (isOpen && activeTab === 'multimodel') {
+      fetchEnsembleData();
+    }
+  }, [isOpen, activeTab, activeSymbol]);
+
+  const fetchEnsembleData = async () => {
+    setIsEvaluating(true);
+    try {
+      const sym = activeSymbol?.underlying_symbol || 'R_100';
+      const res = await fetch('/api/ml/predict', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          symbol: sym,
+          durationSecs: 5,
+          assetCategory: sym.startsWith('FRX') ? 1 : 0,
+        }),
+      });
+      const data = await res.json();
+      if (data.multiModelEnsemble) {
+        setEnsembleData(data.multiModelEnsemble);
+      }
+    } catch (err) {
+      console.warn('[Ensemble Fetch Error]:', err);
+    } finally {
+      setIsEvaluating(false);
+    }
+  };
 
   if (!isOpen) return null;
 
@@ -180,6 +218,53 @@ export function SignalsDrawer({
             <Activity className="w-3.5 h-3.5" /> Tick Engine Active
           </span>
         </div>
+
+        {/* Tab Switcher: Signals vs Multi-Model Evaluator */}
+        <div className="grid grid-cols-2 gap-2 p-1 rounded-2xl bg-slate-950 border border-slate-800">
+          <button
+            type="button"
+            onClick={() => setActiveTab('signals')}
+            className={`py-2 px-3 rounded-xl text-xs font-bold transition-all flex items-center justify-center gap-2 ${
+              activeTab === 'signals'
+                ? 'bg-cyan-500/20 text-cyan-300 border border-cyan-500/40 shadow-lg'
+                : 'text-slate-400 hover:text-white'
+            }`}
+          >
+            <Radio className="w-3.5 h-3.5" />
+            <span>AI Trade Signals</span>
+          </button>
+          <button
+            type="button"
+            onClick={() => setActiveTab('multimodel')}
+            className={`py-2 px-3 rounded-xl text-xs font-bold transition-all flex items-center justify-center gap-2 ${
+              activeTab === 'multimodel'
+                ? 'bg-purple-500/20 text-purple-300 border border-purple-500/40 shadow-lg'
+                : 'text-slate-400 hover:text-white'
+            }`}
+          >
+            <Cpu className="w-3.5 h-3.5" />
+            <span>Multi-Model Layer</span>
+          </button>
+        </div>
+
+        {activeTab === 'multimodel' ? (
+          <div className="space-y-3">
+            <div className="flex items-center justify-between pt-1">
+              <span className="text-xs text-slate-400 font-medium">6 Modular AI Engines &amp; Regime Matrix</span>
+              <button
+                type="button"
+                onClick={fetchEnsembleData}
+                disabled={isEvaluating}
+                className="text-[11px] font-bold text-cyan-400 hover:text-cyan-300 flex items-center gap-1"
+              >
+                <RefreshCw className={`w-3 h-3 ${isEvaluating ? 'animate-spin' : ''}`} />
+                <span>Refresh Matrix</span>
+              </button>
+            </div>
+            <MultiModelEvaluationCard ensemble={ensembleData} />
+          </div>
+        ) : (
+          <>
 
         {/* Duration Matrix Filter Pills */}
         <div className="flex items-center gap-1.5 overflow-x-auto pb-1 scrollbar-none">
@@ -406,7 +491,10 @@ export function SignalsDrawer({
             })
           )}
         </div>
+        </>
+        )}
       </div>
     </div>
   );
 }
+

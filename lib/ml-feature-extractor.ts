@@ -10,50 +10,52 @@ export interface FeatureExtractionOptions {
 }
 
 export interface EngineeredTickFeatures {
-  // Micro Horizon (5 Ticks)
-  micro_momentum: number;
-  micro_velocity: number;
-  micro_upDownRatio: number;
-  micro_persistence: number;
+  // --- Pillar 1: Price Behaviour (1-10) ---
+  deltaP1: number;              // ΔP (1-tick price change)
+  deltaP2: number;              // ΔP₂ (2-tick price change)
+  deltaP3: number;              // ΔP₃ (3-tick price change)
+  micro_momentum: number;       // 5-tick rate of change (%)
+  short_momentum: number;       // 25-tick rate of change (%)
+  medium_momentum: number;      // 100-tick rate of change (%)
+  macro_momentum: number;       // 300-tick rate of change (%)
+  short_range: number;          // 25-tick High - Low range
+  medium_displacement: number;  // Net displacement over 100 ticks
+  macro_displacement: number;   // Net displacement over 300 ticks
 
-  // Short Horizon (25 Ticks)
-  short_momentum: number;
-  short_velocity: number;
-  short_acceleration: number;
-  short_upDownRatio: number;
-  short_persistence: number;
-  short_reversalFreq: number;
-  short_volatility: number;
-  short_rangeCompression: number;
+  // --- Pillar 2: Tick Pressure & Sequencing (11-19) ---
+  up_tick_ratio: number;        // Overall percentage of upward ticks
+  down_tick_ratio: number;      // Overall percentage of downward ticks
+  directional_imbalance: number; // (up - down) / total imbalance [-1 to +1]
+  consecutive_up: number;       // Active streak of consecutive UP ticks
+  consecutive_down: number;     // Active streak of consecutive DOWN ticks
+  micro_persistence: number;    // Max consecutive streak ratio (5 ticks)
+  short_persistence: number;    // Max consecutive streak ratio (25 ticks)
+  short_reversal_rate: number;  // Direction flip frequency over 25 ticks
+  medium_reversal_rate: number; // Direction flip frequency over 100 ticks
 
-  // Medium Horizon (100 Ticks)
-  medium_momentum: number;
-  medium_velocity: number;
-  medium_upDownRatio: number;
-  medium_persistence: number;
-  medium_reversalFreq: number;
-  medium_volatility: number;
-  medium_displacement: number;
-  medium_distHigh: number;
-  medium_distLow: number;
+  // --- Pillar 3: Tick Velocity & Acceleration (20-25) ---
+  micro_velocity: number;       // Price change per tick over 5 ticks
+  short_velocity: number;       // Price change per tick over 25 ticks
+  medium_velocity: number;      // Price change per tick over 100 ticks
+  acceleration: number;         // d²P/dt² (rate of speed change between window halves)
+  ticks_per_second: number;     // Tick arrival frequency per second
+  velocity_per_second: number;  // Price change per second (dP/dt)
 
-  // Macro Horizon (300 Ticks)
-  macro_momentum: number;
-  macro_upDownRatio: number;
-  macro_persistence: number;
-  macro_volatility: number;
-  macro_displacement: number;
-  macro_regime: number; // 1.0 = Bullish, -1.0 = Bearish, 0.0 = Neutral
+  // --- Pillar 4: Short / Medium / Macro Volatility (26-31) ---
+  short_volatility: number;     // 25-tick windowed standard deviation
+  medium_volatility: number;    // 100-tick windowed standard deviation
+  macro_volatility: number;     // 300-tick windowed standard deviation
+  short_rangeCompression: number; // Relative position in 25-tick range [0..1]
+  medium_distHigh: number;      // Distance to 100-tick peak
+  medium_distLow: number;       // Distance to 100-tick floor
 
-  // Metadata & Digit Analysis
-  is1SecondSynthetic: number; // 1.0 or 0.0
-  velocityPerSecond: number;
-  ticksPerSecond: number;
-  elapsedTime300Sec: number;
-  contractDurationSecs: number;
-  durationFactor: number;
-  digitFrequency: number; // Last digit even/odd ratio
-  assetCategory: number;
+  // --- Contextual & Regime Metadata (32-37) ---
+  macro_regime: number;         // Market regime classification (+1 Bull, -1 Bear, 0 Range)
+  is1SecondSynthetic: number;   // Flag for 1-second synthetic indices (1.0 or 0.0)
+  contractDurationSecs: number; // Contract duration in seconds
+  durationFactor: number;       // Log-scaled duration factor
+  digitFrequency: number;       // Last digit even/odd bias ratio
+  assetCategory: number;        // Asset category encoder (0=Synthetic, 1=Forex, 2=Metals)
 }
 
 export function extract37TickFeatures(
@@ -75,6 +77,16 @@ export function extract37TickFeatures(
   // Helper calculation functions
   const getSubArray = (count: number) => prices.slice(Math.max(0, totalCount - count));
 
+  // --- Pillar 1 Calculations: Price Behaviour ---
+  const pN = prices[totalCount - 1] || 0;
+  const pN1 = prices[totalCount - 2] ?? pN;
+  const pN2 = prices[totalCount - 3] ?? pN1;
+  const pN3 = prices[totalCount - 4] ?? pN2;
+
+  const deltaP1 = pN - pN1; // ΔP
+  const deltaP2 = pN - pN2; // ΔP₂
+  const deltaP3 = pN - pN3; // ΔP₃
+
   const calcMomentum = (arr: number[]) => {
     if (arr.length < 2) return 0;
     const start = arr[0];
@@ -86,14 +98,40 @@ export function extract37TickFeatures(
     return (arr[arr.length - 1] - arr[0]) / arr.length;
   };
 
-  const calcUpDownRatio = (arr: number[]) => {
-    if (arr.length < 2) return 0.5;
-    let up = 0;
-    for (let i = 1; i < arr.length; i++) {
-      if (arr[i] > arr[i - 1]) up++;
-    }
-    return up / (arr.length - 1);
+  const calcVolatility = (arr: number[]) => {
+    if (arr.length < 2) return 0;
+    const mean = arr.reduce((a, b) => a + b, 0) / arr.length;
+    const variance = arr.reduce((a, b) => a + Math.pow(b - mean, 2), 0) / arr.length;
+    return Math.sqrt(variance);
   };
+
+  // --- Pillar 2 Calculations: Tick Pressure & Sequencing ---
+  let upCount = 0;
+  let downCount = 0;
+  for (let i = 1; i < prices.length; i++) {
+    if (prices[i] > prices[i - 1]) upCount++;
+    else if (prices[i] < prices[i - 1]) downCount++;
+  }
+  const totalDiffs = Math.max(1, prices.length - 1);
+  const up_tick_ratio = upCount / totalDiffs;
+  const down_tick_ratio = downCount / totalDiffs;
+  const directional_imbalance = (upCount - downCount) / totalDiffs;
+
+  // Active consecutive streaks
+  let consecutive_up = 0;
+  let consecutive_down = 0;
+  for (let i = prices.length - 1; i >= 1; i--) {
+    const diff = prices[i] - prices[i - 1];
+    if (diff > 0) {
+      if (consecutive_down > 0) break;
+      consecutive_up++;
+    } else if (diff < 0) {
+      if (consecutive_up > 0) break;
+      consecutive_down++;
+    } else {
+      break;
+    }
+  }
 
   const calcPersistence = (arr: number[]) => {
     if (arr.length < 2) return 0;
@@ -101,7 +139,7 @@ export function extract37TickFeatures(
     let currentRun = 1;
     for (let i = 1; i < arr.length; i++) {
       const dirCurrent = Math.sign(arr[i] - arr[i - 1]);
-      const dirPrev = Math.sign(arr[i - 1] - arr[i - 2] || 0);
+      const dirPrev = Math.sign(arr[i - 1] - (arr[i - 2] ?? arr[i - 1]));
       if (dirCurrent !== 0 && dirCurrent === dirPrev) {
         currentRun++;
         if (currentRun > maxRun) maxRun = currentRun;
@@ -112,7 +150,7 @@ export function extract37TickFeatures(
     return maxRun / arr.length;
   };
 
-  const calcReversalFreq = (arr: number[]) => {
+  const calcReversalRate = (arr: number[]) => {
     if (arr.length < 3) return 0;
     let reversals = 0;
     for (let i = 2; i < arr.length; i++) {
@@ -125,42 +163,35 @@ export function extract37TickFeatures(
     return reversals / (arr.length - 2);
   };
 
-  const calcVolatility = (arr: number[]) => {
-    if (arr.length < 2) return 0;
-    const mean = arr.reduce((a, b) => a + b, 0) / arr.length;
-    const variance = arr.reduce((a, b) => a + Math.pow(b - mean, 2), 0) / arr.length;
-    return Math.sqrt(variance);
-  };
-
-  // 1. Micro Horizon (5 Ticks)
+  // --- Sub-arrays across horizons ---
   const microTicks = getSubArray(5);
+  const shortTicks = getSubArray(25);
+  const medTicks = getSubArray(100);
+  const macroTicks = getSubArray(300);
+
+  // Micro (5 Ticks)
   const micro_momentum = calcMomentum(microTicks);
   const micro_velocity = calcVelocity(microTicks);
-  const micro_upDownRatio = calcUpDownRatio(microTicks);
   const micro_persistence = calcPersistence(microTicks);
 
-  // 2. Short Horizon (25 Ticks)
-  const shortTicks = getSubArray(25);
+  // Short (25 Ticks)
   const short_momentum = calcMomentum(shortTicks);
   const short_velocity = calcVelocity(shortTicks);
   const v1 = calcVelocity(shortTicks.slice(0, Math.floor(shortTicks.length / 2)));
   const v2 = calcVelocity(shortTicks.slice(Math.floor(shortTicks.length / 2)));
-  const short_acceleration = v2 - v1;
-  const short_upDownRatio = calcUpDownRatio(shortTicks);
+  const acceleration = v2 - v1; // d²P/dt²
   const short_persistence = calcPersistence(shortTicks);
-  const short_reversalFreq = calcReversalFreq(shortTicks);
+  const short_reversal_rate = calcReversalRate(shortTicks);
   const short_volatility = calcVolatility(shortTicks);
   const shortHigh = Math.max(...shortTicks);
   const shortLow = Math.min(...shortTicks);
-  const short_rangeCompression = shortHigh - shortLow === 0 ? 0 : (shortTicks[shortTicks.length - 1] - shortLow) / (shortHigh - shortLow);
+  const short_range = shortHigh - shortLow;
+  const short_rangeCompression = short_range === 0 ? 0.5 : (shortTicks[shortTicks.length - 1] - shortLow) / short_range;
 
-  // 3. Medium Horizon (100 Ticks)
-  const medTicks = getSubArray(100);
+  // Medium (100 Ticks)
   const medium_momentum = calcMomentum(medTicks);
   const medium_velocity = calcVelocity(medTicks);
-  const medium_upDownRatio = calcUpDownRatio(medTicks);
-  const medium_persistence = calcPersistence(medTicks);
-  const medium_reversalFreq = calcReversalFreq(medTicks);
+  const medium_reversal_rate = calcReversalRate(medTicks);
   const medium_volatility = calcVolatility(medTicks);
   const medium_displacement = Math.abs(medTicks[medTicks.length - 1] - medTicks[0]);
   const medHigh = Math.max(...medTicks);
@@ -168,25 +199,20 @@ export function extract37TickFeatures(
   const medium_distHigh = medHigh - currentPrice;
   const medium_distLow = currentPrice - medLow;
 
-  // 4. Macro Horizon (300 Ticks)
-  const macroTicks = getSubArray(300);
+  // Macro (300 Ticks)
   const macro_momentum = calcMomentum(macroTicks);
-  const macro_upDownRatio = calcUpDownRatio(macroTicks);
-  const macro_persistence = calcPersistence(macroTicks);
   const macro_volatility = calcVolatility(macroTicks);
   const macro_displacement = Math.abs(macroTicks[macroTicks.length - 1] - macroTicks[0]);
   const macro_regime = macro_momentum > 0.05 ? 1.0 : macro_momentum < -0.05 ? -1.0 : 0.0;
 
-  // 5. Contextual & Temporal Metadata
+  // --- Temporal & Meta Metrics ---
   const is1Sec = symbol.startsWith('1HZ') || symbol.includes('1S') ? 1.0 : 0.0;
-  
-  // Calculate real timestamps
   const firstTickTs = ticks[0]?.timestamp || Date.now() - ticks.length * 1000;
   const lastTickTs = ticks[ticks.length - 1]?.timestamp || Date.now();
   const elapsedTimeSec = Math.max(1, (lastTickTs - firstTickTs) / 1000);
 
-  const velocityPerSecond = (currentPrice - ticks[0].price) / elapsedTimeSec;
-  const ticksPerSecond = totalCount / elapsedTimeSec;
+  const velocity_per_second = (currentPrice - ticks[0].price) / elapsedTimeSec;
+  const ticks_per_second = totalCount / elapsedTimeSec;
   const durationFactor = Math.log(Math.max(1, contractDurationSecs));
 
   // Digit Frequency analysis (Even vs Odd last decimal digit)
@@ -199,41 +225,48 @@ export function extract37TickFeatures(
   const digitFrequency = totalCount > 0 ? evenDigits / totalCount : 0.5;
 
   return {
+    // 1-10: Price Behaviour
+    deltaP1,
+    deltaP2,
+    deltaP3,
     micro_momentum,
-    micro_velocity,
-    micro_upDownRatio,
-    micro_persistence,
-
     short_momentum,
-    short_velocity,
-    short_acceleration,
-    short_upDownRatio,
-    short_persistence,
-    short_reversalFreq,
-    short_volatility,
-    short_rangeCompression,
-
     medium_momentum,
-    medium_velocity,
-    medium_upDownRatio,
-    medium_persistence,
-    medium_reversalFreq,
-    medium_volatility,
+    macro_momentum,
+    short_range,
     medium_displacement,
+    macro_displacement,
+
+    // 11-19: Tick Pressure & Sequencing
+    up_tick_ratio,
+    down_tick_ratio,
+    directional_imbalance,
+    consecutive_up,
+    consecutive_down,
+    micro_persistence,
+    short_persistence,
+    short_reversal_rate,
+    medium_reversal_rate,
+
+    // 20-25: Tick Velocity & Acceleration
+    micro_velocity,
+    short_velocity,
+    medium_velocity,
+    acceleration,
+    ticks_per_second,
+    velocity_per_second,
+
+    // 26-31: Short / Medium / Macro Volatility
+    short_volatility,
+    medium_volatility,
+    macro_volatility,
+    short_rangeCompression,
     medium_distHigh,
     medium_distLow,
 
-    macro_momentum,
-    macro_upDownRatio,
-    macro_persistence,
-    macro_volatility,
-    macro_displacement,
+    // 32-37: Contextual & Regime Metadata
     macro_regime,
-
     is1SecondSynthetic: is1Sec,
-    velocityPerSecond,
-    ticksPerSecond,
-    elapsedTime300Sec: elapsedTimeSec,
     contractDurationSecs,
     durationFactor,
     digitFrequency,
@@ -246,40 +279,52 @@ export function extract37TickFeatures(
  */
 export function featureObjToArray(features: EngineeredTickFeatures): number[] {
   return [
+    // 1-10: Price Behaviour
+    features.deltaP1,
+    features.deltaP2,
+    features.deltaP3,
     features.micro_momentum,
-    features.micro_velocity,
-    features.micro_upDownRatio,
-    features.micro_persistence,
     features.short_momentum,
-    features.short_velocity,
-    features.short_acceleration,
-    features.short_upDownRatio,
-    features.short_persistence,
-    features.short_reversalFreq,
-    features.short_volatility,
-    features.short_rangeCompression,
     features.medium_momentum,
-    features.medium_velocity,
-    features.medium_upDownRatio,
-    features.medium_persistence,
-    features.medium_reversalFreq,
-    features.medium_volatility,
+    features.macro_momentum,
+    features.short_range,
     features.medium_displacement,
+    features.macro_displacement,
+
+    // 11-19: Tick Pressure & Sequencing
+    features.up_tick_ratio,
+    features.down_tick_ratio,
+    features.directional_imbalance,
+    features.consecutive_up,
+    features.consecutive_down,
+    features.micro_persistence,
+    features.short_persistence,
+    features.short_reversal_rate,
+    features.medium_reversal_rate,
+
+    // 20-25: Tick Velocity & Acceleration
+    features.micro_velocity,
+    features.short_velocity,
+    features.medium_velocity,
+    features.acceleration,
+    features.ticks_per_second,
+    features.velocity_per_second,
+
+    // 26-31: Short / Medium / Macro Volatility
+    features.short_volatility,
+    features.medium_volatility,
+    features.macro_volatility,
+    features.short_rangeCompression,
     features.medium_distHigh,
     features.medium_distLow,
-    features.macro_momentum,
-    features.macro_upDownRatio,
-    features.macro_persistence,
-    features.macro_volatility,
-    features.macro_displacement,
+
+    // 32-37: Contextual & Regime Metadata
     features.macro_regime,
     features.is1SecondSynthetic,
-    features.velocityPerSecond,
-    features.ticksPerSecond,
-    features.elapsedTime300Sec,
     features.contractDurationSecs,
     features.durationFactor,
     features.digitFrequency,
     features.assetCategory,
   ];
 }
+

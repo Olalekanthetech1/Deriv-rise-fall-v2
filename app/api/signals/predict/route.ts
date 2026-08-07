@@ -1,6 +1,7 @@
 import { NextRequest, NextResponse } from 'next/server';
 import { xgboostModel } from '@/lib/xgboost-engine';
 import { extract37TickFeatures, TickPoint } from '@/lib/ml-feature-extractor';
+import { evaluateMultiModelEnsemble, evaluateMultiModelEnsembleAsync } from '@/lib/multi-model-evaluator';
 import { initDbSchema, getDb } from '@/lib/db';
 import { ensureMinTicks } from '@/lib/ticks-helper';
 
@@ -85,7 +86,14 @@ export async function POST(req: NextRequest) {
       assetCategoryNum,
     });
 
-    // 2. Run base XGBoost ML Engine prediction
+    // 2. Run multi-model evaluation layer ensemble synthesis
+    const ensemble = await evaluateMultiModelEnsembleAsync(tickList, {
+      symbol,
+      durationSecs,
+      assetCategory: assetCategoryNum,
+    });
+
+    // 3. Run base XGBoost ML Engine prediction
     const basePrediction = xgboostModel.predict(tickList, {
       symbol,
       durationSecs,
@@ -231,7 +239,7 @@ export async function POST(req: NextRequest) {
 
     // --- Strategy 4: Tick Sentiment Velocity (SENTIMENT Category) ---
     const sentMatrix: DurationPrediction[] = durationSpecs.map((spec) => {
-      const ratio = features.short_upDownRatio;
+      const ratio = features.up_tick_ratio;
       const specWeight = spec.unit === 't' ? 1.0 : 0.8;
       const dir: 'RISE' | 'FALL' = ratio >= 0.5 ? 'RISE' : 'FALL';
       const conf = Math.min(94.0, Math.max(78.5, 80.0 + Math.abs(ratio - 0.5) * 60.0 * specWeight));
@@ -262,7 +270,7 @@ export async function POST(req: NextRequest) {
       expiresInSeconds: 35,
       maxExpirySeconds: 35,
       winRate: bestSent.winRate,
-      description: `Cumulative tick direction favoring ${(features.short_upDownRatio * 100).toFixed(0)}% ${bestSent.direction} order flow velocity.`,
+      description: `Cumulative tick direction favoring ${(features.up_tick_ratio * 100).toFixed(0)}% ${bestSent.direction} order flow velocity.`,
       timestamp: now,
     };
 
@@ -322,6 +330,11 @@ export async function POST(req: NextRequest) {
       prediction: basePrediction,
       signals: [sigXGB, sigTrend, sigVol, sigSent],
       winStats,
+      confidence: ensemble.confidence,
+      marketRegime: ensemble.marketRegime,
+      anomalyScore: ensemble.anomalyScore,
+      modelBreakdown: ensemble.modelBreakdown,
+      multiModelEnsemble: ensemble,
     });
   } catch (err: any) {
     console.error('[Option A API Error]:', err);
