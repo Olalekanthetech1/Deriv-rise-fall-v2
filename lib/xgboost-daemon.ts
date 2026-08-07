@@ -7,6 +7,8 @@ interface PendingRequest {
   timer: NodeJS.Timeout;
 }
 
+type DaemonAction = 'predict' | 'predict_ensemble' | 'train' | 'list_models' | 'ping' | 'backtest';
+
 class XGBoostDaemonManager {
   private child: ChildProcess | null = null;
   private pending = new Map<string, PendingRequest>();
@@ -38,7 +40,7 @@ class XGBoostDaemonManager {
             if (data.id && this.pending.has(data.id)) {
               const req = this.pending.get(data.id)!; clearTimeout(req.timer); this.pending.delete(data.id); req.resolve(data);
             }
-          } catch { /* stdout must remain JSON-line tolerant */ }
+          } catch { /* stdout remains JSON-line tolerant */ }
         }
       });
       const onExit = () => {
@@ -58,12 +60,9 @@ class XGBoostDaemonManager {
     this.restartTimer = setTimeout(() => { this.restartTimer = null; this.ensureDaemonRunning(); }, delay);
   }
 
-  private static readonly ALLOWED_ACTIONS = new Set(['predict', 'predict_ensemble', 'train', 'list_models', 'ping']);
+  private static readonly ALLOWED_ACTIONS = new Set<DaemonAction>(['predict', 'predict_ensemble', 'train', 'list_models', 'ping', 'backtest']);
 
-  public async sendCommand(
-    action: 'predict' | 'predict_ensemble' | 'train' | 'list_models' | 'ping',
-    payload: Record<string, any> = {}
-  ): Promise<any> {
+  public async sendCommand(action: DaemonAction, payload: Record<string, any> = {}): Promise<any> {
     if (!XGBoostDaemonManager.ALLOWED_ACTIONS.has(action)) throw new Error(`Unauthorized daemon action: ${action}`);
     this.ensureDaemonRunning();
     if (!this.child?.stdin?.writable) throw new Error('Python ML daemon unavailable');
@@ -73,7 +72,9 @@ class XGBoostDaemonManager {
     const id = `req_${Date.now()}_${++this.reqIdCounter}`;
     const packet = JSON.stringify({ action, id, ...sanitized }) + '\n';
     return new Promise((resolve, reject) => {
-      const timer = setTimeout(() => { if (this.pending.has(id)) { this.pending.delete(id); reject(new Error(`Daemon request ${action} timed out`)); } }, action === 'train' ? 30000 : 5000);
+      const timer = setTimeout(() => {
+        if (this.pending.has(id)) { this.pending.delete(id); reject(new Error(`Daemon request ${action} timed out`)); }
+      }, action === 'train' ? 30000 : action === 'backtest' ? 60000 : 5000);
       this.pending.set(id, { resolve, reject, timer });
       try { this.child!.stdin!.write(packet); }
       catch (err) { clearTimeout(timer); this.pending.delete(id); reject(err); }
