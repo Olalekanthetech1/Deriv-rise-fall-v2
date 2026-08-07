@@ -1,9 +1,6 @@
-"""Production ML daemon entrypoint.
-
-All model training and inference is delegated to ml_runtime_v5. The runtime
-never trains or fabricates a model during live prediction.
-"""
-from ml_runtime_v5 import main
+"""Production ML daemon entrypoint."""
+from ml_runtime_entry import *
 
 if __name__ == "__main__":
-    main()
+    # ml_runtime_entry starts the dispatcher after applying the sequence-training patch.
+    pass
