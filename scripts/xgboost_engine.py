@@ -1,10 +1,9 @@
-"""Compatibility entrypoint for the production ML runtime.
+"""Production ML daemon entrypoint.
 
-The historical implementation mixed training, random model creation, and live
-inference. The v4 runtime is the single source of truth and never fabricates a
-model during inference.
+All model training and inference is delegated to ml_runtime_v5. The runtime
+never trains or fabricates a model during live prediction.
 """
-from ml_runtime_v4 import main
+from ml_runtime_v5 import main
 
 if __name__ == "__main__":
     main()
