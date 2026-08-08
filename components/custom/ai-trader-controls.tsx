@@ -42,7 +42,6 @@ const NEXT_TRADE_DELAY_MS = 3500;
 
 export function AiTraderControls({
   authState,
-  onLogin,
   proposal,
   stake,
   onStakeChange,
@@ -69,8 +68,9 @@ export function AiTraderControls({
   const [numTrades, setNumTrades] = useState<number>(10);
   const [strategy, setStrategy] = useState<string>('Flat Staking');
 
-  // Automated execution state. The auto executor deliberately does NOT consume
-  // the UI's AI Consensus Recommendation: consensus is advisory/manual only.
+  // Auto execution is deliberately isolated from the Signals-drawer consensus.
+  // Consensus is advisory/manual; this executor uses the live prediction result
+  // directly and relies on the central Deriv proposal/buy path for execution.
   const [isRunning, setIsRunning] = useState(false);
   const [currentTradeIndex, setCurrentTradeIndex] = useState(0);
   const [executionStats, setExecutionStats] = useState({ executed: 0, failed: 0 });
@@ -104,7 +104,9 @@ export function AiTraderControls({
   }, [clearExecutionTimer]);
 
   const executeTrade = useCallback(async (sessionId: number, tradeNumber: number) => {
-    if (sessionRef.current !== sessionId || !isRunning) return;
+    // Session identity is the source of truth. Do not read isRunning here because
+    // the first scheduled callback is created before React commits setIsRunning(true).
+    if (sessionRef.current !== sessionId) return;
 
     if (authState !== 'authenticated') {
       stopSession();
@@ -121,9 +123,8 @@ export function AiTraderControls({
     setCurrentTradeIndex(tradeNumber);
 
     try {
-      // This is the AUTO execution source. It intentionally uses the signal
-      // prediction endpoint directly and never gates execution on the separate
-      // AI Consensus Recommendation shown in the Signals drawer.
+      // AUTO execution source: direct AI signal prediction. The separate
+      // AI Consensus Recommendation is never consulted or used as a gate.
       const res = await fetch('/api/signals/predict', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
@@ -150,9 +151,9 @@ export function AiTraderControls({
       const targetDirection: Direction = bestSignal.direction === 'RISE' ? 'CALL' : 'PUT';
       const confidence = Number(bestSignal.confidence);
 
-      // The actual Deriv purchase must complete before the next automatic
-      // iteration is scheduled. This prevents overlapping buy/proposal requests
-      // and, importantly, surfaces real execution failures to the user.
+      // Wait for the actual proposal + buy flow to finish before scheduling the
+      // next iteration. This prevents overlapping submissions and exposes real
+      // Deriv errors instead of silently continuing the session.
       await onBuy(targetDirection);
 
       if (sessionRef.current !== sessionId) return;
@@ -184,7 +185,7 @@ export function AiTraderControls({
         description: message,
       });
     }
-  }, [activeSymbol, authState, duration, durationUnit, isConnected, isRunning, numTrades, onBuy, stake, stopSession]);
+  }, [activeSymbol, authState, duration, durationUnit, isConnected, numTrades, onBuy, stake, stopSession]);
 
   const handleStartAiSession = useCallback(() => {
     if (authState !== 'authenticated') {
@@ -225,7 +226,7 @@ export function AiTraderControls({
       icon: <Sparkles className="h-4 w-4 text-purple-400" />,
     });
 
-    // Start only after state has been committed on the next event-loop turn.
+    // Schedule after the state update so the session can render as active first.
     timerRef.current = setTimeout(() => {
       void executeTrade(sessionId, 1);
     }, 0);
