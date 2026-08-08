@@ -1,23 +1,20 @@
 'use client';
 
 import React from 'react';
-import {
-  Cpu,
-  BrainCircuit,
-  Activity,
-  Layers,
-  ShieldAlert,
-  Sparkles,
-  TrendingUp,
-  BarChart3,
-  Zap,
-  Database,
-} from 'lucide-react';
+import { BrainCircuit, Activity, Layers, Sparkles, Database } from 'lucide-react';
 import type { MultiModelEvaluationResult } from '@/lib/multi-model-ui-types';
 
 interface MultiModelEvaluationCardProps {
   ensemble: MultiModelEvaluationResult | null;
   className?: string;
+}
+
+function formatPercent(value: unknown): string {
+  return typeof value === 'number' && Number.isFinite(value) ? `${value}%` : 'N/A';
+}
+
+function formatScore(value: unknown, digits = 2): string {
+  return typeof value === 'number' && Number.isFinite(value) ? value.toFixed(digits) : 'N/A';
 }
 
 export function MultiModelEvaluationCard({ ensemble, className = '' }: MultiModelEvaluationCardProps) {
@@ -41,14 +38,19 @@ export function MultiModelEvaluationCard({ ensemble, className = '' }: MultiMode
     evaluations = [],
     regime,
     anomaly,
-    drift,
     fusion,
     calibration,
   } = ensemble;
 
+  const availableEvaluations = evaluations.filter((evaluation) =>
+    Number.isFinite(evaluation.probabilityUp) && Number.isFinite(evaluation.probabilityDown),
+  );
+  const coverageLabel = `${availableEvaluations.length} evaluator${availableEvaluations.length === 1 ? '' : 's'} with live output`;
+  const resolvedRegime = marketRegime ?? regime?.regimeName ?? regime?.primaryRegime;
+  const resolvedAnomaly = anomalyScore ?? anomaly?.anomalyScore;
+
   return (
     <div className={`space-y-4 w-full min-w-0 ${className}`}>
-      {/* 1. Ensemble Synthesis Header */}
       <div className="p-4 sm:p-5 rounded-2xl bg-slate-950 border border-slate-800 space-y-3 min-w-0">
         <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3">
           <div>
@@ -56,46 +58,65 @@ export function MultiModelEvaluationCard({ ensemble, className = '' }: MultiMode
               <Sparkles className="w-4 h-4 text-purple-400 shrink-0" />
               <span className="text-xs font-black uppercase tracking-wider text-white">Multi-Model Ensemble Decision Matrix ({symbol})</span>
             </div>
-            <p className="text-[11px] text-slate-400 mt-0.5">Synthesized weighted logit votes across 8 AI evaluator modules (100% execution coverage)</p>
+            <p className="text-[11px] text-slate-400 mt-0.5">Live evaluator outputs supplied by the active ML runtime. Missing engines are shown as unavailable rather than simulated.</p>
           </div>
           <div className="flex items-center gap-3">
             <span className={`px-3 py-1 rounded-xl text-sm font-black flex items-center gap-1.5 ${direction === 'RISE' ? 'bg-emerald-500/20 text-emerald-400 border border-emerald-500/30' : 'bg-rose-500/20 text-rose-400 border border-rose-500/30'}`}>
               {direction === 'RISE' ? 'CALL (RISE ↑)' : 'PUT (FALL ↓)'}
             </span>
-            <div className="text-right"><span className="text-[10px] text-slate-500 uppercase font-sans block">Confidence</span><span className="text-sm font-black text-purple-400">{confidence}%</span></div>
+            <div className="text-right"><span className="text-[10px] text-slate-500 uppercase font-sans block">Confidence</span><span className="text-sm font-black text-purple-400">{formatPercent(confidence)}</span></div>
           </div>
         </div>
         <div className="flex flex-wrap items-center gap-2 pt-1">
-          <span className="text-[10px] font-bold px-2.5 py-1 rounded-full bg-purple-500/10 text-purple-300 border border-purple-500/20">Regime: {marketRegime || regime?.regimeName || 'Directional Expansion'}</span>
-          <span className="text-[10px] font-bold px-2.5 py-1 rounded-full bg-amber-500/10 text-amber-300 border border-amber-500/20">Anomaly Score: {anomalyScore ?? anomaly?.anomalyScore ?? 0.05} / 1.00</span>
-          <span className="text-[10px] font-bold px-2.5 py-1 rounded-full bg-emerald-500/10 text-emerald-300 border border-emerald-500/20">Coverage: 100% Active Execution</span>
+          <span className="text-[10px] font-bold px-2.5 py-1 rounded-full bg-purple-500/10 text-purple-300 border border-purple-500/20">Regime: {resolvedRegime ?? 'Unavailable'}</span>
+          <span className="text-[10px] font-bold px-2.5 py-1 rounded-full bg-amber-500/10 text-amber-300 border border-amber-500/20">Anomaly Score: {formatScore(resolvedAnomaly)} / 1.00</span>
+          <span className="text-[10px] font-bold px-2.5 py-1 rounded-full bg-slate-800 text-slate-300 border border-slate-700">Coverage: {coverageLabel}</span>
         </div>
         <div className="space-y-1">
-          <div className="flex justify-between text-[10px] font-mono font-bold text-slate-300"><span className="text-emerald-400">P(UP): {probUp}%</span><span className="text-rose-400">P(DOWN): {probDown}%</span></div>
-          <div className="w-full bg-slate-900 h-2.5 rounded-full overflow-hidden border border-slate-800 flex"><div className="h-full bg-emerald-500 transition-all duration-500" style={{ width: `${probUp}%` }} /><div className="h-full bg-rose-500 transition-all duration-500" style={{ width: `${probDown}%` }} /></div>
+          <div className="flex justify-between text-[10px] font-mono font-bold text-slate-300"><span className="text-emerald-400">P(UP): {formatPercent(probUp)}</span><span className="text-rose-400">P(DOWN): {formatPercent(probDown)}</span></div>
+          <div className="w-full bg-slate-900 h-2.5 rounded-full overflow-hidden border border-slate-800 flex">
+            <div className="h-full bg-emerald-500 transition-all duration-500" style={{ width: `${Number.isFinite(probUp) ? Math.max(0, Math.min(100, probUp)) : 0}%` }} />
+            <div className="h-full bg-rose-500 transition-all duration-500" style={{ width: `${Number.isFinite(probDown) ? Math.max(0, Math.min(100, probDown)) : 0}%` }} />
+          </div>
         </div>
       </div>
 
       {fusion && (
         <div className="p-4 sm:p-5 rounded-2xl bg-slate-950 border border-purple-500/30 space-y-4 min-w-0">
-          <div className="flex items-center justify-between"><div className="flex items-center gap-2"><BrainCircuit className="w-4 h-4 text-purple-400 shrink-0" /><span className="text-xs font-black uppercase tracking-wider text-white">🧠 Decision Fusion &amp; Confidence Gate Architecture</span></div><span className="text-[10px] font-mono px-2.5 py-1 rounded-full bg-purple-500/20 text-purple-300 border border-purple-500/30 font-bold">3-Tier Layered Architecture</span></div>
+          <div className="flex items-center justify-between"><div className="flex items-center gap-2"><BrainCircuit className="w-4 h-4 text-purple-400 shrink-0" /><span className="text-xs font-black uppercase tracking-wider text-white">🧠 Decision Fusion &amp; Confidence Gate Architecture</span></div><span className="text-[10px] font-mono px-2.5 py-1 rounded-full bg-purple-500/20 text-purple-300 border border-purple-500/30 font-bold">Runtime-derived</span></div>
           <div className="p-4 rounded-xl bg-slate-900/90 border border-slate-800 space-y-4 font-mono">
-            <div><span className="text-[10px] text-slate-400 font-bold uppercase block mb-1 font-sans">Tier 1: 6 Machine Learning Model Engines</span><div className="grid grid-cols-3 sm:grid-cols-6 gap-1.5 text-[10px] text-center">{(['xgboost','lightgbm','catboost','tcn','lstm_gru','transformer'] as const).map((key, i) => <div key={key} className="p-1.5 rounded bg-slate-950 border border-slate-800"><span className="text-slate-400 block font-bold">{['XGBoost','LightGBM','CatBoost','TCN','LSTM','Transformer'][i]}</span><span className="text-emerald-400 font-bold">{modelBreakdown?.[key]?.probabilityUp || [74,71,69,77,72,75][i]}%</span></div>)}</div></div>
+            <div>
+              <span className="text-[10px] text-slate-400 font-bold uppercase block mb-1 font-sans">Machine Learning Model Engines</span>
+              <div className="grid grid-cols-2 sm:grid-cols-3 gap-1.5 text-[10px] text-center">
+                {availableEvaluations.length > 0 ? availableEvaluations.map((evaluation) => (
+                  <div key={evaluation.modelKey} className="p-1.5 rounded bg-slate-950 border border-slate-800">
+                    <span className="text-slate-400 block font-bold truncate">{evaluation.modelName}</span>
+                    <span className="text-emerald-400 font-bold">{formatPercent(evaluation.probabilityUp)}</span>
+                  </div>
+                )) : (
+                  <div className="col-span-full p-3 text-slate-500">No individual model outputs are currently available.</div>
+                )}
+              </div>
+            </div>
             <div className="text-center text-purple-400 text-xs font-bold font-sans">│<br />▼<br /><span className="px-3 py-1 rounded bg-purple-500/20 text-purple-300 border border-purple-500/30 uppercase text-[10px] font-black">🧠 Ensemble / Decision Fusion Engine Layer</span></div>
-            <div className="grid grid-cols-1 sm:grid-cols-3 gap-2 text-xs"><div className="p-3 rounded-lg bg-slate-950 border border-slate-800 text-center"><span className="text-[10px] text-slate-500 uppercase font-sans font-bold block">Aggregated Direction</span><span className={`font-black text-sm ${direction === 'RISE' ? 'text-emerald-400' : 'text-rose-400'}`}>{fusion.directionScore}% {direction === 'RISE' ? 'CALL' : 'PUT'}</span></div><div className="p-3 rounded-lg bg-slate-950 border border-slate-800 text-center"><span className="text-[10px] text-slate-500 uppercase font-sans font-bold block">HMM Market Regime</span><span className="font-black text-xs text-purple-300">{fusion.regimeState}</span></div><div className="p-3 rounded-lg bg-slate-950 border border-slate-800 text-center"><span className="text-[10px] text-slate-500 uppercase font-sans font-bold block">Isolation Anomaly Risk</span><span className={`font-black text-xs ${fusion.anomalyRisk === 'HIGH' ? 'text-rose-400' : fusion.anomalyRisk === 'MODERATE' ? 'text-amber-400' : 'text-emerald-400'}`}>{fusion.anomalyRisk} ({anomalyScore ?? 0.05})</span></div></div>
+            <div className="grid grid-cols-1 sm:grid-cols-3 gap-2 text-xs">
+              <div className="p-3 rounded-lg bg-slate-950 border border-slate-800 text-center"><span className="text-[10px] text-slate-500 uppercase font-sans font-bold block">Aggregated Direction</span><span className={`font-black text-sm ${direction === 'RISE' ? 'text-emerald-400' : 'text-rose-400'}`}>{formatPercent(fusion.directionScore)} {direction === 'RISE' ? 'CALL' : 'PUT'}</span></div>
+              <div className="p-3 rounded-lg bg-slate-950 border border-slate-800 text-center"><span className="text-[10px] text-slate-500 uppercase font-sans font-bold block">HMM Market Regime</span><span className="font-black text-xs text-purple-300">{fusion.regimeState ?? 'Unavailable'}</span></div>
+              <div className="p-3 rounded-lg bg-slate-950 border border-slate-800 text-center"><span className="text-[10px] text-slate-500 uppercase font-sans font-bold block">Isolation Anomaly Risk</span><span className={`font-black text-xs ${fusion.anomalyRisk === 'HIGH' ? 'text-rose-400' : fusion.anomalyRisk === 'MODERATE' ? 'text-amber-400' : 'text-emerald-400'}`}>{fusion.anomalyRisk ?? 'Unavailable'} ({formatScore(resolvedAnomaly)})</span></div>
+            </div>
             <div className="text-center text-cyan-400 text-xs font-bold font-sans">│<br />▼<br /><span className="text-[10px] text-slate-400">Calculates Final Composite Score</span></div>
-            <div className="p-3.5 rounded-xl bg-slate-950 border border-cyan-500/30 flex flex-col sm:flex-row items-center justify-between gap-3"><div><span className="text-[10px] text-slate-400 uppercase font-sans font-bold block">Final Composite Score</span><span className="text-xl font-black text-cyan-400">{fusion.finalCompositeScore}%</span></div><div className="flex items-center gap-2"><div className="text-right"><span className="text-[10px] text-slate-500 uppercase font-sans block">Confidence Gate</span><span className="text-xs text-slate-300 font-bold">Threshold: &gt;={fusion.confidenceGateThreshold}%</span></div><span className={`px-2.5 py-1 rounded-lg text-xs font-black border ${fusion.gatePassed ? 'bg-emerald-500/20 text-emerald-400 border-emerald-500/30' : 'bg-rose-500/20 text-rose-400 border-rose-500/30'}`}>{fusion.gatePassed ? 'GATE PASSED ✓' : 'HOLD / BLOCKED ✗'}</span></div><div><span className="text-[10px] text-slate-500 uppercase font-sans font-bold block text-right sm:text-left">Final Action</span><span className={`text-xs font-black px-3 py-1 rounded-lg border block ${direction === 'RISE' ? 'bg-emerald-500/20 text-emerald-400 border-emerald-500/30' : 'bg-rose-500/20 text-rose-400 border-rose-500/30'}`}>{fusion.action}</span></div></div>
+            <div className="p-3.5 rounded-xl bg-slate-950 border border-cyan-500/30 flex flex-col sm:flex-row items-center justify-between gap-3"><div><span className="text-[10px] text-slate-400 uppercase font-sans font-bold block">Final Composite Score</span><span className="text-xl font-black text-cyan-400">{formatPercent(fusion.finalCompositeScore)}</span></div><div className="flex items-center gap-2"><div className="text-right"><span className="text-[10px] text-slate-500 uppercase font-sans block">Confidence Gate</span><span className="text-xs text-slate-300 font-bold">Threshold: {formatPercent(fusion.confidenceGateThreshold)}</span></div><span className={`px-2.5 py-1 rounded-lg text-xs font-black border ${fusion.gatePassed ? 'bg-emerald-500/20 text-emerald-400 border-emerald-500/30' : 'bg-rose-500/20 text-rose-400 border-rose-500/30'}`}>{fusion.gatePassed === undefined ? 'UNAVAILABLE' : fusion.gatePassed ? 'GATE PASSED ✓' : 'HOLD / BLOCKED ✗'}</span></div><div><span className="text-[10px] text-slate-500 uppercase font-sans font-bold block text-right sm:text-left">Final Action</span><span className="text-xs font-black px-3 py-1 rounded-lg border block text-slate-200">{fusion.action ?? 'UNAVAILABLE'}</span></div></div>
           </div>
         </div>
       )}
 
       {calibration && (
-        <div className="p-4 sm:p-5 rounded-2xl bg-slate-950 border border-amber-500/30 space-y-3 min-w-0"><div className="flex flex-col sm:flex-row sm:items-center justify-between gap-2"><div className="flex items-center gap-2"><Activity className="w-4 h-4 text-amber-400 shrink-0" /><div><span className="text-xs font-black uppercase tracking-wider text-white block">⚖️ Probability Calibration Engine (Platt Scaling &amp; Isotonic Regression)</span><span className="text-[11px] text-slate-400">Prevents overconfident raw outputs by calibrating neural network logits against empirical out-of-sample win rates</span></div></div><span className="text-[10px] font-mono px-2.5 py-1 rounded-full bg-amber-500/10 text-amber-300 border border-amber-500/20 font-bold self-start sm:self-auto shrink-0">ECE: {calibration.expectedCalibrationError}%</span></div><div className="grid grid-cols-1 sm:grid-cols-4 gap-2.5 pt-1"><div className="p-3 rounded-xl bg-slate-900/90 border border-slate-800 space-y-1"><span className="text-[10px] text-slate-500 font-bold uppercase block">Raw Uncalibrated Output</span><div className="flex items-baseline justify-between"><span className="text-lg font-black text-rose-400/90 line-through decoration-rose-500/60">{calibration.rawProbability}%</span><span className="text-[10px] text-slate-500 font-mono">Overconfident</span></div></div><div className="p-3 rounded-xl bg-slate-900/90 border border-amber-500/30 space-y-1"><span className="text-[10px] text-amber-400 font-bold uppercase block">Calibrated Probability</span><div className="flex items-baseline justify-between"><span className="text-xl font-black text-amber-300">{calibration.calibratedProbability}%</span><span className="text-[10px] text-amber-400 font-mono font-bold">{calibration.confidenceReductionPct}%</span></div></div><div className="p-3 rounded-xl bg-slate-900/90 border border-slate-800 space-y-1"><span className="text-[10px] text-slate-400 font-bold uppercase block">Platt Scaling (Sigmoidal)</span><span className="text-sm font-bold text-slate-200 block">{calibration.plattScaledProbability}%</span><span className="text-[9px] text-slate-500 font-mono block">A = -0.72, B = 0.11</span></div><div className="p-3 rounded-xl bg-slate-900/90 border border-slate-800 space-y-1"><span className="text-[10px] text-slate-400 font-bold uppercase block">Isotonic Regression</span><span className="text-sm font-bold text-slate-200 block">{calibration.isotonicProbability}%</span><span className="text-[9px] text-slate-500 font-mono block">Piecewise Monotonic Spline</span></div></div></div>
+        <div className="p-4 sm:p-5 rounded-2xl bg-slate-950 border border-amber-500/30 space-y-3 min-w-0"><div className="flex flex-col sm:flex-row sm:items-center justify-between gap-2"><div className="flex items-center gap-2"><Activity className="w-4 h-4 text-amber-400 shrink-0" /><div><span className="text-xs font-black uppercase tracking-wider text-white block">⚖️ Probability Calibration</span><span className="text-[11px] text-slate-400">Runtime calibration output; no client-side coefficients are assumed.</span></div></div><span className="text-[10px] font-mono px-2.5 py-1 rounded-full bg-amber-500/10 text-amber-300 border border-amber-500/20 font-bold self-start sm:self-auto shrink-0">ECE: {formatPercent(calibration.expectedCalibrationError)}</span></div><div className="grid grid-cols-1 sm:grid-cols-4 gap-2.5 pt-1"><div className="p-3 rounded-xl bg-slate-900/90 border border-slate-800 space-y-1"><span className="text-[10px] text-slate-500 font-bold uppercase block">Raw Output</span><span className="text-lg font-black text-rose-400/90">{formatPercent(calibration.rawProbability)}</span></div><div className="p-3 rounded-xl bg-slate-900/90 border border-amber-500/30 space-y-1"><span className="text-[10px] text-amber-400 font-bold uppercase block">Calibrated Probability</span><span className="text-xl font-black text-amber-300">{formatPercent(calibration.calibratedProbability)}</span></div><div className="p-3 rounded-xl bg-slate-900/90 border border-slate-800 space-y-1"><span className="text-[10px] text-slate-400 font-bold uppercase block">Calibration Method</span><span className="text-sm font-bold text-slate-200 block">{calibration.calibrationMethod ?? calibration.method ?? 'Unavailable'}</span></div><div className="p-3 rounded-xl bg-slate-900/90 border border-slate-800 space-y-1"><span className="text-[10px] text-slate-400 font-bold uppercase block">Adjustment</span><span className="text-sm font-bold text-slate-200 block">{formatPercent(calibration.confidenceReductionPct)}</span></div></div></div>
       )}
 
-      <div className="p-4 sm:p-5 rounded-2xl bg-slate-950 border border-slate-800 space-y-3 min-w-0"><div className="flex items-center gap-2"><Layers className="w-4 h-4 text-cyan-400" /><span className="text-xs font-black uppercase tracking-wider text-white">Individual Model Evaluations</span></div><div className="overflow-x-auto"><table className="w-full text-left border-collapse"><thead><tr className="border-b border-slate-800 text-[10px] uppercase text-slate-500 font-sans tracking-wider"><th className="pb-2 font-bold">Model Engine</th><th className="pb-2 font-bold">Family</th><th className="pb-2 font-bold">Runtime Execution Mode</th><th className="pb-2 font-bold">Prob(UP)</th><th className="pb-2 font-bold">Signal</th><th className="pb-2 font-bold">Drift Weight</th><th className="pb-2 font-bold">Inference Detail</th></tr></thead><tbody className="divide-y divide-slate-800/60">{evaluations.map((ev) => { const isUp = ev.signal === 'RISE'; const isNativePython = ev.runtimeMode?.includes('Python'); const displayWeight = ev.dynamicWeight ?? ev.weight ?? 0; return (<tr key={ev.modelKey} className="hover:bg-slate-900/50 transition-colors"><td className="py-2.5 pr-2"><span className="font-bold text-white block text-[11px] font-sans">{ev.modelName}</span><span className="text-[10px] text-slate-500 uppercase">{ev.modelKey}</span></td><td className="py-2.5 pr-2"><span className={`text-[9px] font-bold px-2 py-0.5 rounded ${ev.family === 'tabular' ? 'bg-purple-500/20 text-purple-400 border border-purple-500/30' : 'bg-cyan-500/20 text-cyan-400 border border-cyan-500/30'}`}>{ev.family.toUpperCase()}</span></td><td className="py-2.5 pr-2"><span className={`text-[9px] font-mono px-2 py-0.5 rounded font-bold border ${isNativePython ? 'bg-emerald-500/20 text-emerald-300 border-emerald-500/30' : 'bg-slate-800 text-slate-300 border-slate-700'}`}>{ev.runtimeMode || 'Pure TS Algorithmic Fallback Engine'}</span></td><td className="py-2.5 pr-2"><div className="flex items-center gap-2 w-28"><span className={`font-black ${isUp ? 'text-emerald-400' : 'text-slate-400'}`}>{ev.probabilityUp}%</span><div className="w-12 bg-slate-900 h-1.5 rounded-full overflow-hidden border border-slate-800 shrink-0"><div className={`h-full ${isUp ? 'bg-emerald-500' : 'bg-rose-500'}`} style={{ width: `${ev.probabilityUp}%` }} /></div></div></td><td className="py-2.5 pr-2"><span className={`font-black text-[10px] px-2 py-0.5 rounded ${isUp ? 'bg-emerald-500/10 text-emerald-400 border border-emerald-500/20' : 'bg-rose-500/10 text-rose-400 border border-rose-500/20'}`}>{ev.signal}</span></td><td className="py-2.5 pr-2 text-cyan-400 font-bold">{(displayWeight * 100).toFixed(1)}%</td><td className="py-2.5 text-[10px] text-slate-400 max-w-xs truncate font-sans">{ev.details}</td></tr>); })}</tbody></table></div></div>
+      <div className="p-4 sm:p-5 rounded-2xl bg-slate-950 border border-slate-800 space-y-3 min-w-0"><div className="flex items-center gap-2"><Layers className="w-4 h-4 text-cyan-400" /><span className="text-xs font-black uppercase tracking-wider text-white">Individual Model Evaluations</span></div><div className="overflow-x-auto"><table className="w-full text-left border-collapse"><thead><tr className="border-b border-slate-800 text-[10px] uppercase text-slate-500 font-sans tracking-wider"><th className="pb-2 font-bold">Model Engine</th><th className="pb-2 font-bold">Family</th><th className="pb-2 font-bold">Runtime Execution Mode</th><th className="pb-2 font-bold">Prob(UP)</th><th className="pb-2 font-bold">Signal</th><th className="pb-2 font-bold">Drift Weight</th><th className="pb-2 font-bold">Inference Detail</th></tr></thead><tbody className="divide-y divide-slate-800/60">{evaluations.map((ev) => { const isUp = ev.signal === 'RISE'; const isNativePython = ev.runtimeMode?.includes('Python'); const displayWeight = ev.dynamicWeight ?? ev.weight; return (<tr key={ev.modelKey} className="hover:bg-slate-900/50 transition-colors"><td className="py-2.5 pr-2"><span className="font-bold text-white block text-[11px] font-sans">{ev.modelName}</span><span className="text-[10px] text-slate-500 uppercase">{ev.modelKey}</span></td><td className="py-2.5 pr-2"><span className={`text-[9px] font-bold px-2 py-0.5 rounded ${ev.family === 'tabular' ? 'bg-purple-500/20 text-purple-400 border border-purple-500/30' : 'bg-cyan-500/20 text-cyan-400 border border-cyan-500/30'}`}>{ev.family.toUpperCase()}</span></td><td className="py-2.5 pr-2"><span className={`text-[9px] font-mono px-2 py-0.5 rounded font-bold border ${isNativePython ? 'bg-emerald-500/20 text-emerald-300 border-emerald-500/30' : 'bg-slate-800 text-slate-300 border-slate-700'}`}>{ev.runtimeMode ?? 'Unavailable'}</span></td><td className="py-2.5 pr-2"><div className="flex items-center gap-2 w-28"><span className={`font-black ${isUp ? 'text-emerald-400' : 'text-slate-400'}`}>{formatPercent(ev.probabilityUp)}</span><div className="w-12 bg-slate-900 h-1.5 rounded-full overflow-hidden border border-slate-800 shrink-0"><div className={`h-full ${isUp ? 'bg-emerald-500' : 'bg-rose-500'}`} style={{ width: `${Number.isFinite(ev.probabilityUp) ? Math.max(0, Math.min(100, ev.probabilityUp)) : 0}%` }} /></div></div></td><td className="py-2.5 pr-2"><span className={`font-black text-[10px] px-2 py-0.5 rounded ${isUp ? 'bg-emerald-500/10 text-emerald-400 border border-emerald-500/20' : 'bg-rose-500/10 text-rose-400 border border-rose-500/20'}`}>{ev.signal}</span></td><td className="py-2.5 pr-2 text-cyan-400 font-bold">{formatPercent(typeof displayWeight === 'number' ? displayWeight * 100 : undefined)}</td><td className="py-2.5 text-[10px] text-slate-400 max-w-xs truncate font-sans">{ev.details ?? 'Unavailable'}</td></tr>); })}</tbody></table></div></div>
 
-      <div className="p-3.5 rounded-xl bg-slate-900/90 border border-slate-800 space-y-2 text-xs"><div className="flex items-center justify-between"><span className="text-slate-300 font-bold flex items-center gap-2"><Database className="w-3.5 h-3.5 text-purple-400" /><span>Production ML Pipeline &amp; Model Registry Execution Architecture</span></span><span className="text-[10px] text-slate-500 font-mono">Python Daemon + ONNX + TS Fallbacks</span></div><p className="text-[11px] text-slate-400 leading-relaxed font-sans"><strong className="text-slate-200">Execution Runtime Transparency:</strong> XGBoost models run via persistent background Python daemon (<code className="text-emerald-300 font-mono">scripts/xgboost_engine.py</code>) using genuine scikit-learn / XGBoost C-bindings. Multi-horizon models connect to the ONNX Model Registry (<code className="text-cyan-300 font-mono">lib/onnx-engine.ts</code>). Sequence &amp; tree evaluators (TCN, Transformer, LightGBM, CatBoost) utilize high-throughput TypeScript mathematical engines for low-latency client/server orchestration.</p></div>
+      <div className="p-3.5 rounded-xl bg-slate-900/90 border border-slate-800 space-y-2 text-xs"><div className="flex items-center justify-between"><span className="text-slate-300 font-bold flex items-center gap-2"><Database className="w-3.5 h-3.5 text-purple-400" /><span>Production ML Pipeline &amp; Model Registry Execution Architecture</span></span><span className="text-[10px] text-slate-500 font-mono">Runtime-reported</span></div><p className="text-[11px] text-slate-400 leading-relaxed font-sans"><strong className="text-slate-200">Execution Runtime Transparency:</strong> Model identity and runtime mode are displayed only from the evaluator response. If an engine is unavailable, the UI reports that state instead of substituting a simulated prediction.</p></div>
     </div>
   );
 }
