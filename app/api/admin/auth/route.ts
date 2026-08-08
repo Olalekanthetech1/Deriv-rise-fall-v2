@@ -1,5 +1,6 @@
 import { NextRequest, NextResponse } from 'next/server';
 import crypto from 'crypto';
+import { recordObservabilityEvent } from '@/lib/observability';
 
 interface FailedAttempt {
   count: number;
@@ -31,6 +32,10 @@ function getConfiguredSecret(): string | null {
 function generateSessionToken(timestamp: number, secret: string): string {
   const hash = crypto.createHmac('sha256', secret).update(`admin_session_${timestamp}`).digest('hex');
   return `${timestamp}.${hash}`;
+}
+
+function getRequestId(req: NextRequest): string {
+  return req.headers.get('x-request-id')?.trim() || crypto.randomUUID();
 }
 
 export function verifySessionToken(token: string | undefined | null): boolean {
@@ -77,7 +82,12 @@ export async function POST(req: NextRequest) {
   cleanupAttempts();
 
   const configuredSecret = getConfiguredSecret();
+  const requestId = getRequestId(req);
   if (!configuredSecret) {
+    void recordObservabilityEvent({
+      category: 'security', severity: 'error', service: 'admin-auth', eventType: 'auth_not_configured',
+      message: 'Admin authentication configuration is missing.', requestId,
+    });
     return NextResponse.json(
       { success: false, error: 'Admin authentication is not configured. Set ADMIN_SECRET_KEY in the deployment environment.' },
       { status: 503 }
@@ -90,6 +100,11 @@ export async function POST(req: NextRequest) {
 
   if (attempt.lockoutUntil && attempt.lockoutUntil > now) {
     const remainingSeconds = Math.ceil((attempt.lockoutUntil - now) / 1000);
+    void recordObservabilityEvent({
+      category: 'security', severity: 'critical', service: 'admin-auth', eventType: 'auth_lockout_attempt',
+      message: 'Admin authentication request rejected because the source is temporarily locked out.', requestId,
+      metadata: { attempts: attempt.count, lockoutRemainingSeconds: remainingSeconds },
+    });
     return NextResponse.json(
       {
         success: false,
@@ -105,6 +120,10 @@ export async function POST(req: NextRequest) {
     const { key } = body;
 
     if (!key || typeof key !== 'string') {
+      void recordObservabilityEvent({
+        category: 'security', severity: 'warn', service: 'admin-auth', eventType: 'auth_missing_key',
+        message: 'Admin authentication request did not include a valid passkey value.', requestId,
+      });
       return NextResponse.json({ success: false, error: 'Admin passkey is required.' }, { status: 400 });
     }
 
@@ -118,6 +137,13 @@ export async function POST(req: NextRequest) {
         attempt.lockoutUntil = now + LOCKOUT_MS;
       }
       failedAttemptsMap.set(ip, attempt);
+
+      void recordObservabilityEvent({
+        category: 'security', severity: attempt.count >= MAX_FAILED_ATTEMPTS ? 'critical' : 'warn',
+        service: 'admin-auth', eventType: 'auth_failed',
+        message: 'Admin authentication failed.', requestId,
+        metadata: { attempts: attempt.count, locked: attempt.count >= MAX_FAILED_ATTEMPTS },
+      });
 
       return NextResponse.json(
         {
@@ -148,13 +174,28 @@ export async function POST(req: NextRequest) {
       maxAge: Math.floor(SESSION_TTL_MS / 1000),
     });
 
+    void recordObservabilityEvent({
+      category: 'security', severity: 'info', service: 'admin-auth', eventType: 'auth_success',
+      message: 'Admin authentication granted successfully.', requestId,
+    });
+
     return response;
   } catch {
+    void recordObservabilityEvent({
+      category: 'security', severity: 'warn', service: 'admin-auth', eventType: 'auth_malformed_request',
+      message: 'Admin authentication request could not be parsed.', requestId,
+    });
     return NextResponse.json({ success: false, error: 'Malformed request.' }, { status: 400 });
   }
 }
 
-export async function DELETE() {
+export async function DELETE(req: NextRequest) {
+  const requestId = getRequestId(req);
+  void recordObservabilityEvent({
+    category: 'security', severity: 'info', service: 'admin-auth', eventType: 'auth_logout',
+    message: 'Admin session logout requested.', requestId,
+  });
+
   const response = NextResponse.json({
     success: true,
     message: 'Admin logged out successfully.',
