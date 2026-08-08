@@ -119,7 +119,13 @@ export function useRealtimeSignals(
           return next;
         }));
 
-        if (data.consensus?.direction !== 'WAIT' && data.consensus.confidence >= 90 && data.consensus.agreement >= 75) {
+        const currentConsensus = data.consensus;
+        if (
+          currentConsensus &&
+          currentConsensus.direction !== 'WAIT' &&
+          currentConsensus.confidence >= 90 &&
+          currentConsensus.agreement >= 75
+        ) {
           playAlertSound();
         }
       } catch (err) {
