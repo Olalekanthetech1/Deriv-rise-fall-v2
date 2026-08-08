@@ -21,7 +21,7 @@ interface ProModeControlsProps {
   onDirectionChange: (dir: Direction) => void;
   allowEquals?: boolean;
   onAllowEqualsChange?: (val: boolean) => void;
-  onBuy: (targetDir?: Direction) => void;
+  onBuy: (targetDir?: Direction) => Promise<void>;
   isBuying: boolean;
   isConnected: boolean;
   duration: number;
@@ -67,28 +67,67 @@ export function ProModeControls({
   const [isAnalyzingAi, setIsAnalyzingAi] = useState(false);
   const [isAutoDuration, setIsAutoDuration] = useState(false);
   const [multiContractMultiplier, setMultiContractMultiplier] = useState(1);
+  const [isBatchExecuting, setIsBatchExecuting] = useState(false);
 
-  // Helper to trigger multi-contract batch execution
+  // Multi-contract execution is deliberately sequential. Each onBuy call now
+  // requests a fresh one-shot proposal immediately before buying, preventing
+  // proposal reuse and avoiding concurrent buy-state races.
   const executeBatchTrade = async (targetDir: Direction) => {
-    // If Auto Duration is active, set optimal duration dynamically
+    if (isBatchExecuting || isBuying) return;
+
+    let executionDuration = duration;
+    let executionUnit = durationUnit;
+
     if (isAutoDuration) {
       const optimal = calculateDynamicOptimalDuration(durationOptions, activeSymbol);
-      onDurationChange(optimal.duration);
-      onDurationUnitChange(optimal.unit);
+      executionDuration = optimal.duration;
+      executionUnit = optimal.unit;
+      onDurationChange(executionDuration);
+      onDurationUnitChange(executionUnit);
     }
 
-    if (multiContractMultiplier > 1) {
-      toast.info(`Batch Executing ${multiContractMultiplier}x Contracts...`, {
-        description: `Submitting ${multiContractMultiplier} simultaneous ${targetDir === 'CALL' ? 'RISE' : 'FALL'} orders ($${stake} each)`,
-      });
-      for (let i = 0; i < multiContractMultiplier; i++) {
-        onBuy(targetDir);
-        if (i < multiContractMultiplier - 1) {
-          await new Promise((res) => setTimeout(res, 120));
+    const count = multiContractMultiplier;
+    if (count <= 1) {
+      await onBuy(targetDir);
+      return;
+    }
+
+    setIsBatchExecuting(true);
+    toast.info(`Batch Executing ${count}x Contracts...`, {
+      description: `Submitting ${count} independent ${targetDir === 'CALL' ? 'RISE' : 'FALL'} orders at $${stake} each.`,
+    });
+
+    let successful = 0;
+    const errors: string[] = [];
+
+    try {
+      for (let i = 0; i < count; i += 1) {
+        try {
+          await onBuy(targetDir);
+          successful += 1;
+        } catch (error) {
+          const message = error instanceof Error ? error.message : 'Unknown execution error';
+          errors.push(`Contract ${i + 1}: ${message}`);
+          // Continue the remaining contracts so a transient proposal/buy
+          // failure does not silently cancel the rest of the requested batch.
         }
       }
-    } else {
-      onBuy(targetDir);
+
+      if (successful === count) {
+        toast.success(`Batch complete: ${successful}/${count} contracts purchased`, {
+          description: `Total stake: $${(Number(stake) * count).toFixed(2)}.` ,
+        });
+      } else if (successful > 0) {
+        toast.warning(`Partial batch: ${successful}/${count} contracts purchased`, {
+          description: errors[0] || 'One or more contracts could not be purchased.',
+        });
+      } else {
+        toast.error(`Batch failed: 0/${count} contracts purchased`, {
+          description: errors[0] || 'No contracts were purchased.',
+        });
+      }
+    } finally {
+      setIsBatchExecuting(false);
     }
   };
 
@@ -102,7 +141,11 @@ export function ProModeControls({
     }
     onDirectionChange('CALL');
     tradeStrategyStore.setStrategy('Manual');
-    executeBatchTrade('CALL');
+    void executeBatchTrade('CALL').catch((error) => {
+      toast.error('Rise execution failed', {
+        description: error instanceof Error ? error.message : 'Unable to execute the trade.',
+      });
+    });
   };
 
   // Instant execution for Fall
@@ -115,7 +158,11 @@ export function ProModeControls({
     }
     onDirectionChange('PUT');
     tradeStrategyStore.setStrategy('Manual');
-    executeBatchTrade('PUT');
+    void executeBatchTrade('PUT').catch((error) => {
+      toast.error('Fall execution failed', {
+        description: error instanceof Error ? error.message : 'Unable to execute the trade.',
+      });
+    });
   };
 
   // AI Trading auto-signal button execution
@@ -169,7 +216,7 @@ export function ProModeControls({
         description: `Executing ${multiContractMultiplier > 1 ? `${multiContractMultiplier}x batch ` : ''}automated AI contract with ${stake} USD stake...`,
       });
 
-      executeBatchTrade(aiDirection);
+      await executeBatchTrade(aiDirection);
     } catch (err: any) {
       setIsAnalyzingAi(false);
       toast.error(`AI Analysis Failed`, {
@@ -177,6 +224,8 @@ export function ProModeControls({
       });
     }
   };
+
+  const controlsDisabled = !isConnected || isBuying || isBatchExecuting || isAnalyzingAi;
 
   return (
     <div className="w-full space-y-4">
@@ -217,7 +266,7 @@ export function ProModeControls({
         {/* RISE Button */}
         <button
           type="button"
-          disabled={!isConnected || isBuying}
+          disabled={controlsDisabled}
           onClick={handleRiseClick}
           className="h-16 rounded-2xl bg-gradient-to-b from-emerald-500 to-emerald-600 hover:from-emerald-400 hover:to-emerald-500 active:scale-95 transition-all duration-150 flex items-center justify-center shadow-lg shadow-emerald-950/40 border border-emerald-400/30 group disabled:opacity-50"
         >
@@ -232,7 +281,7 @@ export function ProModeControls({
         {/* AI TRADING Button */}
         <button
           type="button"
-          disabled={!isConnected || isBuying || isAnalyzingAi}
+          disabled={controlsDisabled}
           onClick={handleAiTradingClick}
           className="relative h-16 rounded-2xl bg-gradient-to-r from-cyan-500 via-blue-600 to-indigo-600 hover:from-cyan-400 hover:to-indigo-500 active:scale-[0.98] transition-all duration-200 flex items-center justify-center px-3 shadow-xl shadow-cyan-500/25 border border-cyan-300/40 group overflow-hidden disabled:opacity-50"
         >
@@ -262,7 +311,7 @@ export function ProModeControls({
         {/* FALL Button */}
         <button
           type="button"
-          disabled={!isConnected || isBuying}
+          disabled={controlsDisabled}
           onClick={handleFallClick}
           className="h-16 rounded-2xl bg-gradient-to-b from-red-500 to-rose-600 hover:from-red-400 hover:to-rose-500 active:scale-95 transition-all duration-150 flex items-center justify-center shadow-lg shadow-rose-950/40 border border-rose-400/30 group disabled:opacity-50"
         >
