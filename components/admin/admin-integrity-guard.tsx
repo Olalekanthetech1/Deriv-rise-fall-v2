@@ -89,9 +89,9 @@ export function AdminIntegrityGuard({ children }: AdminIntegrityGuardProps) {
   useEffect(() => {
     const sanitize = () => {
       removeSyntheticControls(document);
-      if (hasLiveTradeRecords === false) {
+      replaceLegacyLabels(document);
+      if (hasLiveTradeRecords !== true) {
         hideSyntheticPerformancePanels(document);
-        replaceLegacyLabels(document);
       }
     };
 
