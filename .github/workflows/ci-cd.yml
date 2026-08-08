@@ -23,52 +23,36 @@ jobs:
       shell: python
       run: |
         from pathlib import Path
-
         path = Path('app/admin/page.tsx')
         text = path.read_text(encoding='utf-8')
-
         text = text.replace("  const [isSeedingTrades, setIsSeedingTrades] = useState<boolean>(false);\n", "")
         start = text.find("  const handleSeedTrades = async (count: number = 20) => {")
         if start >= 0:
             end = text.find("  const handleSyncDerivTicks = async () => {", start)
-            if end < 0:
-                raise SystemExit('Could not locate end of handleSeedTrades')
+            if end < 0: raise SystemExit('Could not locate end of handleSeedTrades')
             text = text[:start] + text[end:]
-
         def remove_button(label, source):
             pos = source.find(label)
-            if pos < 0:
-                return source
+            if pos < 0: return source
             start = source.rfind('<button', 0, pos)
-            if start < 0:
-                raise SystemExit(f'Could not locate opening button for {label}')
-            depth = 0
-            i = start
+            if start < 0: raise SystemExit(f'Could not locate opening button for {label}')
+            depth = 0; i = start
             while i < len(source):
-                if source.startswith('<button', i):
-                    depth += 1
-                    i += 7
+                if source.startswith('<button', i): depth += 1; i += 7
                 elif source.startswith('</button>', i):
-                    depth -= 1
-                    i += 9
-                    if depth == 0:
-                        return source[:start] + source[i:]
-                else:
-                    i += 1
+                    depth -= 1; i += 9
+                    if depth == 0: return source[:start] + source[i:]
+                else: i += 1
             raise SystemExit(f'Could not locate closing button for {label}')
-
         text = remove_button('Seed 20 Test Trades', text)
         text = remove_button('Seed Execution Trades', text)
-
         for name in ('defaultConfidenceBrackets', 'defaultPnlCurve', 'defaultEnsembleData'):
             marker = f'  const {name} = '
             start = text.find(marker)
             if start >= 0:
                 end = text.find('\n  const ', start + len(marker))
-                if end < 0:
-                    raise SystemExit(f'Could not locate end of {name}')
+                if end < 0: raise SystemExit(f'Could not locate end of {name}')
                 text = text[:start] + text[end + 1:]
-
         text = text.replace("    activeModel: 'N/A',", "    activeModel: 'No production model',")
         text = text.replace("""  const confidenceBrackets = (statsData?.confidenceBrackets && statsData.confidenceBrackets.length > 0)\n    ? statsData.confidenceBrackets\n    : defaultConfidenceBrackets;\n""", """  const confidenceBrackets = Array.isArray(statsData?.confidenceBrackets)\n    ? statsData.confidenceBrackets\n    : [];\n""")
         text = text.replace("""  const pnlCurve = (statsData?.pnlCurve && statsData.pnlCurve.length > 0)\n    ? statsData.pnlCurve\n    : defaultPnlCurve;\n""", """  const pnlCurve = Array.isArray(statsData?.pnlCurve)\n    ? statsData.pnlCurve\n    : [];\n""")
@@ -80,20 +64,10 @@ jobs:
         text = text.replace("{lastPingResult?.candidateModel || `Model: XGBoost-${latencySymbol}-v4.2`}", "{lastPingResult?.candidateModel || 'No production model'}")
         text = text.replace("{isDbConnected ? 'Demo & Live' : 'Database Offline'}", "{isDbConnected ? 'Live records' : 'Database Offline'}")
         text = text.replace('Click &quot;Seed Execution Trades&quot; above to populate!', 'No persisted trade records available yet.')
-
         path.write_text(text, encoding='utf-8')
-
-        forbidden = [
-            'isSeedingTrades', 'handleSeedTrades', 'Seed 20 Test Trades', 'Seed Execution Trades',
-            'defaultConfidenceBrackets', 'defaultPnlCurve', 'defaultEnsembleData',
-            'XGBoost Horizon 5t', 'XGBoost-Default', 'Demo & Live',
-            'LightGBM Multi-Feature', 'ONNX Deep Classifier', 'Random Forest Baseline',
-        ]
-        source = path.read_text(encoding='utf-8')
-        remaining = [marker for marker in forbidden if marker in source]
-        if remaining:
-            raise SystemExit('Forbidden Phase 5A markers remain: ' + ', '.join(remaining))
-
+        forbidden = ['isSeedingTrades','handleSeedTrades','Seed 20 Test Trades','Seed Execution Trades','defaultConfidenceBrackets','defaultPnlCurve','defaultEnsembleData','XGBoost Horizon 5t','XGBoost-Default','Demo & Live','LightGBM Multi-Feature','ONNX Deep Classifier','Random Forest Baseline']
+        remaining = [m for m in forbidden if m in path.read_text(encoding='utf-8')]
+        if remaining: raise SystemExit('Forbidden Phase 5A markers remain: ' + ', '.join(remaining))
         Path('.phase5a-trigger').unlink(missing_ok=True)
         Path('.github/workflows/phase5a-finalize.yml').unlink(missing_ok=True)
         print('Phase 5A source cleanup passed.')
@@ -105,17 +79,12 @@ jobs:
         git config user.name 'github-actions[bot]'
         git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
         git add -A
-        if git diff --cached --quiet; then
-          echo 'Phase 5A cleanup already committed.'
-        else
-          git commit -m 'fix: complete Phase 5A admin dashboard cleanup'
-          git push origin HEAD:${{ github.head_ref }}
-        fi
+        if git diff --cached --quiet; then echo 'Phase 5A cleanup already committed.'; else git commit -m 'fix: complete Phase 5A admin dashboard cleanup'; git push origin HEAD:${{ github.head_ref }}; fi
 
     - name: Setup Node.js
       uses: actions/setup-node@v4
       with:
-        node-version: '20'
+        node-version: '22'
         cache: 'npm'
 
     - name: Install dependencies
@@ -137,9 +106,7 @@ jobs:
     needs: build-and-test
     runs-on: ubuntu-latest
     if: github.ref == 'refs/heads/main'
-
     steps:
     - uses: actions/checkout@v4
-
     - name: Build Docker Image
       run: docker build -t ai-trading-app:latest .
