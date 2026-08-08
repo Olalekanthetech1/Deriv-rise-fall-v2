@@ -182,11 +182,6 @@ export function useRiseFallTrading({ ws, isConnected, isExhausted, isAuthenticat
 
   const { buyContract: buyWithProposal, isBuying, buyResult, buyError, clearBuyResult } = useBuy(tradingWs, tradingIsConnected);
 
-  /**
-   * Always obtain a fresh one-shot proposal immediately before a purchase.
-   * Optional duration overrides are used by the Auto Duration engine so the
-   * proposal sent to Deriv matches the duration selected for this execution.
-   */
   const buyContract = useCallback(async (targetDir?: Direction, overrides?: BuyExecutionOverrides) => {
     const dir = targetDir || direction;
     const proposalDuration = overrides?.duration ?? duration;
@@ -206,14 +201,22 @@ export function useRiseFallTrading({ ws, isConnected, isExhausted, isAuthenticat
   }, [direction, duration, durationUnit, buildProposalParams, proposalManager, tradingIsConnected, buyWithProposal]);
 
   const buyWithCustomParams = useCallback(async (params: { direction: Direction; duration: number; durationUnit: DurationSelectUnit }) => {
-    if (!tradingWs || !tradingIsConnected || !activeSymbol || !proposalManager) return;
-    if (!parseFloat(stake) || parseFloat(stake) <= 0) return;
+    if (!tradingWs || !tradingIsConnected || !activeSymbol || !proposalManager) {
+      throw new Error('Trading connection is not ready. Please wait for the market connection.');
+    }
+    if (!parseFloat(stake) || parseFloat(stake) <= 0) {
+      throw new Error('Enter a valid stake before executing the signal.');
+    }
 
     const proposalParams = buildProposalParams(params.direction, params.duration, params.durationUnit);
-    if (!proposalParams) return;
+    if (!proposalParams) {
+      throw new Error(`Unable to build a valid ${params.duration}${params.durationUnit} ${params.direction} contract proposal.`);
+    }
 
     const targetProposal = await proposalManager.getProposal(proposalParams);
-    if (!targetProposal) return;
+    if (!targetProposal) {
+      throw new Error('Deriv did not return a valid proposal for this signal.');
+    }
 
     await buyWithProposal(targetProposal);
     setDirection(params.direction);
