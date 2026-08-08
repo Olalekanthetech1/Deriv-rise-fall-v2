@@ -35,7 +35,11 @@ def persist(a):
 def reversal(a): return 0.0 if len(a)<3 else sum(1 for i in range(2,len(a)) if (a[i-1]-a[i-2])*(a[i]-a[i-1])<0)/(len(a)-2)
 
 def features(ticks,duration=5,asset=0,symbol=''):
-    ticks=ticks or [{'price':100.0,'timestamp':int(time.time()*1000)}]; p=[f(t.get('price')) for t in ticks]; n=len(p); cur=p[-1]; sub=lambda k:p[max(0,n-k):]
+    if not ticks:
+        raise ValueError('REAL_TICKS_REQUIRED')
+    p=[f(t.get('price')) for t in ticks]
+    if not p or any(not math.isfinite(x) for x in p): raise ValueError('INVALID_TICK_PRICES')
+    n=len(p); cur=p[-1]; sub=lambda k:p[max(0,n-k):]
     p1=p[-2] if n>1 else cur; p2=p[-3] if n>2 else p1; p3=p[-4] if n>3 else p2; d1=cur-p1; d2=cur-p2; d3=cur-p3
     up=sum(p[i]>p[i-1] for i in range(1,n)); down=sum(p[i]<p[i-1] for i in range(1,n)); td=max(1,n-1); cu=cd=0
     for i in range(n-1,0,-1):
@@ -47,13 +51,14 @@ def features(ticks,duration=5,asset=0,symbol=''):
             if cu:break
             cd+=1
         else:break
-    mi,sh,md,ma=map(sub,(5,25,100,300)); half=max(1,len(sh)//2); sr=max(sh)-min(sh); comp=.5 if sr==0 else (cur-min(sh))/sr
+    mi,sh,md,ma=map(sub,(5,25,100,300))
+    half=max(1,len(sh)//2); sr=max(sh)-min(sh); comp=.5 if sr==0 else (cur-min(sh))/sr
     first=f(ticks[0].get('timestamp'),time.time()*1000); last=f(ticks[-1].get('timestamp'),time.time()*1000); elapsed=max(1,(last-first)/1000); mm=mom(ma)
     even=sum(int(f'{x:.5f}'[-1])%2==0 for x in p)
     return [d1,d2,d3,mom(mi),mom(sh),mom(md),mm,sr,abs(md[-1]-md[0]),abs(ma[-1]-ma[0]),up/td,down/td,(up-down)/td,cu,cd,persist(mi),persist(sh),reversal(sh),reversal(md),vel(mi),vel(sh),vel(md),vel(sh[half:])-vel(sh[:half]),n/elapsed,(cur-p[0])/elapsed,std(sh),std(md),std(ma),comp,max(md)-cur,cur-min(md),1 if mm>.05 else -1 if mm<-.05 else 0,1 if symbol.startswith('1HZ') or '1S' in symbol else 0,float(duration),math.log(max(1,duration)),even/max(1,n),float(asset)]
 def X(t,d,a,s): return np.asarray([features(t,d,a,s)],dtype=np.float32)
 def seq_X(t,d,a,s):
-    if len(t)<SEQ: t=([t[0]] if t else [{'price':100}])*max(0,SEQ-len(t))+t
+    if len(t)<SEQ: raise ValueError(f'INSUFFICIENT_SEQUENCE_TICKS: need {SEQ}, got {len(t)}')
     return np.asarray([[features(t[max(0,i-SEQ):i],d,a,s) for i in range(1,len(t)+1)][-SEQ:]],dtype=np.float32)
 def path(k,s,d): return MODEL_DIR/f'{s}_{d}s_{k}.pkl'
 def load(k,s,d):
@@ -91,7 +96,7 @@ def train_one(kind,t,d,a,s,h):
             if cb is None:raise RuntimeError('catboost unavailable')
             m=cb.CatBoostClassifier(iterations=int(h.get('numEstimators',100)),depth=int(h.get('maxDepth',6)),learning_rate=float(h.get('learningRate',.05)),verbose=False,random_seed=42,thread_count=2).fit(Xt,yt)
         pr=m.predict_proba(Xv); metrics={'accuracy':round(float(accuracy_score(yv,np.argmax(pr,axis=1)))*100,3),'logLoss':round(float(log_loss(yv,pr,labels=[0,1])),6)}
-        save(kind,s,d,{'schemaVersion':SCHEMA,'modelType':kind,'featureCount':FEATURES,'model':m,'validation':metrics}); return {'success':True,'modelId':f'{s}_{d}s_{kind}','modelType':kind,'samplesCount':len(X),'validationSamples':len(Xv),**metrics,'engine':f'Trained native Python {kind}'}
+        save(kind,s,d,{'schemaVersion':SCHEMA,'modelType':kind,'featureCount':FEATURES,'model':m,'validation':metrics,'trainedAt':time.time()}); return {'success':True,'modelId':f'{s}_{d}s_{kind}','modelType':kind,'samplesCount':len(X),'validationSamples':len(Xv),**metrics,'engine':f'Trained native Python {kind}'}
     if kind in ('tcn','lstm','transformer'):
         if train_deep is None:raise RuntimeError('PyTorch sequence runtime unavailable')
         prices=[f(x.get('price')) for x in t]; look=max(1,int(d));
@@ -102,7 +107,7 @@ def train_one(kind,t,d,a,s,h):
         with torch_no_grad():
             pr=predict_deep(kind,{x:v.cpu() for x,v in m.state_dict().items()},SX[k:])
         metrics={'accuracy':round(float(np.mean(np.argmax(pr,axis=1)==sy[k:]))*100,3),'logLoss':round(float(log_loss(sy[k:],pr,labels=[0,1])),6)}
-        save(kind,s,d,{'schemaVersion':SCHEMA,'modelType':kind,'state_dict':{x:v.cpu() for x,v in m.state_dict().items()},'validation':metrics}); return {'success':True,'modelId':f'{s}_{d}s_{kind}','modelType':kind,'samplesCount':len(SX),'validationSamples':len(SX)-k,**metrics,'engine':f'Trained PyTorch {kind}'}
+        save(kind,s,d,{'schemaVersion':SCHEMA,'modelType':kind,'state_dict':{x:v.cpu() for x,v in m.state_dict().items()},'validation':metrics,'trainedAt':time.time()}); return {'success':True,'modelId':f'{s}_{d}s_{kind}','modelType':kind,'samplesCount':len(SX),'validationSamples':len(SX)-k,**metrics,'engine':f'Trained PyTorch {kind}'}
     if kind=='hmm':
         if GaussianHMM is None:raise RuntimeError('hmmlearn unavailable')
         m=GaussianHMM(n_components=4,covariance_type='diag',n_iter=100,random_state=42).fit(Xt[:,[0,3,10,25]]); m.state_labels=['LOW_VOLATILITY','DIRECTIONAL_EXPANSION','CHOPPY_REVERSAL','SPIKE_REGIME']; save(kind,s,d,{'model':m,'validationSamples':len(Xv),'trainedAt':time.time(),'schemaVersion':SCHEMA}); return {'success':True,'modelId':f'{s}_{d}s_hmm','modelType':'hmm','samplesCount':len(X),'validationSamples':len(Xv),'engine':'Trained hmmlearn GaussianHMM'}
