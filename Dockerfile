@@ -51,10 +51,6 @@ WORKDIR /app
 
 # ------------------------------------------------------------
 # Copy package manifest
-#
-# IMPORTANT:
-# This project currently does NOT have package-lock.json,
-# therefore use npm install rather than npm ci.
 # ------------------------------------------------------------
 COPY package.json ./
 
@@ -63,13 +59,6 @@ COPY packages/core/package.json ./packages/core/package.json
 
 # ------------------------------------------------------------
 # Copy scripts BEFORE npm install.
-#
-# package.json contains:
-#
-# "postinstall": "node scripts/copy-smartcharts-assets.js"
-#
-# Therefore the scripts directory must exist before npm
-# lifecycle scripts are allowed to execute.
 # ------------------------------------------------------------
 COPY scripts ./scripts
 
@@ -80,19 +69,11 @@ COPY packages ./packages
 
 # ------------------------------------------------------------
 # Install Node dependencies.
-#
-# --ignore-scripts prevents postinstall from executing during
-# dependency installation.
 # ------------------------------------------------------------
 RUN npm install --ignore-scripts
 
 # ------------------------------------------------------------
-# Now run the project's postinstall explicitly.
-#
-# At this point:
-#   /app/scripts exists
-#   /app/packages exists
-#   /app/node_modules exists
+# Run the project's postinstall explicitly.
 # ------------------------------------------------------------
 RUN npm run postinstall
 
@@ -121,9 +102,32 @@ COPY --from=deps /app/packages ./packages
 COPY --from=deps /app/scripts ./scripts
 
 # ------------------------------------------------------------
+# Source revision cache-buster.
+# Changing this value intentionally invalidates the source COPY
+# layer so a stale Render/Docker source layer cannot survive a
+# source-boundary fix.
+# ------------------------------------------------------------
+ARG APP_SOURCE_REV=23b73c4
+RUN echo "Building application source revision: ${APP_SOURCE_REV}"
+
+# ------------------------------------------------------------
 # Copy the rest of the application
 # ------------------------------------------------------------
 COPY . .
+
+# ------------------------------------------------------------
+# Build-time guard: Client Components must never import the
+# server-side ML evaluator/daemon or API route modules.
+# This converts an opaque Next.js dependency-trace failure into
+# a deterministic build failure with the offending import shown.
+# ------------------------------------------------------------
+RUN echo "Verifying browser-safe Multi-Model boundaries..." && \
+    if grep -nE "from ['\"]@/lib/(multi-model-evaluator|xgboost-daemon|production-ensemble|onnx-engine)|from ['\"].*app/api/" \
+      components/custom/signals-drawer.tsx components/custom/multi-model-evaluation-card.tsx; then \
+      echo "ERROR: server-only ML dependency detected in a Client Component."; \
+      exit 1; \
+    fi && \
+    echo "Browser-safe Multi-Model boundary check passed."
 
 # ------------------------------------------------------------
 # Render build arguments
