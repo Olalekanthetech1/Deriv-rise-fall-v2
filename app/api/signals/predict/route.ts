@@ -2,6 +2,7 @@ import { NextRequest, NextResponse } from 'next/server';
 import { extract37TickFeatures, TickPoint } from '@/lib/ml-feature-extractor';
 import { evaluateProductionEnsemble, ProductionEnsembleResult } from '@/lib/production-ensemble';
 import { initDbSchema, getDb } from '@/lib/db';
+import { ensureMinTicks } from '@/lib/ticks-helper';
 import { buildConsensus, createDuration, durationToSeconds } from '@/lib/signal-manager';
 
 export interface DurationPrediction {
