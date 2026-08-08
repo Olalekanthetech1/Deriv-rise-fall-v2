@@ -16,7 +16,7 @@ jobs:
         fetch-depth: 0
 
     - name: Finalize Phase 5A admin integrity cleanup
-      if: github.event_name == 'pull_request' && github.head_ref == 'phase5a-final-cleanup'
+      if: github.event_name == 'pull_request' && startsWith(github.head_ref, 'phase5a-')
       shell: python
       run: |
         from pathlib import Path
@@ -24,7 +24,6 @@ jobs:
         path = Path('app/admin/page.tsx')
         text = path.read_text(encoding='utf-8')
 
-        # Remove legacy seeding state and handler.
         text = text.replace("  const [isSeedingTrades, setIsSeedingTrades] = useState<boolean>(false);\n", "")
         start = text.find("  const handleSeedTrades = async (count: number = 20) => {")
         if start >= 0:
@@ -58,7 +57,6 @@ jobs:
         text = remove_button('Seed 20 Test Trades', text)
         text = remove_button('Seed Execution Trades', text)
 
-        # Remove fabricated fallback datasets.
         for name in ('defaultConfidenceBrackets', 'defaultPnlCurve', 'defaultEnsembleData'):
             marker = f'  const {name} = '
             start = text.find(marker)
@@ -93,14 +91,12 @@ jobs:
         if remaining:
             raise SystemExit('Forbidden Phase 5A markers remain: ' + ', '.join(remaining))
 
-        # The helper workflow and trigger are temporary and must not survive the cleanup.
         Path('.phase5a-trigger').unlink(missing_ok=True)
         Path('.github/workflows/phase5a-finalize.yml').unlink(missing_ok=True)
-
         print('Phase 5A source cleanup passed.')
 
     - name: Commit verified Phase 5A cleanup
-      if: github.event_name == 'pull_request' && github.head_ref == 'phase5a-final-cleanup'
+      if: github.event_name == 'pull_request' && startsWith(github.head_ref, 'phase5a-')
       shell: bash
       run: |
         git config user.name 'github-actions[bot]'
