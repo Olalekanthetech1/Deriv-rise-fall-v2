@@ -25,12 +25,6 @@ function isAuthorized(req: NextRequest) {
   return verifySessionToken(cookie) || verifySessionToken(header);
 }
 
-function normalizeDate(value: unknown): string | null {
-  if (typeof value !== 'string') return null;
-  const date = new Date(value);
-  return Number.isNaN(date.getTime()) ? null : date.toISOString();
-}
-
 function matchesFilters(row: EventRow, filters: { category: string; severity: string; service: string; symbol: string; model: string; q: string; since: number }) {
   const created = new Date(row.createdAt).getTime();
   if (filters.category !== 'all' && row.category !== filters.category) return false;
@@ -74,13 +68,10 @@ export async function GET(req: NextRequest) {
   const sql = neon(dbUrl);
   const filters = { category, severity, service, symbol, model, q, since };
   const events: EventRow[] = [];
-  const coverage = {
-    persistedEvents: 'UNAVAILABLE',
-    tradingLogs: 'UNAVAILABLE',
-    mlLogs: 'UNAVAILABLE',
-    modelRegistry: 'UNAVAILABLE',
-    applicationApi: 'PARTIAL',
-  };
+  let persistedEventReadSucceeded = false;
+  let mlLogReadSucceeded = false;
+  let tradingLogReadSucceeded = false;
+  let modelRegistryReadSucceeded = false;
 
   try {
     if (await ensureObservabilitySchema()) {
@@ -92,6 +83,7 @@ export async function GET(req: NextRequest) {
         ORDER BY created_at DESC
         LIMIT 300
       `;
+      persistedEventReadSucceeded = true;
       for (const row of rows as any[]) {
         events.push({
           id: row.id,
@@ -109,7 +101,6 @@ export async function GET(req: NextRequest) {
           source: 'observability_events',
         });
       }
-      coverage.persistedEvents = 'AVAILABLE';
     }
   } catch (error) {
     console.error('[Observability read events error]:', error);
@@ -122,18 +113,24 @@ export async function GET(req: NextRequest) {
       WHERE created_at >= ${new Date(since).toISOString()}
       ORDER BY created_at DESC LIMIT 150
     `;
+    mlLogReadSucceeded = rows.length > 0;
     for (const row of rows as any[]) {
       events.push({
         id: `ml-${row.id}`,
-        category: 'ml', severity: Number(row.val_accuracy ?? 0) > 0 ? 'info' : 'warn',
-        service: 'ml-training', eventType: 'training_log',
+        category: 'ml',
+        severity: Number(row.val_accuracy) > 0 ? 'info' : 'warn',
+        service: 'ml-training',
+        eventType: 'training_log',
         message: row.log_message || `Training run recorded for ${row.symbol}`,
-        requestId: null, correlationId: null, symbol: row.symbol, modelId: null,
-        createdAt: new Date(row.created_at).toISOString(), source: 'ml_training_logs',
+        requestId: null,
+        correlationId: null,
+        symbol: row.symbol,
+        modelId: null,
+        createdAt: new Date(row.created_at).toISOString(),
+        source: 'ml_training_logs',
         metadata: { samples: row.samples_count, trainAccuracy: row.train_accuracy, validationAccuracy: row.val_accuracy },
       });
     }
-    coverage.mlLogs = 'AVAILABLE';
   } catch (error) {
     console.warn('[Observability ml logs unavailable]:', error);
   }
@@ -145,19 +142,25 @@ export async function GET(req: NextRequest) {
       WHERE executed_at >= ${new Date(since).toISOString()}
       ORDER BY executed_at DESC LIMIT 150
     `;
+    tradingLogReadSucceeded = rows.length > 0;
     for (const row of rows as any[]) {
       const status = String(row.status ?? '').toLowerCase();
       events.push({
         id: `trade-${row.id}`,
-        category: 'trading', severity: ['error', 'failed', 'rejected'].includes(status) ? 'error' : 'info',
-        service: 'trading', eventType: 'execution',
+        category: 'trading',
+        severity: ['error', 'failed', 'rejected'].includes(status) ? 'error' : 'info',
+        service: 'trading',
+        eventType: 'execution',
         message: `Trade ${status || 'recorded'} · ${row.contract_type || 'contract'} · ${row.strategy || 'strategy not recorded'}`,
-        requestId: null, correlationId: null, symbol: row.symbol, modelId: null,
-        createdAt: new Date(row.executed_at).toISOString(), source: 'trades',
+        requestId: null,
+        correlationId: null,
+        symbol: row.symbol,
+        modelId: null,
+        createdAt: new Date(row.executed_at).toISOString(),
+        source: 'trades',
         metadata: { status: row.status, confidence: row.prediction_confidence },
       });
     }
-    coverage.tradingLogs = 'AVAILABLE';
   } catch (error) {
     console.warn('[Observability trading logs unavailable]:', error);
   }
@@ -169,21 +172,36 @@ export async function GET(req: NextRequest) {
       WHERE updated_at >= ${new Date(since).toISOString()}
       ORDER BY updated_at DESC LIMIT 150
     `;
+    modelRegistryReadSucceeded = rows.length > 0;
     for (const row of rows as any[]) {
       events.push({
         id: `model-${row.id}`,
-        category: 'ml', severity: ['failed', 'error'].includes(String(row.status).toLowerCase()) ? 'error' : 'info',
-        service: 'model-registry', eventType: 'model_registry_change',
+        category: 'ml',
+        severity: ['failed', 'error'].includes(String(row.status).toLowerCase()) ? 'error' : 'info',
+        service: 'model-registry',
+        eventType: 'model_registry_change',
         message: `${row.model_name} ${row.version} · status ${row.status}`,
-        requestId: null, correlationId: null, symbol: row.symbol, modelId: row.model_id,
-        createdAt: new Date(row.updated_at).toISOString(), source: 'ml_model_registry',
+        requestId: null,
+        correlationId: null,
+        symbol: row.symbol,
+        modelId: row.model_id,
+        createdAt: new Date(row.updated_at).toISOString(),
+        source: 'ml_model_registry',
         metadata: { accuracy: row.accuracy, version: row.version, status: row.status },
       });
     }
-    coverage.modelRegistry = 'AVAILABLE';
   } catch (error) {
     console.warn('[Observability model registry unavailable]:', error);
   }
+
+  const applicationApiEvents = events.filter((event) => event.source === 'observability_events' && (event.category === 'application' || event.category === 'api'));
+  const coverage = {
+    persistedEvents: persistedEventReadSucceeded ? 'AVAILABLE' : 'UNAVAILABLE',
+    tradingLogs: tradingLogReadSucceeded ? 'AVAILABLE' : 'UNAVAILABLE',
+    mlLogs: mlLogReadSucceeded ? 'AVAILABLE' : 'UNAVAILABLE',
+    modelRegistry: modelRegistryReadSucceeded ? 'AVAILABLE' : 'UNAVAILABLE',
+    applicationApi: applicationApiEvents.length > 0 ? 'AVAILABLE' : 'UNAVAILABLE',
+  } as const;
 
   const filtered = events
     .filter(event => matchesFilters(event, filters))
