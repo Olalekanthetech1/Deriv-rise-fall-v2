@@ -6,7 +6,9 @@ import { verifySessionToken } from '../auth/route';
 
 function isAuthValid(req: NextRequest): boolean {
   const cookieToken = req.cookies.get('admin_session_token')?.value;
-  const headerToken = req.headers.get('x-admin-token') || req.headers.get('authorization')?.replace(/^Bearer\s+/i, '');
+  const headerToken =
+    req.headers.get('x-admin-token') ||
+    req.headers.get('authorization')?.replace(/^Bearer\s+/i, '');
   return verifySessionToken(cookieToken) || verifySessionToken(headerToken);
 }
 
@@ -51,7 +53,9 @@ export async function GET(req: NextRequest) {
     if (!sql || !isDbConnected) {
       return NextResponse.json({
         isDbConnected: false,
+        dataSource: 'database-unavailable',
         isSimulated: false,
+        realTradesOnly: true,
         summary: {
           totalTrades: 0,
           wins: 0,
@@ -92,7 +96,9 @@ export async function GET(req: NextRequest) {
     if (!tradeRows || tradeRows.length === 0) {
       return NextResponse.json({
         isDbConnected: true,
+        dataSource: 'live-database',
         isSimulated: false,
+        realTradesOnly: true,
         summary: {
           totalTrades,
           wins: 0,
@@ -112,9 +118,7 @@ export async function GET(req: NextRequest) {
 
     let wins = 0;
     let losses = 0;
-    let totalProfit = 0;
     let pnlDataPoints = 0;
-
     const bracketsMap: Record<string, { wins: number; losses: number; total: number }> = {
       '70-79%': { wins: 0, losses: 0, total: 0 },
       '80-89%': { wins: 0, losses: 0, total: 0 },
@@ -123,6 +127,7 @@ export async function GET(req: NextRequest) {
 
     let cumPnl = 0;
     const pnlCurve: Array<{ tradeIndex: number; pnl: number }> = [];
+    const strategyMap: Record<string, { strategy: string; trades: number; wins: number; losses: number }> = {};
 
     tradeRows.forEach((t: any, idx: number) => {
       const status = String(t.status || '').toUpperCase();
@@ -135,6 +140,14 @@ export async function GET(req: NextRequest) {
 
       if (isWin) wins++;
       if (isLoss) losses++;
+
+      const strategy = String(t.strategy || 'Unknown').trim() || 'Unknown';
+      if (!strategyMap[strategy]) {
+        strategyMap[strategy] = { strategy, trades: 0, wins: 0, losses: 0 };
+      }
+      strategyMap[strategy].trades++;
+      if (isWin) strategyMap[strategy].wins++;
+      if (isLoss) strategyMap[strategy].losses++;
 
       // Only calculate P&L from actual persisted monetary values. Never invent payout/stake values.
       if ((isWin || isLoss) && hasStake && hasPayout) {
@@ -170,9 +183,21 @@ export async function GET(req: NextRequest) {
       return { bracket: key, wins: b.wins, losses: b.losses, total: b.total, winRate: wr };
     });
 
+    const strategyBreakdown = Object.values(strategyMap)
+      .map((s) => ({
+        ...s,
+        winRate: s.wins + s.losses > 0
+          ? Number(((s.wins / (s.wins + s.losses)) * 100).toFixed(1))
+          : 0,
+      }))
+      .sort((a, b) => b.trades - a.trades);
+
     const responseData = {
       isDbConnected: true,
+      dataSource: 'live-database',
       isSimulated: false,
+      realTradesOnly: true,
+      generatedAt: new Date().toISOString(),
       summary: {
         totalTrades,
         wins,
@@ -190,6 +215,7 @@ export async function GET(req: NextRequest) {
         },
       },
       confidenceBrackets,
+      strategyBreakdown,
       pnlCurve: pnlCurve.reverse(),
       recentTrades: tradeRows.slice(0, 20),
     };
@@ -205,7 +231,11 @@ export async function GET(req: NextRequest) {
     return NextResponse.json(responseData);
   } catch (err: any) {
     logger.error(`Error fetching admin stats: ${err.message}`);
-    return NextResponse.json({ error: err.message || 'Stats fetch failed' }, { status: 500 });
+    return NextResponse.json({
+      success: false,
+      isSimulated: false,
+      error: 'Unable to load live admin metrics.',
+    }, { status: 500 });
   }
 }
 
@@ -251,6 +281,7 @@ export async function POST(req: NextRequest) {
       return NextResponse.json({
         success: true,
         syncedTotal,
+        dataSource: 'deriv-live-ticks',
         message: `Successfully synchronized ${syncedTotal.toLocaleString()} real Deriv ticks across ${symbolsToSync.length} assets directly into PostgreSQL.`,
       });
     }
@@ -264,6 +295,7 @@ export async function POST(req: NextRequest) {
 
     return NextResponse.json({ error: 'Invalid action' }, { status: 400 });
   } catch (err: any) {
-    return NextResponse.json({ error: err.message || 'Action failed' }, { status: 500 });
+    logger.error(`Admin stats action failed: ${err?.message || err}`);
+    return NextResponse.json({ error: 'Admin stats action failed.' }, { status: 500 });
   }
 }
