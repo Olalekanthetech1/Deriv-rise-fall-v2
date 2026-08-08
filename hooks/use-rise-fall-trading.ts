@@ -177,18 +177,29 @@ export function useRiseFallTrading({ ws, isConnected, isExhausted, isAuthenticat
 
   const { buyContract: buyWithProposal, isBuying, buyResult, buyError, clearBuyResult } = useBuy(tradingWs, tradingIsConnected);
 
+  /**
+   * Always obtain a fresh one-shot proposal immediately before a purchase.
+   *
+   * This is important for multi-contract execution: the displayed proposal is
+   * only a UI quote and must not be reused for a second contract. Each call to
+   * buyContract therefore creates an independent proposal -> buy lifecycle.
+   * The Pro Mode batch executor awaits each call, so contracts are purchased
+   * sequentially rather than racing through the shared buy state.
+   */
   const buyContract = useCallback(async (targetDir?: Direction) => {
     const dir = targetDir || direction;
-    if (dir === direction && proposal) {
-      await buyWithProposal(proposal);
-      return;
+    const params = buildProposalParams(dir);
+    if (!params || !proposalManager || !tradingIsConnected) {
+      throw new Error('Trading parameters are not ready. Please wait for the market connection.');
     }
 
-    const params = buildProposalParams(dir);
-    if (!params || !proposalManager) return;
     const targetProposal = await proposalManager.getProposal(params);
-    if (targetProposal) await buyWithProposal(targetProposal);
-  }, [direction, proposal, buildProposalParams, proposalManager, buyWithProposal]);
+    if (!targetProposal) {
+      throw new Error('Deriv did not return a valid proposal for this contract.');
+    }
+
+    await buyWithProposal(targetProposal);
+  }, [direction, buildProposalParams, proposalManager, tradingIsConnected, buyWithProposal]);
 
   const buyWithCustomParams = useCallback(async (params: { direction: Direction; duration: number; durationUnit: DurationSelectUnit }) => {
     if (!tradingWs || !tradingIsConnected || !activeSymbol || !proposalManager) return;
