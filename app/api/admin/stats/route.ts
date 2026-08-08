@@ -1,12 +1,12 @@
 import { NextRequest, NextResponse } from 'next/server';
-import { initDbSchema, getDb, getTicksHistory } from '@/lib/db';
+import { initDbSchema, getDb } from '@/lib/db';
 import { Redis } from '@upstash/redis';
 import { logger } from '@/lib/logger';
 import { verifySessionToken } from '../auth/route';
 
 function isAuthValid(req: NextRequest): boolean {
   const cookieToken = req.cookies.get('admin_session_token')?.value;
-  const headerToken = req.headers.get('x-admin-token') || req.headers.get('authorization')?.replace('Bearer ', '');
+  const headerToken = req.headers.get('x-admin-token') || req.headers.get('authorization')?.replace(/^Bearer\s+/i, '');
   return verifySessionToken(cookieToken) || verifySessionToken(headerToken);
 }
 
@@ -14,11 +14,21 @@ let redisClient: Redis | null = null;
 if (process.env.UPSTASH_REDIS_REST_URL && process.env.UPSTASH_REDIS_REST_TOKEN) {
   try {
     redisClient = Redis.fromEnv();
-  } catch (err) {}
+  } catch (err) {
+    logger.warn('Unable to initialize Redis client for admin stats');
+  }
 }
 
 const CACHE_KEY = 'admin_stats_cache_v3';
-const CACHE_TTL_SECONDS = 30; // 30 seconds
+const CACHE_TTL_SECONDS = 30;
+
+const emptyConfidenceBrackets = [
+  { bracket: '70-79%', wins: 0, losses: 0, total: 0, winRate: 0 },
+  { bracket: '80-89%', wins: 0, losses: 0, total: 0, winRate: 0 },
+  { bracket: '90-100%', wins: 0, losses: 0, total: 0, winRate: 0 },
+];
+
+const emptyPnlCurve = [{ tradeIndex: 0, pnl: 0 }];
 
 export async function GET(req: NextRequest) {
   if (!isAuthValid(req)) {
@@ -29,10 +39,8 @@ export async function GET(req: NextRequest) {
     if (redisClient) {
       try {
         const cached = await redisClient.get(CACHE_KEY);
-        if (cached) {
-          return NextResponse.json(cached);
-        }
-      } catch (err) {
+        if (cached) return NextResponse.json(cached);
+      } catch {
         logger.warn('Redis cache read error in admin/stats');
       }
     }
@@ -40,62 +48,53 @@ export async function GET(req: NextRequest) {
     const isDbConnected = await initDbSchema();
     const sql = getDb();
 
-    // Zero-state values when database is offline or empty
-    const zeroBrackets = [
-      { bracket: '70-79%', wins: 0, losses: 0, total: 0, winRate: 0 },
-      { bracket: '80-89%', wins: 0, losses: 0, total: 0, winRate: 0 },
-      { bracket: '90-100%', wins: 0, losses: 0, total: 0, winRate: 0 },
-    ];
-
-    const zeroPnlCurve = [{ tradeIndex: 0, pnl: 0 }];
-
-    const zeroSummary = {
-      totalTrades: 0,
-      wins: 0,
-      losses: 0,
-      winRate: 0,
-      totalProfit: 0,
-      totalTicks: 0,
-      totalModels: 0,
-      activeModel: 'None (DB Offline)',
-      activeAccuracy: 0,
-    };
-
     if (!sql || !isDbConnected) {
       return NextResponse.json({
         isDbConnected: false,
         isSimulated: false,
-        summary: zeroSummary,
-        confidenceBrackets: zeroBrackets,
-        pnlCurve: zeroPnlCurve,
+        summary: {
+          totalTrades: 0,
+          wins: 0,
+          losses: 0,
+          winRate: 0,
+          totalProfit: 0,
+          totalTicks: 0,
+          totalModels: 0,
+          activeModel: 'Unavailable (DB Offline)',
+          activeAccuracy: null,
+        },
+        confidenceBrackets: emptyConfidenceBrackets,
+        pnlCurve: emptyPnlCurve,
         recentTrades: [],
       });
     }
 
-    // Query real PostgreSQL stats
-    const tradeRows = await sql`
-      SELECT id, symbol, contract_type, stake, payout, status, prediction_confidence, strategy, executed_at
-      FROM trades
-      ORDER BY executed_at DESC
-      LIMIT 100
-    `.catch(() => []);
+    const [tradeRows, totalTradesRes, ticksCountRes, modelCountRes, activeModelRes] = await Promise.all([
+      sql`
+        SELECT id, symbol, contract_type, stake, payout, status, prediction_confidence, strategy, executed_at
+        FROM trades
+        ORDER BY executed_at DESC
+        LIMIT 100
+      `.catch(() => []),
+      sql`SELECT COUNT(*) as cnt FROM trades`.catch(() => [{ cnt: '0' }]),
+      sql`SELECT COUNT(*) as cnt FROM ticks`.catch(() => [{ cnt: '0' }]),
+      sql`SELECT COUNT(*) as cnt FROM ml_models`.catch(() => [{ cnt: '0' }]),
+      sql`SELECT model_id, accuracy FROM ml_models ORDER BY trained_at DESC LIMIT 1`.catch(() => []),
+    ]);
 
-    const ticksCountRes = await sql`SELECT COUNT(*) as cnt FROM ticks`.catch(() => [{ cnt: '0' }]);
+    const totalTrades = parseInt(totalTradesRes[0]?.cnt || '0', 10);
     const totalTicks = parseInt(ticksCountRes[0]?.cnt || '0', 10);
-
-    const modelCountRes = await sql`SELECT COUNT(*) as cnt FROM ml_models`.catch(() => [{ cnt: '0' }]);
     const totalModels = parseInt(modelCountRes[0]?.cnt || '0', 10);
-
-    const activeModelRes = await sql`SELECT model_id, accuracy FROM ml_models ORDER BY trained_at DESC LIMIT 1`.catch(() => []);
-    const activeModel = activeModelRes.length > 0 ? activeModelRes[0].model_id : (totalModels > 0 ? 'XGBoost-Default' : 'None (No Trained Models)');
-    const activeAccuracy = activeModelRes.length > 0 ? parseFloat(activeModelRes[0].accuracy) || 0 : 0;
+    const activeModel = activeModelRes.length > 0 ? activeModelRes[0].model_id : 'Unavailable (No Trained Model)';
+    const parsedAccuracy = activeModelRes.length > 0 ? Number(activeModelRes[0].accuracy) : NaN;
+    const activeAccuracy = Number.isFinite(parsedAccuracy) ? parsedAccuracy : null;
 
     if (!tradeRows || tradeRows.length === 0) {
       return NextResponse.json({
         isDbConnected: true,
         isSimulated: false,
         summary: {
-          totalTrades: 0,
+          totalTrades,
           wins: 0,
           losses: 0,
           winRate: 0,
@@ -105,16 +104,16 @@ export async function GET(req: NextRequest) {
           activeModel,
           activeAccuracy,
         },
-        confidenceBrackets: zeroBrackets,
-        pnlCurve: zeroPnlCurve,
+        confidenceBrackets: emptyConfidenceBrackets,
+        pnlCurve: emptyPnlCurve,
         recentTrades: [],
       });
     }
 
-    // Process trade metrics
     let wins = 0;
     let losses = 0;
     let totalProfit = 0;
+    let pnlDataPoints = 0;
 
     const bracketsMap: Record<string, { wins: number; losses: number; total: number }> = {
       '70-79%': { wins: 0, losses: 0, total: 0 },
@@ -126,58 +125,69 @@ export async function GET(req: NextRequest) {
     const pnlCurve: Array<{ tradeIndex: number; pnl: number }> = [];
 
     tradeRows.forEach((t: any, idx: number) => {
-      const isWin = t.status === 'WON' || t.status === 'WIN' || (parseFloat(t.payout) > parseFloat(t.stake));
-      const conf = parseFloat(t.prediction_confidence) || 85.0;
-      const stakeNum = parseFloat(t.stake) || 10;
-      const payoutNum = parseFloat(t.payout) || (isWin ? stakeNum * 1.95 : 0);
+      const status = String(t.status || '').toUpperCase();
+      const stake = Number(t.stake);
+      const payout = Number(t.payout);
+      const hasStake = Number.isFinite(stake) && stake >= 0;
+      const hasPayout = Number.isFinite(payout) && payout >= 0;
+      const isWin = status === 'WON' || status === 'WIN';
+      const isLoss = status === 'LOST' || status === 'LOSS';
 
-      if (isWin) {
-        wins++;
-        cumPnl += (payoutNum - stakeNum);
-      } else {
-        losses++;
-        cumPnl -= stakeNum;
+      if (isWin) wins++;
+      if (isLoss) losses++;
+
+      // Only calculate P&L from actual persisted monetary values. Never invent payout/stake values.
+      if ((isWin || isLoss) && hasStake && hasPayout) {
+        cumPnl += payout - stake;
+        pnlDataPoints++;
       }
 
-      pnlCurve.push({ tradeIndex: tradeRows.length - idx, pnl: parseFloat(cumPnl.toFixed(2)) });
+      pnlCurve.push({
+        tradeIndex: tradeRows.length - idx,
+        pnl: Number(cumPnl.toFixed(2)),
+      });
 
-      // Assign to bracket
-      let bracketKey = '70-79%';
-      if (conf >= 90) bracketKey = '90-100%';
-      else if (conf >= 80) bracketKey = '80-89%';
+      const confidence = Number(t.prediction_confidence);
+      if (!Number.isFinite(confidence) || confidence < 0 || confidence > 100) return;
 
-      bracketsMap[bracketKey].total += 1;
-      if (isWin) bracketsMap[bracketKey].wins += 1;
-      else bracketsMap[bracketKey].losses += 1;
+      let bracketKey: string | null = null;
+      if (confidence >= 90) bracketKey = '90-100%';
+      else if (confidence >= 80) bracketKey = '80-89%';
+      else if (confidence >= 70) bracketKey = '70-79%';
+
+      if (!bracketKey) return;
+      bracketsMap[bracketKey].total++;
+      if (isWin) bracketsMap[bracketKey].wins++;
+      else if (isLoss) bracketsMap[bracketKey].losses++;
     });
 
-    const totalTrades = tradeRows.length || 1;
-    const winRate = parseFloat(((wins / totalTrades) * 100).toFixed(1));
+    const resolvedTrades = wins + losses;
+    const winRate = resolvedTrades > 0 ? Number(((wins / resolvedTrades) * 100).toFixed(1)) : 0;
 
     const confidenceBrackets = Object.keys(bracketsMap).map((key) => {
       const b = bracketsMap[key];
-      const wr = b.total > 0 ? parseFloat(((b.wins / b.total) * 100).toFixed(1)) : 0;
-      return {
-        bracket: key,
-        wins: b.wins,
-        losses: b.losses,
-        total: b.total,
-        winRate: wr,
-      };
+      const wr = b.total > 0 ? Number(((b.wins / b.total) * 100).toFixed(1)) : 0;
+      return { bracket: key, wins: b.wins, losses: b.losses, total: b.total, winRate: wr };
     });
 
     const responseData = {
       isDbConnected: true,
+      isSimulated: false,
       summary: {
-        totalTrades: tradeRows.length,
+        totalTrades,
         wins,
         losses,
         winRate,
-        totalProfit: parseFloat(cumPnl.toFixed(2)),
+        totalProfit: Number(cumPnl.toFixed(2)),
         totalTicks,
         totalModels,
         activeModel,
         activeAccuracy,
+        metricsQuality: {
+          recentTradesSampled: tradeRows.length,
+          resolvedTrades,
+          pnlTradesWithCompleteAmounts: pnlDataPoints,
+        },
       },
       confidenceBrackets,
       pnlCurve: pnlCurve.reverse(),
@@ -187,8 +197,7 @@ export async function GET(req: NextRequest) {
     if (redisClient) {
       try {
         await redisClient.setex(CACHE_KEY, CACHE_TTL_SECONDS, JSON.stringify(responseData));
-        logger.info(`Cached admin stats for ${CACHE_TTL_SECONDS}s`);
-      } catch (err) {
+      } catch {
         logger.warn('Redis cache write error in admin/stats');
       }
     }
@@ -207,13 +216,15 @@ export async function POST(req: NextRequest) {
 
   try {
     const body = await req.json();
-    const { action, count = 20 } = body;
+    const { action } = body;
 
     if (action === 'flush_cache') {
       if (redisClient) {
         try {
           await redisClient.del(CACHE_KEY);
-        } catch (err) {}
+        } catch {
+          logger.warn('Failed to flush admin stats cache');
+        }
       }
       return NextResponse.json({ success: true, message: 'Stats cache flushed' });
     }
@@ -234,55 +245,21 @@ export async function POST(req: NextRequest) {
       }
 
       if (redisClient) {
-        try { await redisClient.del(CACHE_KEY); } catch (e) {}
+        try { await redisClient.del(CACHE_KEY); } catch {}
       }
 
       return NextResponse.json({
         success: true,
         syncedTotal,
-        message: `Successfully synchronized ${syncedTotal.toLocaleString()} real Deriv ticks across ${symbolsToSync.length} assets directly into PostgreSQL!`,
+        message: `Successfully synchronized ${syncedTotal.toLocaleString()} real Deriv ticks across ${symbolsToSync.length} assets directly into PostgreSQL.`,
       });
     }
 
     if (action === 'seed_trades') {
-      const isDbConnected = await initDbSchema();
-      const sql = getDb();
-
-      if (!sql || !isDbConnected) {
-        return NextResponse.json({ success: false, error: 'Database not connected to seed trades' }, { status: 400 });
-      }
-
-      const { xgboostModel } = await import('@/lib/xgboost-engine');
-      const symbols = ['R_100', 'R_75', 'R_50', 'R_25', '1HZ100V'];
-
-      for (let i = 0; i < Math.min(count, 50); i++) {
-        const symbol = symbols[i % symbols.length];
-        const ticks = await getTicksHistory(symbol, 60);
-        
-        let prediction = { signal: 'CALL', confidence: 85.0, modelVersion: '3.4.0' };
-        if (ticks && ticks.length >= 10) {
-          prediction = xgboostModel.predict(ticks, { symbol });
-        }
-
-        const strategy = `XGBoost ${prediction.modelVersion}`;
-        const confidence = prediction.confidence;
-        const contractType = prediction.signal === 'CALL' ? 'RISE' : 'FALL';
-        const isWin = confidence > 82.0;
-        const stake = 10;
-        const payout = isWin ? parseFloat((stake * 1.95).toFixed(2)) : 0;
-        const status = isWin ? 'WON' : 'LOST';
-
-        await sql`
-          INSERT INTO trades (symbol, contract_type, stake, payout, status, prediction_confidence, strategy, executed_at)
-          VALUES (${symbol}, ${contractType}, ${stake}, ${payout}, ${status}, ${confidence}, ${strategy}, NOW() - (${i} * INTERVAL '2 minutes'))
-        `;
-      }
-
-      if (redisClient) {
-        try { await redisClient.del(CACHE_KEY); } catch (e) {}
-      }
-
-      return NextResponse.json({ success: true, message: `Successfully initialized ${count} trades based on XGBoost model predictions.` });
+      return NextResponse.json({
+        success: false,
+        error: 'Synthetic trade seeding is disabled. Admin metrics must contain real executed contracts only.',
+      }, { status: 410 });
     }
 
     return NextResponse.json({ error: 'Invalid action' }, { status: 400 });
