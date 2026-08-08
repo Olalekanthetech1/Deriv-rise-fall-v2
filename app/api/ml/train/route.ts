@@ -69,7 +69,7 @@ export async function POST(req: NextRequest) {
               horizonSecs: durationSecs,
               format: result.format || (model === 'tcn' || model === 'lstm' || model === 'transformer' ? 'PT_STATE' : 'PKL'),
               status: 'production',
-              accuracy: Number.isFinite(Number(result.accuracy)) ? Number(result.accuracy) : null,
+              accuracy: Number.isFinite(Number(result.accuracy)) ? Number(result.accuracy) : undefined,
               backtestWinRate: null,
               backtestProfitFactor: null,
               filePath: `${sym}_${durationSecs}s_${model}.pkl`,
