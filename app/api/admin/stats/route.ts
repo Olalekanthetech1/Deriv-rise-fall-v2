@@ -286,13 +286,6 @@ export async function POST(req: NextRequest) {
       });
     }
 
-    if (action === 'seed_trades') {
-      return NextResponse.json({
-        success: false,
-        error: 'Synthetic trade seeding is disabled. Admin metrics must contain real executed contracts only.',
-      }, { status: 410 });
-    }
-
     return NextResponse.json({ error: 'Invalid action' }, { status: 400 });
   } catch (err: any) {
     logger.error(`Admin stats action failed: ${err?.message || err}`);
