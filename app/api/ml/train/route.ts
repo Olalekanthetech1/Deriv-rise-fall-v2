@@ -70,8 +70,11 @@ export async function POST(req: NextRequest) {
               format: result.format || (model === 'tcn' || model === 'lstm' || model === 'transformer' ? 'PT_STATE' : 'PKL'),
               status: 'production',
               accuracy: Number.isFinite(Number(result.accuracy)) ? Number(result.accuracy) : undefined,
-              backtestWinRate: null,
-              backtestProfitFactor: null,
+              // These metrics are not returned by the training daemon yet.
+              // Omit them rather than passing null, because registerModelInDb
+              // accepts optional numeric fields and applies its own DB defaults.
+              backtestWinRate: undefined,
+              backtestProfitFactor: undefined,
               filePath: `${sym}_${durationSecs}s_${model}.pkl`,
               hyperparameters: { maxDepth, learningRate, numEstimators, subsample, epochs, batchSize },
             });
