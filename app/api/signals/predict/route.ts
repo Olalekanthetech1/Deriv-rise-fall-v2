@@ -2,8 +2,7 @@ import { NextRequest, NextResponse } from 'next/server';
 import { extract37TickFeatures, TickPoint } from '@/lib/ml-feature-extractor';
 import { evaluateProductionEnsemble, ProductionEnsembleResult } from '@/lib/production-ensemble';
 import { initDbSchema, getDb } from '@/lib/db';
-import { ensureMinTicks } from '@/lib/ticks-helper';
-import { buildConsensus, buildModeRecommendations, createDuration, durationToSeconds } from '@/lib/signal-manager';
+import { buildConsensus, createDuration, durationToSeconds } from '@/lib/signal-manager';
 
 export interface DurationPrediction {
   value: number;
@@ -34,21 +33,12 @@ export interface SignalResponseItem {
   timestamp: number;
 }
 
-function normalizeDuration(value: unknown, unit: unknown): { value: number; unit: 't' | 'm' | 'h'; label: string; seconds: number } {
+function normalizeDuration(value: unknown, unit: unknown) {
   const safeValue = Number(value);
   const normalizedValue = Number.isFinite(safeValue) && safeValue > 0 ? safeValue : 5;
   const normalizedUnit: 't' | 'm' | 'h' = unit === 'm' || unit === 'h' ? unit : 't';
   const label = `${normalizedValue} ${normalizedUnit === 't' ? 'Tick' : normalizedUnit === 'm' ? 'Min' : 'Hr'}${normalizedValue === 1 ? '' : 's'}`;
   return { value: normalizedValue, unit: normalizedUnit, label, seconds: durationToSeconds(normalizedValue, normalizedUnit) };
-}
-
-function categoryForModel(modelKey: string): SignalResponseItem['category'] {
-  if (modelKey === 'xgboost' || modelKey === 'lightgbm' || modelKey === 'catboost' || modelKey === 'tcn' || modelKey === 'lstm' || modelKey === 'transformer') return 'AI';
-  return 'AI';
-}
-
-function strengthFor(direction: 'RISE' | 'FALL'): SignalResponseItem['strength'] {
-  return direction === 'RISE' ? 'Buy' : 'Sell';
 }
 
 function buildSignalItems(ensemble: ProductionEnsembleResult, duration: ReturnType<typeof normalizeDuration>, now: number): SignalResponseItem[] {
@@ -69,10 +59,10 @@ function buildSignalItems(ensemble: ProductionEnsembleResult, duration: ReturnTy
       return {
         id: `sig-${evaluation.modelKey}-${ensemble.symbol}`,
         name: evaluation.modelName,
-        category: categoryForModel(evaluation.modelKey),
+        category: 'AI',
         direction,
         confidence,
-        strength: strengthFor(direction),
+        strength: direction === 'RISE' ? 'Buy' : 'Sell',
         recommendedDurationValue: duration.value,
         recommendedDurationUnit: duration.unit,
         recommendedDurationLabel: duration.label,
@@ -87,22 +77,23 @@ function buildSignalItems(ensemble: ProductionEnsembleResult, duration: ReturnTy
     });
 }
 
-function buildModeRecommendationsFromAvailable(signals: SignalResponseItem[]) {
+function buildModeRecommendations(signals: SignalResponseItem[]) {
   if (!signals.length) return [];
   const ranked = [...signals].sort((a, b) => b.confidence - a.confidence);
-  const tabular = ranked.find((signal) => /XGBoost|LightGBM|CatBoost/i.test(signal.name));
-  const sequential = ranked.find((signal) => /TCN|LSTM|Transformer/i.test(signal.name));
-  const classic = tabular ?? ranked[0];
-  const pro = sequential ?? ranked[0];
+  const tabular = ranked.find((signal) => /XGBoost|LightGBM|CatBoost/i.test(signal.name)) ?? ranked[0];
+  const sequential = ranked.find((signal) => /TCN|LSTM|Transformer/i.test(signal.name)) ?? ranked[0];
   const ai = ranked[0];
-  const sourceSignals = [classic, pro, ai].filter((signal, index, array) => signal && array.findIndex((candidate) => candidate?.id === signal.id) === index);
-  return sourceSignals.map((signal, index) => ({
-    mode: index === 0 ? 'CLASSIC' as const : index === 1 ? 'PRO' as const : 'AI' as const,
-    direction: signal.direction,
-    confidence: signal.confidence,
-    duration: createDuration(signal.recommendedDurationValue, signal.recommendedDurationUnit, signal.recommendedDurationLabel),
-    sourceSignalId: signal.id,
-    rationale: `${signal.name} · ${signal.description}`,
+  return [
+    { mode: 'CLASSIC' as const, source: tabular, rationale: 'Highest-ranked available tabular/native model output.' },
+    { mode: 'PRO' as const, source: sequential, rationale: 'Highest-ranked available sequential/native model output.' },
+    { mode: 'AI' as const, source: ai, rationale: 'Highest-ranked available native ensemble model output.' },
+  ].map(({ mode, source, rationale }) => ({
+    mode,
+    direction: source.direction,
+    confidence: source.confidence,
+    duration: createDuration(source.recommendedDurationValue, source.recommendedDurationUnit, source.recommendedDurationLabel),
+    sourceSignalId: source.id,
+    rationale: `${rationale} ${source.description}`,
   }));
 }
 
@@ -112,7 +103,6 @@ export async function POST(req: NextRequest) {
     const body = await req.json().catch(() => ({}));
     const symbol = typeof body?.symbol === 'string' && body.symbol.trim() ? body.symbol.trim() : 'R_100';
     const duration = normalizeDuration(body?.durationValue, body?.durationUnit);
-    const pipSize = Number.isFinite(Number(body?.pipSize)) && Number(body.pipSize) > 0 ? Number(body.pipSize) : undefined;
 
     let tickList: TickPoint[] = Array.isArray(body?.ticks) && body.ticks.length > 0 ? body.ticks : [];
     if (tickList.length < 25) tickList = await ensureMinTicks(symbol, 100);
@@ -123,9 +113,7 @@ export async function POST(req: NextRequest) {
       symbol,
       contractDurationSecs: duration.seconds,
       assetCategoryNum,
-      ...(pipSize !== undefined ? { pipSize } : {}),
-    } as Parameters<typeof extract37TickFeatures>[1]);
-
+    });
     const ensemble = await evaluateProductionEnsemble(tickList, {
       symbol,
       durationSecs: duration.seconds,
@@ -136,7 +124,7 @@ export async function POST(req: NextRequest) {
     const generatedSignals = buildSignalItems(ensemble, duration, now);
     if (!generatedSignals.length) throw new Error('NO_NATIVE_MODEL_SIGNALS_AVAILABLE');
 
-    const modeRecommendations = buildModeRecommendationsFromAvailable(generatedSignals);
+    const modeRecommendations = buildModeRecommendations(generatedSignals);
     const consensusBase = buildConsensus(generatedSignals, now);
     const consensus = { ...consensusBase, modeRecommendations };
 
@@ -164,7 +152,6 @@ export async function POST(req: NextRequest) {
 
     const winStats = { total: totalVerified, winCount, accuracy };
     const primary = generatedSignals[0];
-
     if (sql) {
       try {
         await sql`
