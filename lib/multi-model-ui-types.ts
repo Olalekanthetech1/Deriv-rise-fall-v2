@@ -11,7 +11,8 @@ export type MultiModelSignal = 'RISE' | 'FALL';
 export interface MultiModelEvaluationView {
   modelKey: string;
   modelName: string;
-  family?: 'tabular' | 'sequential' | string;
+  /** Every production evaluator must identify its model family. */
+  family: 'tabular' | 'sequential' | string;
   runtimeMode?: string;
   probabilityUp: number;
   probabilityDown: number;
