@@ -24,13 +24,19 @@ if (process.env.UPSTASH_REDIS_REST_URL && process.env.UPSTASH_REDIS_REST_TOKEN) 
 const CACHE_KEY = 'admin_stats_cache_v3';
 const CACHE_TTL_SECONDS = 30;
 
-const emptyConfidenceBrackets = [
-  { bracket: '70-79%', wins: 0, losses: 0, total: 0, winRate: 0 },
-  { bracket: '80-89%', wins: 0, losses: 0, total: 0, winRate: 0 },
-  { bracket: '90-100%', wins: 0, losses: 0, total: 0, winRate: 0 },
-];
+// Empty-state helpers intentionally return fresh values. These are UI-safe zero states,
+// not historical/mock analytics, and are only used when there is no persisted data.
+function createEmptyConfidenceBrackets() {
+  return [
+    { bracket: '70-79%', wins: 0, losses: 0, total: 0, winRate: 0 },
+    { bracket: '80-89%', wins: 0, losses: 0, total: 0, winRate: 0 },
+    { bracket: '90-100%', wins: 0, losses: 0, total: 0, winRate: 0 },
+  ];
+}
 
-const emptyPnlCurve = [{ tradeIndex: 0, pnl: 0 }];
+function createEmptyPnlCurve() {
+  return [{ tradeIndex: 0, pnl: 0 }];
+}
 
 export async function GET(req: NextRequest) {
   if (!isAuthValid(req)) {
@@ -67,8 +73,8 @@ export async function GET(req: NextRequest) {
           activeModel: 'Unavailable (DB Offline)',
           activeAccuracy: null,
         },
-        confidenceBrackets: emptyConfidenceBrackets,
-        pnlCurve: emptyPnlCurve,
+        confidenceBrackets: createEmptyConfidenceBrackets(),
+        pnlCurve: createEmptyPnlCurve(),
         recentTrades: [],
       });
     }
@@ -110,8 +116,8 @@ export async function GET(req: NextRequest) {
           activeModel,
           activeAccuracy,
         },
-        confidenceBrackets: emptyConfidenceBrackets,
-        pnlCurve: emptyPnlCurve,
+        confidenceBrackets: createEmptyConfidenceBrackets(),
+        pnlCurve: createEmptyPnlCurve(),
         recentTrades: [],
       });
     }
