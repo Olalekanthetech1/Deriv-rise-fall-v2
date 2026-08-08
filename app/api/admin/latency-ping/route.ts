@@ -2,13 +2,14 @@ import { NextRequest, NextResponse } from 'next/server';
 import { verifySessionToken } from '../auth/route';
 import { extract37TickFeatures } from '@/lib/ml-feature-extractor';
 
-export async function POST(req: NextRequest) {
-  // Session token verification
+function isAuthValid(req: NextRequest): boolean {
   const cookieToken = req.cookies.get('admin_session_token')?.value;
-  const headerToken = req.headers.get('x-admin-token') || req.headers.get('authorization')?.replace('Bearer ', '');
-  const isAuth = verifySessionToken(cookieToken) || verifySessionToken(headerToken);
+  const headerToken = req.headers.get('x-admin-token') || req.headers.get('authorization')?.replace(/^Bearer\s+/i, '');
+  return verifySessionToken(cookieToken) || verifySessionToken(headerToken);
+}
 
-  if (!isAuth) {
+export async function POST(req: NextRequest) {
+  if (!isAuthValid(req)) {
     return NextResponse.json({ success: false, error: 'Unauthorized' }, { status: 401 });
   }
 
@@ -16,19 +17,24 @@ export async function POST(req: NextRequest) {
 
   try {
     const body = await req.json().catch(() => ({}));
-    const symbol = body.symbol || 'R_100';
+    const symbol = typeof body.symbol === 'string' && body.symbol.trim() ? body.symbol.trim() : null;
+    if (!symbol) {
+      return NextResponse.json({ success: false, error: 'A valid symbol is required.' }, { status: 400 });
+    }
 
-    // 1. Measure Feature Extraction Latency
-    const startFeat = process.hrtime.bigint();
-
-    // Get real tick sequence from database / tick engine
     const { getTicksHistory, initDbSchema } = await import('@/lib/db');
-    await initDbSchema();
-    let ticks = await getTicksHistory(symbol, 50);
+    const dbReady = await initDbSchema();
+    if (!dbReady) {
+      return NextResponse.json({ success: false, error: 'Database unavailable; real tick data is required for latency diagnostics.' }, { status: 503 });
+    }
 
+    const startFeat = process.hrtime.bigint();
+    const ticks = await getTicksHistory(symbol, 50);
     if (!ticks || ticks.length < 5) {
-      const { generateSyntheticTicks } = await import('@/lib/ticks-helper');
-      ticks = generateSyntheticTicks(symbol, 50);
+      return NextResponse.json({
+        success: false,
+        error: `Insufficient real ticks for ${symbol}. Received ${ticks?.length || 0}; synthetic ticks are not permitted.`,
+      }, { status: 422 });
     }
 
     const featureObj = extract37TickFeatures(ticks, { symbol });
@@ -36,26 +42,30 @@ export async function POST(req: NextRequest) {
     const endFeat = process.hrtime.bigint();
     const featureExtractTimeMs = Number(endFeat - startFeat) / 1_000_000;
 
-    // 2. Measure Model Inference Overhead using actual XGBoost ML Engine
     const startInference = process.hrtime.bigint();
-    const { xgboostModel } = await import('@/lib/xgboost-engine');
-    const prediction = xgboostModel.predict(ticks, { symbol });
+    const { xgboostDaemon } = await import('@/lib/xgboost-daemon');
+    const inference = await xgboostDaemon.sendCommand('predict', {
+      symbol,
+      ticks,
+    });
     const endInference = process.hrtime.bigint();
     const modelInferenceTimeMs = Number(endInference - startInference) / 1_000_000;
+
+    if (!inference?.success) {
+      return NextResponse.json({ success: false, error: inference?.error || 'Native ML inference unavailable.' }, { status: 503 });
+    }
 
     const endTotal = process.hrtime.bigint();
     const serverExecutionTimeMs = Number(endTotal - startTotal) / 1_000_000;
 
-    // Diagnostics diagnosis
     let diagnosisStatus: 'optimal' | 'warning' | 'critical' = 'optimal';
-    let diagnosisMessage = 'Candidate model inference operating at optimal high-frequency speed (<15ms).';
-
+    let diagnosisMessage = 'Native model inference and feature extraction completed.';
     if (serverExecutionTimeMs > 50) {
       diagnosisStatus = 'critical';
-      diagnosisMessage = `Candidate ${symbol} model execution delay detected (${serverExecutionTimeMs.toFixed(2)}ms > 50ms threshold). Recommend feature cache pre-loading.`;
+      diagnosisMessage = `Native inference pipeline exceeded 50ms (${serverExecutionTimeMs.toFixed(2)}ms).`;
     } else if (serverExecutionTimeMs > 15) {
       diagnosisStatus = 'warning';
-      diagnosisMessage = `Elevated feature calculation time (${serverExecutionTimeMs.toFixed(2)}ms). Non-blocking background worker active.`;
+      diagnosisMessage = `Native inference pipeline exceeded the 15ms diagnostic target (${serverExecutionTimeMs.toFixed(2)}ms).`;
     }
 
     return NextResponse.json({
@@ -65,7 +75,7 @@ export async function POST(req: NextRequest) {
       featureExtractTimeMs: Number(featureExtractTimeMs.toFixed(3)),
       modelInferenceTimeMs: Number(modelInferenceTimeMs.toFixed(3)),
       featureCount: features.length,
-      candidateModel: `XGBoost-${symbol}-v4.2-ONNX`,
+      candidateModel: inference.modelType || inference.modelName || 'native-python-runtime',
       diagnosisStatus,
       diagnosisMessage,
       timestamp: new Date().toISOString(),
