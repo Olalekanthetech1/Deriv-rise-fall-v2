@@ -37,19 +37,13 @@ def train_one(kind, ticks, duration, asset, symbol, hyperparams):
         result.setdefault('featureCount', runtime.FEATURES)
         result.setdefault('hyperparameters', hyperparams)
         return result
-
     if runtime.train_deep is None:
         raise RuntimeError('PyTorch sequence runtime unavailable')
     X, y = _sequence_dataset(ticks, duration, asset, symbol, max(1, int(duration)))
     split = max(1, int(len(X) * 0.8))
     if split >= len(X):
         raise ValueError('Not enough validation samples')
-    model = runtime.train_deep(
-        kind, X[:split], y[:split],
-        epochs=int(hyperparams.get('epochs', 8)),
-        batch_size=int(hyperparams.get('batchSize', 64)),
-        lr=float(hyperparams.get('learningRate', 0.001)),
-    )
+    model = runtime.train_deep(kind, X[:split], y[:split], epochs=int(hyperparams.get('epochs', 8)), batch_size=int(hyperparams.get('batchSize', 64)), lr=float(hyperparams.get('learningRate', 0.001)))
     import torch
     from sklearn.metrics import log_loss
     model.eval()
@@ -57,46 +51,27 @@ def train_one(kind, ticks, duration, asset, symbol, hyperparams):
         state = {k: v.cpu() for k, v in model.state_dict().items()}
         probs = runtime.predict_deep(kind, state, X[split:])
     pred = np.argmax(probs, axis=1)
-    metrics = {
-        'accuracy': round(float(np.mean(pred == y[split:])) * 100.0, 3),
-        'logLoss': round(float(log_loss(y[split:], probs, labels=[0, 1])), 6),
-    }
-    runtime.save(kind, symbol, duration, {
-        'schemaVersion': runtime.SCHEMA,
-        'modelType': kind,
-        'featureCount': runtime.FEATURES,
-        'sequenceLength': runtime.SEQ,
-        'state_dict': state,
-        'validation': metrics,
-        'trainedAt': time.time(),
-    })
-    return {
-        'success': True,
-        'modelId': f'{symbol}_{duration}s_{kind}',
-        'modelType': kind,
-        'samplesCount': len(X),
-        'validationSamples': len(X) - split,
-        'featureCount': runtime.FEATURES,
-        'hyperparameters': hyperparams,
-        **metrics,
-        'engine': f'Trained PyTorch {kind}',
-    }
+    metrics = {'accuracy': round(float(np.mean(pred == y[split:])) * 100.0, 3), 'logLoss': round(float(log_loss(y[split:], probs, labels=[0, 1])), 6)}
+    runtime.save(kind, symbol, duration, {'schemaVersion': runtime.SCHEMA, 'modelType': kind, 'featureCount': runtime.FEATURES, 'sequenceLength': runtime.SEQ, 'state_dict': state, 'validation': metrics, 'trainedAt': time.time()})
+    return {'success': True, 'modelId': f'{symbol}_{duration}s_{kind}', 'modelType': kind, 'samplesCount': len(X), 'validationSamples': len(X) - split, 'featureCount': runtime.FEATURES, 'hyperparameters': hyperparams, **metrics, 'engine': f'Trained PyTorch {kind}'}
 
 
 runtime.train_one = train_one
 
 
-def backtest(ticks, symbol, horizons, asset, min_confidence, stake, payout_rate):
+def backtest(ticks, symbol, horizons, asset, min_confidence=None, stake=None, payout_rate=None):
     if not symbol:
         raise ValueError('Backtest symbol is required')
     if not horizons:
         raise ValueError('At least one backtest horizon is required')
-    if not np.isfinite(min_confidence) or not 0 <= min_confidence <= 100:
+    if min_confidence is not None and (not np.isfinite(min_confidence) or not 0 <= min_confidence <= 100):
         raise ValueError('minConfidence must be between 0 and 100')
-    if not np.isfinite(stake) or stake <= 0:
+    if stake is not None and (not np.isfinite(stake) or stake <= 0):
         raise ValueError('stake must be positive')
-    if not np.isfinite(payout_rate) or payout_rate <= 0 or payout_rate > 1:
+    if payout_rate is not None and (not np.isfinite(payout_rate) or payout_rate <= 0 or payout_rate > 1):
         raise ValueError('payoutRate must be greater than 0 and no greater than 1')
+    if (stake is None) != (payout_rate is None):
+        raise ValueError('stake and payoutRate must be supplied together')
 
     prices = [runtime.f(t.get('price')) for t in ticks]
     if len(prices) < 30:
@@ -127,21 +102,21 @@ def backtest(ticks, symbol, horizons, asset, min_confidence, stake, payout_rate)
             probability_up = float(pred[1])
             probability_down = float(pred[0])
             confidence = max(probability_up, probability_down) * 100.0
-            if confidence < min_confidence:
+            if min_confidence is not None and confidence < min_confidence:
                 rejected += 1
                 continue
             predicted_up = probability_up >= probability_down
             actual_up = future > current
             if predicted_up == actual_up:
                 wins += 1
-                gross_profit += stake * payout_rate
+                if stake is not None and payout_rate is not None: gross_profit += stake * payout_rate
             else:
                 losses += 1
-                gross_loss += stake
+                if stake is not None: gross_loss += stake
 
         trades = wins + losses
-        total_profit = gross_profit - gross_loss
-        profit_factor = gross_profit / gross_loss if gross_loss > 0 else None
+        total_profit = gross_profit - gross_loss if stake is not None else None
+        profit_factor = gross_profit / gross_loss if stake is not None and gross_loss > 0 else None
         win_rate = (wins / trades) * 100.0 if trades else None
         matrix[str(h)] = {
             'horizonSecs': h,
@@ -153,36 +128,27 @@ def backtest(ticks, symbol, horizons, asset, min_confidence, stake, payout_rate)
             'accuracy': round(win_rate, 3) if win_rate is not None else None,
             'winRate': round(win_rate, 3) if win_rate is not None else None,
             'profitFactor': round(profit_factor, 6) if profit_factor is not None else None,
-            'profitFactorInfinite': bool(gross_profit > 0 and gross_loss == 0),
-            'totalProfit': round(total_profit, 8),
+            'profitFactorInfinite': bool(stake is not None and gross_profit > 0 and gross_loss == 0),
+            'totalProfit': round(total_profit, 8) if total_profit is not None else None,
         }
 
     available = [item for item in matrix.values() if item.get('available') and item.get('winRate') is not None]
     best = max(available, key=lambda item: float(item['winRate'])) if available else None
-    return {
-        'success': True,
-        'symbol': symbol,
-        'sampleCount': len(ticks),
-        'minConfidence': min_confidence,
-        'stake': stake,
-        'payoutRate': payout_rate,
-        'horizonMatrix': matrix,
-        'bestHorizon': best.get('horizonSecs') if best else None,
-        'engine': 'Native trained XGBoost out-of-sample backtest',
-        'timestamp': int(time.time() * 1000),
-    }
+    return {'success': True, 'symbol': symbol, 'sampleCount': len(ticks), 'minConfidence': min_confidence, 'stake': stake, 'payoutRate': payout_rate, 'horizonMatrix': matrix, 'bestHorizon': best.get('horizonSecs') if best else None, 'engine': 'Native trained XGBoost out-of-sample backtest', 'timestamp': int(time.time() * 1000)}
 
 
 def dispatch(r):
     action = r.get('action')
     if action == 'predict': return runtime.predict_one(r)
-    if action == 'train':
-        return train_one(r.get('modelType', 'xgboost'), r.get('ticks', []), int(r.get('durationSecs', 5)), int(r.get('assetCategory', 0)), r.get('symbol', 'R_100'), r.get('hyperparams', {}))
+    if action == 'train': return train_one(r.get('modelType', 'xgboost'), r.get('ticks', []), int(r.get('durationSecs', 5)), int(r.get('assetCategory', 0)), r.get('symbol', 'R_100'), r.get('hyperparams', {}))
     if action == 'predict_ensemble':
         models = ('xgboost', 'lightgbm', 'catboost', 'tcn', 'lstm', 'transformer', 'hmm', 'isolation_forest')
         return {'success': True, 'id': r.get('id'), 'models': {k: runtime.predict_one({**r, 'modelType': k}) for k in models}}
     if action == 'backtest':
-        return {'id': r.get('id'), **backtest(r.get('ticks', []), r.get('symbol'), r.get('horizons'), int(r.get('assetCategory', 0)), float(r.get('minConfidence')), float(r.get('stake')), float(r.get('payoutRate')))}
+        min_confidence = float(r['minConfidence']) if r.get('minConfidence') is not None else None
+        stake = float(r['stake']) if r.get('stake') is not None else None
+        payout_rate = float(r['payoutRate']) if r.get('payoutRate') is not None else None
+        return {'id': r.get('id'), **backtest(r.get('ticks', []), r.get('symbol'), r.get('horizons'), int(r.get('assetCategory', 0)), min_confidence, stake, payout_rate)}
     if action == 'ping': return {'success': True, 'id': r.get('id'), 'pong': True, 'schemaVersion': runtime.SCHEMA}
     if action == 'list_models': return {'success': True, 'id': r.get('id'), 'models': [p.name for p in runtime.MODEL_DIR.glob('*.pkl')]}
     return {'success': False, 'id': r.get('id'), 'error': f'Unknown action {action}'}
