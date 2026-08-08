@@ -26,7 +26,17 @@ export function useBuy(
   }, []);
 
   const buyContract = useCallback(async (proposal: ProposalInfo) => {
-    if (!ws || !isConnected) return;
+    if (!ws || !isConnected) {
+      const error = new Error('WebSocket is not connected. Unable to purchase contract.');
+      setBuyError(error.message);
+      throw error;
+    }
+
+    if (!proposal?.id || !Number.isFinite(Number(proposal.askPrice)) || Number(proposal.askPrice) <= 0) {
+      const error = new Error('Invalid Deriv proposal: proposal ID or ask price is missing.');
+      setBuyError(error.message);
+      throw error;
+    }
 
     setIsBuying(true);
     setBuyError(null);
@@ -38,17 +48,23 @@ export function useBuy(
         price: String(proposal.askPrice),
       });
 
-      if (response.buy) {
-        setBuyResult({
-          contractId: response.buy.contract_id,
-          buyPrice: response.buy.buy_price,
-          payout: response.buy.payout,
-          longcode: response.buy.longcode,
-          balanceAfter: response.buy.balance_after,
-        });
+      if (!response.buy?.contract_id) {
+        throw new Error('Deriv accepted the buy request without returning a contract ID.');
       }
+
+      const result: BuyResult = {
+        contractId: response.buy.contract_id,
+        buyPrice: response.buy.buy_price,
+        payout: response.buy.payout,
+        longcode: response.buy.longcode,
+        balanceAfter: response.buy.balance_after,
+      };
+
+      setBuyResult(result);
     } catch (err) {
-      setBuyError(err instanceof Error ? err.message : 'Purchase failed');
+      const message = err instanceof Error ? err.message : 'Purchase failed';
+      setBuyError(message);
+      throw err instanceof Error ? err : new Error(message);
     } finally {
       setIsBuying(false);
     }
