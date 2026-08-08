@@ -19,8 +19,7 @@ const EMPTY_STATE_HEADINGS = [
 ];
 
 function removeSyntheticControls(root: ParentNode) {
-  const elements = root.querySelectorAll('button');
-  elements.forEach((button) => {
+  root.querySelectorAll('button').forEach((button) => {
     const label = button.textContent?.replace(/\s+/g, ' ').trim() ?? '';
     if (SYNTHETIC_BUTTON_TEXT.some((text) => label.includes(text))) {
       button.remove();
@@ -33,9 +32,7 @@ function hideSyntheticPerformancePanels(root: ParentNode) {
     root.querySelectorAll('h2, h3, span').forEach((node) => {
       if (node.textContent?.replace(/\s+/g, ' ').trim() !== heading) return;
       const panel = node.closest('.bg-slate-900\\/80');
-      if (panel instanceof HTMLElement) {
-        panel.style.display = 'none';
-      }
+      if (panel instanceof HTMLElement) panel.style.display = 'none';
     });
   });
 }
@@ -46,15 +43,18 @@ function replaceLegacyLabels(root: ParentNode) {
     const text = node.textContent?.trim();
     if (text === 'Demo & Live') {
       node.textContent = 'Persisted live trade records';
-    } else if (text === 'XGBoost-Default') {
+      return;
+    }
+    if (text === 'XGBoost-Default') {
       node.textContent = 'No production model';
-    } else if (text === 'WINS' || text === 'LOSSES') {
+      return;
+    }
+    if (text === 'WINS' || text === 'LOSSES') {
       const valueNode = node.parentElement?.querySelector('p:first-child');
-      if (valueNode && valueNode !== node) {
-        const value = Number(valueNode.textContent);
-        if (Number.isFinite(value) && (value === 54 || value === 9)) {
-          valueNode.textContent = '0';
-        }
+      if (!valueNode || valueNode === node) return;
+      const value = Number(valueNode.textContent);
+      if (Number.isFinite(value) && (value === 54 || value === 9)) {
+        valueNode.textContent = '0';
       }
     }
   });
@@ -72,7 +72,9 @@ export function AdminIntegrityGuard({ children }: AdminIntegrityGuardProps) {
         if (!response.ok) return;
         const data = await response.json();
         const totalTrades = Number(data?.summary?.totalTrades ?? 0);
-        if (!cancelled) setHasLiveTradeRecords(Number.isFinite(totalTrades) && totalTrades > 0);
+        if (!cancelled) {
+          setHasLiveTradeRecords(Number.isFinite(totalTrades) && totalTrades > 0);
+        }
       } catch {
         if (!cancelled) setHasLiveTradeRecords(false);
       }
@@ -85,12 +87,12 @@ export function AdminIntegrityGuard({ children }: AdminIntegrityGuardProps) {
   }, []);
 
   useEffect(() => {
-    if (hasLiveTradeRecords !== false) return;
-
     const sanitize = () => {
       removeSyntheticControls(document);
-      hideSyntheticPerformancePanels(document);
-      replaceLegacyLabels(document);
+      if (hasLiveTradeRecords === false) {
+        hideSyntheticPerformancePanels(document);
+        replaceLegacyLabels(document);
+      }
     };
 
     sanitize();
