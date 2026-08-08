@@ -21,7 +21,7 @@ interface ProModeControlsProps {
   onDirectionChange: (dir: Direction) => void;
   allowEquals?: boolean;
   onAllowEqualsChange?: (val: boolean) => void;
-  onBuy: (targetDir?: Direction) => Promise<void>;
+  onBuy: (targetDir?: Direction, overrides?: { duration?: number; durationUnit?: DurationSelectUnit }) => Promise<void>;
   isBuying: boolean;
   isConnected: boolean;
   duration: number;
@@ -87,8 +87,10 @@ export function ProModeControls({
     }
 
     const count = multiContractMultiplier;
+    const overrides = { duration: executionDuration, durationUnit: executionUnit };
+
     if (count <= 1) {
-      await onBuy(targetDir);
+      await onBuy(targetDir, overrides);
       return;
     }
 
@@ -103,7 +105,7 @@ export function ProModeControls({
     try {
       for (let i = 0; i < count; i += 1) {
         try {
-          await onBuy(targetDir);
+          await onBuy(targetDir, overrides);
           successful += 1;
         } catch (error) {
           const message = error instanceof Error ? error.message : 'Unknown execution error';
@@ -115,7 +117,7 @@ export function ProModeControls({
 
       if (successful === count) {
         toast.success(`Batch complete: ${successful}/${count} contracts purchased`, {
-          description: `Total stake: $${(Number(stake) * count).toFixed(2)}.` ,
+          description: `Total stake: $${(Number(stake) * count).toFixed(2)}.`,
         });
       } else if (successful > 0) {
         toast.warning(`Partial batch: ${successful}/${count} contracts purchased`, {
