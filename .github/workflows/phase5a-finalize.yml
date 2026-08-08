@@ -1,0 +1,154 @@
+name: Phase 5A Finalize
+
+on:
+  pull_request:
+    branches: [main]
+
+permissions:
+  contents: write
+
+jobs:
+  finalize:
+    if: github.event.pull_request.head.repo.full_name == github.repository
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout PR branch
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ github.head_ref }}
+          fetch-depth: 0
+
+      - name: Apply verified Phase 5A cleanup
+        shell: python
+        run: |
+          from pathlib import Path
+
+          path = Path('app/admin/page.tsx')
+          text = path.read_text(encoding='utf-8')
+
+          exact_removals = [
+              "  const [isSeedingTrades, setIsSeedingTrades] = useState<boolean>(false);\n",
+              """  const handleSeedTrades = async (count: number = 20) => {
+    setIsSeedingTrades(true);
+    toast.info(`Seeding ${count} dynamic test trades...`);
+    try {
+      const res = await fetch('/api/admin/stats', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ action: 'seed_trades', count }),
+      });
+      const data = await res.json();
+      if (data.success) {
+        toast.success(data.message || 'Seeded test trades successfully!');
+        fetchAdminData();
+      } else {
+        toast.error(data.error || 'Failed to seed test trades.');
+      }
+    } catch (err: any) {
+      toast.error('Error seeding trades: ' + err.message);
+    } finally {
+      setIsSeedingTrades(false);
+    }
+  };
+
+""",
+              """                <button
+                  onClick={() => handleSeedTrades(20)}
+                  disabled={isSeedingTrades}
+                  className="px-3.5 py-2 rounded-xl bg-gradient-to-r from-emerald-600 to-teal-600 hover:from-emerald-500 to-teal-500 text-white text-xs font-bold shadow-lg shadow-emerald-950/40 flex items-center gap-2 transition-all disabled:opacity-50"
+                >
+                  <Sparkles className={`w-3.5 h-3.5 ${isSeedingTrades ? 'animate-spin' : ''}`} />
+                  <span>Seed 20 Test Trades</span>
+                </button>
+
+""",
+              """                  <button
+                    onClick={() => handleSeedTrades(20)}
+                    disabled={isSeedingTrades}
+                    className="px-3 py-1.5 rounded-lg text-xs font-bold bg-cyan-500/20 text-cyan-300 hover:bg-cyan-500/30 border border-cyan-500/30 flex items-center gap-1.5"
+                  >
+                    <Database className={`w-3.5 h-3.5 ${isSeedingTrades ? 'animate-spin text-cyan-400' : ''}`} />
+                    <span>{isSeedingTrades ? 'Seeding Trades...' : 'Seed Execution Trades'}</span>
+                  </button>
+""",
+              """  const defaultConfidenceBrackets = [
+    { bracket: '70-79%', wins: 0, losses: 0, total: 0, winRate: 0 },
+    { bracket: '80-89%', wins: 0, losses: 0, total: 0, winRate: 0 },
+    { bracket: '90-100%', wins: 0, losses: 0, total: 0, winRate: 0 },
+  ];
+
+""",
+              """  const defaultPnlCurve = [
+    { tradeIndex: 0, pnl: 0 }
+  ];
+
+""",
+              """  const defaultEnsembleData = [
+    { strategy: 'XGBoost Horizon 5t', trades: 38, wins: 34, losses: 4, winRate: 89.5 },
+    { strategy: 'LightGBM Multi-Feature', trades: 25, wins: 21, losses: 4, winRate: 84.0 },
+    { strategy: 'ONNX Deep Classifier', trades: 18, wins: 15, losses: 3, winRate: 83.3 },
+    { strategy: 'Random Forest Baseline', trades: 12, wins: 9, losses: 3, winRate: 75.0 },
+  ];
+
+""",
+          ]
+
+          for block in exact_removals:
+              text = text.replace(block, '')
+
+          replacements = {
+              """  const confidenceBrackets = (statsData?.confidenceBrackets && statsData.confidenceBrackets.length > 0)
+    ? statsData.confidenceBrackets
+    : defaultConfidenceBrackets;
+""": """  const confidenceBrackets = Array.isArray(statsData?.confidenceBrackets)
+    ? statsData.confidenceBrackets
+    : [];
+""",
+              """  const pnlCurve = (statsData?.pnlCurve && statsData.pnlCurve.length > 0)
+    ? statsData.pnlCurve
+    : defaultPnlCurve;
+""": """  const pnlCurve = Array.isArray(statsData?.pnlCurve)
+    ? statsData.pnlCurve
+    : [];
+""",
+              "  const ensembleData = calculatedEnsemble.length > 0 ? calculatedEnsemble : defaultEnsembleData;": "  const ensembleData = calculatedEnsemble;",
+              "{summary.wins || 54}": "{summary.wins ?? 0}",
+              "{summary.losses || 9}": "{summary.losses ?? 0}",
+              "{summary.activeModel || (isDbConnected ? (registryModels?.[0]?.model_id || 'XGBoost-Default') : 'None (DB Offline)')}": "{summary.activeModel || 'No production model'}",
+              "{Number(m.backtest_profit_factor || 1.85).toFixed(2)}": "{Number(m.backtest_profit_factor ?? 0).toFixed(2)}",
+              "{lastPingResult?.candidateModel || `Model: XGBoost-${latencySymbol}-v4.2`}": "{lastPingResult?.candidateModel || 'No production model'}",
+              "{isDbConnected ? 'Demo & Live' : 'Database Offline'}": "{isDbConnected ? 'Live records' : 'Database Offline'}",
+          }
+          for old, new in replacements.items():
+              text = text.replace(old, new)
+
+          path.write_text(text, encoding='utf-8')
+
+          forbidden = [
+              'isSeedingTrades', 'handleSeedTrades', 'Seed 20 Test Trades', 'Seed Execution Trades',
+              'defaultConfidenceBrackets', 'defaultPnlCurve', 'defaultEnsembleData',
+              'XGBoost Horizon 5t', 'XGBoost-Default', 'Demo & Live',
+              'LightGBM Multi-Feature', 'ONNX Deep Classifier', 'Random Forest Baseline',
+          ]
+          source = path.read_text(encoding='utf-8')
+          remaining = [marker for marker in forbidden if marker in source]
+          if remaining:
+              raise SystemExit('Forbidden Phase 5A markers remain: ' + ', '.join(remaining))
+          print('Phase 5A source cleanup passed.')
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Production build verification
+        run: npm run build
+
+      - name: Commit verified cleanup to PR branch
+        shell: bash
+        run: |
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          rm -f .phase5a-trigger
+          git add -A
+          git rm -f .github/workflows/phase5a-finalize.yml || true
+          git commit -m 'fix: complete Phase 5A admin dashboard cleanup'
+          git push origin HEAD:${{ github.head_ref }}
