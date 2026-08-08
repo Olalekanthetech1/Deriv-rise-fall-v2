@@ -1,6 +1,6 @@
 import { NextRequest, NextResponse } from 'next/server';
 import { getRegisteredModels, promoteModelInRegistry, initDbSchema, getDb } from '@/lib/db';
-import { verifySessionToken } from '../admin/auth/route';
+import { verifySessionToken } from '../../admin/auth/route';
 
 function isAuthValid(req: NextRequest): boolean {
   const cookieToken = req.cookies.get('admin_session_token')?.value;
