@@ -78,20 +78,33 @@ def train_one(kind, ticks, duration, asset, symbol, hyperparams):
 runtime.train_one = train_one
 
 
-def backtest(ticks, symbol, horizons, asset=0):
-    """Evaluate a persisted XGBoost model out-of-sample on historical ticks.
+def backtest(ticks, symbol, horizons, asset, min_confidence, stake, payout_rate):
+    """Evaluate persisted native XGBoost artifacts out-of-sample.
 
-    This intentionally refuses to manufacture a model. If a horizon has no
-    trained XGBoost artifact, that horizon is reported as unavailable.
-    Profit factor here is a unit-stake diagnostic (wins/losses), not a broker
-    payout simulation.
+    Every trade decision comes from a persisted trained model. Confidence,
+    stake and payout are explicit caller parameters; no synthetic defaults are
+    introduced by the runtime.
     """
+    if not symbol:
+        raise ValueError('Backtest symbol is required')
+    if not horizons:
+        raise ValueError('At least one backtest horizon is required')
+    if not np.isfinite(min_confidence) or not 0 <= min_confidence <= 100:
+        raise ValueError('minConfidence must be between 0 and 100')
+    if not np.isfinite(stake) or stake <= 0:
+        raise ValueError('stake must be positive')
+    if not np.isfinite(payout_rate) or payout_rate <= 0 or payout_rate > 1:
+        raise ValueError('payoutRate must be greater than 0 and no greater than 1')
+
     prices = [runtime.f(t.get('price')) for t in ticks]
     if len(prices) < 30:
         raise ValueError('Backtest requires at least 30 ticks')
+
     matrix = {}
-    for raw_h in horizons or [5]:
-        h = max(1, int(raw_h))
+    for raw_h in horizons:
+        h = int(raw_h)
+        if h <= 0:
+            raise ValueError('Backtest horizons must be positive')
         model = runtime.load('xgboost', symbol, h)
         if model is None:
             matrix[str(h)] = {
@@ -100,41 +113,84 @@ def backtest(ticks, symbol, horizons, asset=0):
                 'trades': 0,
                 'wins': 0,
                 'losses': 0,
+                'rejected': 0,
                 'accuracy': None,
+                'winRate': None,
                 'profitFactor': None,
+                'totalProfit': None,
                 'error': 'MODEL_UNAVAILABLE',
             }
             continue
+
         start = 25
         end = len(ticks) - h
-        wins = losses = 0
         if end <= start:
-            raise ValueError(f'Insufficient ticks for {h}s backtest horizon')
+            matrix[str(h)] = {
+                'horizonSecs': h,
+                'available': False,
+                'trades': 0,
+                'wins': 0,
+                'losses': 0,
+                'rejected': 0,
+                'accuracy': None,
+                'winRate': None,
+                'profitFactor': None,
+                'totalProfit': None,
+                'error': 'INSUFFICIENT_TICKS',
+            }
+            continue
+
+        wins = losses = rejected = 0
+        gross_profit = 0.0
+        gross_loss = 0.0
         for i in range(start, end):
             current = prices[i]
             future = prices[i + h]
             pred = model['model'].predict_proba(runtime.X(ticks[:i], h, asset, symbol))[0]
-            predicted_up = float(pred[1]) >= float(pred[0])
+            probability_up = float(pred[1])
+            probability_down = float(pred[0])
+            confidence = max(probability_up, probability_down) * 100.0
+            if confidence < min_confidence:
+                rejected += 1
+                continue
+
+            predicted_up = probability_up >= probability_down
             actual_up = future > current
             if predicted_up == actual_up:
                 wins += 1
+                gross_profit += stake * payout_rate
             else:
                 losses += 1
+                gross_loss += stake
+
         trades = wins + losses
+        total_profit = gross_profit - gross_loss
+        profit_factor = (gross_profit / gross_loss) if gross_loss > 0 else (float('inf') if gross_profit > 0 else None)
+        win_rate = (wins / trades) * 100.0 if trades else None
         matrix[str(h)] = {
             'horizonSecs': h,
             'available': True,
             'trades': trades,
             'wins': wins,
             'losses': losses,
-            'accuracy': round((wins / trades) * 100.0, 3) if trades else 0.0,
-            'profitFactor': round(wins / losses, 6) if losses else float('inf'),
+            'rejected': rejected,
+            'accuracy': round(win_rate, 3) if win_rate is not None else None,
+            'winRate': round(win_rate, 3) if win_rate is not None else None,
+            'profitFactor': round(profit_factor, 6) if profit_factor is not None and np.isfinite(profit_factor) else profit_factor,
+            'totalProfit': round(total_profit, 8),
         }
+
+    available = [item for item in matrix.values() if item.get('available') and item.get('winRate') is not None]
+    best = max(available, key=lambda item: float(item['winRate'])) if available else None
     return {
         'success': True,
         'symbol': symbol,
         'sampleCount': len(ticks),
+        'minConfidence': min_confidence,
+        'stake': stake,
+        'payoutRate': payout_rate,
         'horizonMatrix': matrix,
+        'bestHorizon': best.get('horizonSecs') if best else None,
         'engine': 'Native trained XGBoost out-of-sample backtest',
         'timestamp': int(time.time() * 1000),
     }
@@ -152,13 +208,16 @@ def dispatch(r):
         )
     if action == 'predict_ensemble':
         models = ('xgboost', 'lightgbm', 'catboost', 'tcn', 'lstm', 'transformer', 'hmm', 'isolation_forest')
-        return {'success': True, 'id': r.get('id'), 'models': {
-            k: runtime.predict_one({**r, 'modelType': k}) for k in models
-        }}
+        return {'success': True, 'id': r.get('id'), 'models': {k: runtime.predict_one({**r, 'modelType': k}) for k in models}}
     if action == 'backtest':
         return {'id': r.get('id'), **backtest(
-            r.get('ticks', []), r.get('symbol', 'R_100'), r.get('horizons', [5]),
+            r.get('ticks', []),
+            r.get('symbol'),
+            r.get('horizons'),
             int(r.get('assetCategory', 0)),
+            float(r.get('minConfidence')),
+            float(r.get('stake')),
+            float(r.get('payoutRate')),
         )}
     if action == 'ping':
         return {'success': True, 'id': r.get('id'), 'pong': True, 'schemaVersion': runtime.SCHEMA}
@@ -187,12 +246,7 @@ def main():
             r = json.loads(line)
             out = dispatch(r)
         except Exception as exc:
-            out = {
-                'success': False,
-                'id': r.get('id') if isinstance(r, dict) else None,
-                'error': str(exc),
-                'trace': traceback.format_exc(limit=4),
-            }
+            out = {'success': False, 'id': r.get('id') if isinstance(r, dict) else None, 'error': str(exc), 'trace': traceback.format_exc(limit=4)}
         sys.stdout.write(json.dumps(out, default=str) + '\n')
         sys.stdout.flush()
 
