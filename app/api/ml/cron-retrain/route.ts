@@ -1,6 +1,6 @@
 import { NextRequest, NextResponse } from 'next/server';
 import { initDbSchema, getDb } from '@/lib/db';
-import { verifySessionToken } from '../admin/auth/route';
+import { verifySessionToken } from '../../admin/auth/route';
 
 const RETRAIN_INTERVAL_MS = 6 * 60 * 60 * 1000;
 
