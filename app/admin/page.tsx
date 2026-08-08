@@ -159,7 +159,6 @@ export default function AdminDashboardPage() {
   // Auto-sync logs state
   const [autoSyncInterval, setAutoSyncInterval] = useState<number>(0);
 
-  const [isSeedingTrades, setIsSeedingTrades] = useState<boolean>(false);
   const [isSyncingTicks, setIsSyncingTicks] = useState<boolean>(false);
   const [isFlushingStatsCache, setIsFlushingStatsCache] = useState<boolean>(false);
 
@@ -685,29 +684,6 @@ export default function AdminDashboardPage() {
     }
   };
 
-  const handleSeedTrades = async (count: number = 20) => {
-    setIsSeedingTrades(true);
-    toast.info(`Seeding ${count} dynamic test trades...`);
-    try {
-      const res = await fetch('/api/admin/stats', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ action: 'seed_trades', count }),
-      });
-      const data = await res.json();
-      if (data.success) {
-        toast.success(data.message || 'Seeded test trades successfully!');
-        fetchAdminData();
-      } else {
-        toast.error(data.error || 'Failed to seed test trades.');
-      }
-    } catch (err: any) {
-      toast.error('Error seeding trades: ' + err.message);
-    } finally {
-      setIsSeedingTrades(false);
-    }
-  };
-
   const handleSyncDerivTicks = async () => {
     setIsSyncingTicks(true);
     toast.info('Synchronizing live Deriv historical ticks into Neon PostgreSQL...', {
@@ -761,7 +737,7 @@ export default function AdminDashboardPage() {
     totalProfit: 0,
     totalTicks: 0,
     totalModels: 0,
-    activeModel: 'N/A',
+    activeModel: 'No production model',
     activeAccuracy: 0,
   };
 
@@ -769,23 +745,13 @@ export default function AdminDashboardPage() {
     ? statsData.summary
     : defaultSummary;
 
-  const defaultConfidenceBrackets = [
-    { bracket: '70-79%', wins: 0, losses: 0, total: 0, winRate: 0 },
-    { bracket: '80-89%', wins: 0, losses: 0, total: 0, winRate: 0 },
-    { bracket: '90-100%', wins: 0, losses: 0, total: 0, winRate: 0 },
-  ];
-
-  const confidenceBrackets = (statsData?.confidenceBrackets && statsData.confidenceBrackets.length > 0)
+  const confidenceBrackets = Array.isArray(statsData?.confidenceBrackets)
     ? statsData.confidenceBrackets
-    : defaultConfidenceBrackets;
+    : [];
 
-  const defaultPnlCurve = [
-    { tradeIndex: 0, pnl: 0 }
-  ];
-
-  const pnlCurve = (statsData?.pnlCurve && statsData.pnlCurve.length > 0)
+  const pnlCurve = Array.isArray(statsData?.pnlCurve)
     ? statsData.pnlCurve
-    : defaultPnlCurve;
+    : [];
 
   const isDbConnected = statsData?.isDbConnected ?? false;
 
@@ -811,14 +777,7 @@ export default function AdminDashboardPage() {
     return s;
   }).sort((a, b) => b.trades - a.trades);
 
-  const defaultEnsembleData = [
-    { strategy: 'XGBoost Horizon 5t', trades: 38, wins: 34, losses: 4, winRate: 89.5 },
-    { strategy: 'LightGBM Multi-Feature', trades: 25, wins: 21, losses: 4, winRate: 84.0 },
-    { strategy: 'ONNX Deep Classifier', trades: 18, wins: 15, losses: 3, winRate: 83.3 },
-    { strategy: 'Random Forest Baseline', trades: 12, wins: 9, losses: 3, winRate: 75.0 },
-  ];
-
-  const ensembleData = calculatedEnsemble.length > 0 ? calculatedEnsemble : defaultEnsembleData;
+  const ensembleData = calculatedEnsemble;
 
   // Filtered Secrets list
   const filteredSecrets = secretsData.filter((sec: any) => {
@@ -1140,7 +1099,7 @@ export default function AdminDashboardPage() {
                   {summary.winRate || 0}%
                 </div>
                 <div className="text-xs font-medium text-slate-400 mt-1">
-                  {isDbConnected ? 'Demo & Live' : 'Database Offline'}
+                  {isDbConnected ? 'Live records' : 'Database Offline'}
                 </div>
               </div>
             </div>
@@ -1155,7 +1114,7 @@ export default function AdminDashboardPage() {
               </div>
               <div>
                 <div className="text-xl sm:text-2xl font-bold text-amber-400 tracking-tight truncate">
-                  {summary.activeModel || (isDbConnected ? (registryModels?.[0]?.model_id || 'XGBoost-Default') : 'None (DB Offline)')}
+                  {summary.activeModel || 'No production model'}
                 </div>
                 <div className="text-xs font-medium text-slate-400 mt-1">
                   {summary.activeAccuracy ? `${summary.activeAccuracy}% Acc` : 'No Trained Model'}
@@ -1554,7 +1513,7 @@ export default function AdminDashboardPage() {
                     })()}
                   </div>
                   <div className="text-[10px] text-slate-400 mt-1 font-mono truncate">
-                    {lastPingResult?.candidateModel || `Model: XGBoost-${latencySymbol}-v4.2`}
+                    {lastPingResult?.candidateModel || 'No production model'}
                   </div>
                 </div>
               </div>
@@ -1987,14 +1946,7 @@ export default function AdminDashboardPage() {
               </div>
 
               <div className="flex flex-wrap items-center gap-2.5">
-                <button
-                  onClick={() => handleSeedTrades(20)}
-                  disabled={isSeedingTrades}
-                  className="px-3.5 py-2 rounded-xl bg-gradient-to-r from-emerald-600 to-teal-600 hover:from-emerald-500 hover:to-teal-500 text-white text-xs font-bold shadow-lg shadow-emerald-950/40 flex items-center gap-2 transition-all disabled:opacity-50"
-                >
-                  <Sparkles className={`w-3.5 h-3.5 ${isSeedingTrades ? 'animate-spin' : ''}`} />
-                  <span>Seed 20 Test Trades</span>
-                </button>
+                
 
                 <button
                   onClick={handleFlushStatsCache}
@@ -2125,11 +2077,11 @@ export default function AdminDashboardPage() {
 
                 <div className="grid grid-cols-2 gap-2 text-center text-xs">
                   <div className="bg-emerald-500/10 border border-emerald-500/20 rounded-lg py-2">
-                    <p className="text-emerald-400 font-black text-base sm:text-lg">{summary.wins || 54}</p>
+                    <p className="text-emerald-400 font-black text-base sm:text-lg">{summary.wins ?? 0}</p>
                     <p className="text-slate-400 text-[10px]">WINS</p>
                   </div>
                   <div className="bg-rose-500/10 border border-rose-500/20 rounded-lg py-2">
-                    <p className="text-rose-400 font-black text-base sm:text-lg">{summary.losses || 9}</p>
+                    <p className="text-rose-400 font-black text-base sm:text-lg">{summary.losses ?? 0}</p>
                     <p className="text-slate-400 text-[10px]">LOSSES</p>
                   </div>
                 </div>
@@ -2467,7 +2419,7 @@ export default function AdminDashboardPage() {
                             <div className="text-[11px] text-slate-300 flex items-center gap-2 font-mono">
                               <span>Win: <span className="text-emerald-400 font-bold">{Number(m.backtest_win_rate || m.accuracy || 0).toFixed(1)}%</span></span>
                               <span className="text-slate-700">|</span>
-                              <span>PF: <span className="text-amber-400 font-bold">{Number(m.backtest_profit_factor || 1.85).toFixed(2)}</span></span>
+                              <span>PF: <span className="text-amber-400 font-bold">{Number(m.backtest_profit_factor ?? 0).toFixed(2)}</span></span>
                             </div>
                           </td>
                           <td className="py-3.5 px-4 text-right">
@@ -3326,14 +3278,7 @@ export default function AdminDashboardPage() {
                     <RefreshCw className={`w-3.5 h-3.5 ${isSyncingTicks ? 'animate-spin text-emerald-400' : ''}`} />
                     <span>{isSyncingTicks ? 'Syncing Ticks...' : 'Sync Deriv Ticks to DB'}</span>
                   </button>
-                  <button
-                    onClick={() => handleSeedTrades(20)}
-                    disabled={isSeedingTrades}
-                    className="px-3 py-1.5 rounded-lg text-xs font-bold bg-cyan-500/20 text-cyan-300 hover:bg-cyan-500/30 border border-cyan-500/30 flex items-center gap-1.5 transition-all"
-                  >
-                    <Database className={`w-3.5 h-3.5 ${isSeedingTrades ? 'animate-spin text-cyan-400' : ''}`} />
-                    <span>{isSeedingTrades ? 'Seeding Trades...' : 'Seed Execution Trades'}</span>
-                  </button>
+                  
                   <span className="px-3 py-1.5 rounded-full text-xs font-bold bg-emerald-500/10 text-emerald-400 border border-emerald-500/20 flex items-center gap-1.5 shrink-0">
                     <CheckCircle2 className="w-3.5 h-3.5" />
                     <span>Auto-Schema Active</span>
@@ -3594,7 +3539,7 @@ export default function AdminDashboardPage() {
                               </tr>
                             ))
                           ) : (
-                            <tr><td colSpan={7} className="py-4 text-center text-slate-500">No trade records found. Click &quot;Seed Execution Trades&quot; above to populate!</td></tr>
+                            <tr><td colSpan={7} className="py-4 text-center text-slate-500">No trade records found. No persisted trade records available yet.</td></tr>
                           )}
                         </tbody>
                       </table>
