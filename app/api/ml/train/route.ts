@@ -2,7 +2,7 @@ import { NextRequest, NextResponse } from 'next/server';
 import { TrainSchema } from '@/lib/validation-schemas';
 import { getDb, registerModelInDb } from '@/lib/db';
 import { ensureMinTicks } from '@/lib/ticks-helper';
-import { verifySessionToken } from '../admin/auth/route';
+import { verifySessionToken } from '../../admin/auth/route';
 
 const CATEGORY_MAP: Record<string, string[]> = {
   synthetic: ['R_100','1HZ100V','R_75','1HZ75V','R_50','1HZ50V','R_25','1HZ25V','R_10','1HZ10V'],
