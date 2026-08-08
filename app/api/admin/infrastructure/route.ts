@@ -1,3 +1,4 @@
+import { neon } from '@neondatabase/serverless';
 import { NextRequest, NextResponse } from 'next/server';
 
 export const dynamic = 'force-dynamic';
@@ -19,6 +20,40 @@ function statusFrom(value: unknown): 'healthy' | 'degraded' | 'unavailable' {
     if (['down', 'offline', 'unavailable', 'error', 'failed'].includes(normalized)) return 'unavailable';
   }
   return 'unavailable';
+}
+
+async function probeDatabase() {
+  const databaseUrl = process.env.DATABASE_URL || process.env.POSTGRES_URL || process.env.NEON_DATABASE_URL;
+  if (!databaseUrl) {
+    return {
+      status: 'unavailable' as const,
+      configured: false,
+      source: 'environment-missing',
+      latencyMs: null as number | null,
+      error: 'No PostgreSQL connection URL is configured.',
+    };
+  }
+
+  const startedAt = performance.now();
+  try {
+    const sql = neon(databaseUrl);
+    await sql`SELECT 1 AS ok`;
+    return {
+      status: 'healthy' as const,
+      configured: true,
+      source: 'live-postgresql-probe',
+      latencyMs: Math.round((performance.now() - startedAt) * 100) / 100,
+      error: null as string | null,
+    };
+  } catch (error) {
+    return {
+      status: 'unavailable' as const,
+      configured: true,
+      source: 'live-postgresql-probe',
+      latencyMs: Math.round((performance.now() - startedAt) * 100) / 100,
+      error: error instanceof Error ? error.message : 'Database connection probe failed.',
+    };
+  }
 }
 
 export async function GET(request: NextRequest) {
@@ -48,12 +83,14 @@ export async function GET(request: NextRequest) {
   const mlValue = pick(source, ['ml', 'mlRuntime', 'mlService', 'pythonMl', 'pythonMLService']);
   const websocketValue = pick(source, ['websocket', 'webSocket', 'derivWebSocket', 'derivConnection']);
 
+  const databaseProbe = await probeDatabase();
+  const databaseHealthStatus = statusFrom(typeof databaseValue === 'object' ? pick(databaseValue, ['status', 'connected', 'healthy']) : databaseValue);
+  const databaseStatus = databaseProbe.configured ? databaseProbe.status : databaseHealthStatus;
+
   const apiStatus = healthError ? 'unavailable' : healthHttpStatus >= 500 ? 'unavailable' : healthHttpStatus >= 400 ? 'degraded' : 'healthy';
-  const databaseStatus = statusFrom(typeof databaseValue === 'object' ? pick(databaseValue, ['status', 'connected', 'healthy']) : databaseValue);
   const mlStatus = statusFrom(typeof mlValue === 'object' ? pick(mlValue, ['status', 'available', 'healthy', 'ready']) : mlValue);
   const websocketStatus = statusFrom(typeof websocketValue === 'object' ? pick(websocketValue, ['status', 'connected', 'healthy', 'ready']) : websocketValue);
 
-  const hasDatabaseUrl = Boolean(process.env.DATABASE_URL || process.env.POSTGRES_URL || process.env.NEON_DATABASE_URL);
   const hasMlServiceUrl = Boolean(process.env.PYTHON_ML_SERVICE_URL);
   const hasCronSecret = Boolean(process.env.CRON_SECRET);
 
@@ -69,8 +106,11 @@ export async function GET(request: NextRequest) {
     },
     database: {
       status: databaseStatus,
-      configured: hasDatabaseUrl,
-      source: databaseValue === undefined ? 'unavailable-from-health' : 'health-endpoint',
+      configured: databaseProbe.configured,
+      source: databaseProbe.source,
+      latencyMs: databaseProbe.latencyMs,
+      error: databaseProbe.error,
+      healthEndpointStatus: databaseHealthStatus,
     },
     mlRuntime: {
       status: mlStatus,
