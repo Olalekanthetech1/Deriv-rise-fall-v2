@@ -1,7 +1,6 @@
 import { NextRequest, NextResponse } from 'next/server';
 import crypto from 'crypto';
 
-// In-memory brute-force protection store
 interface FailedAttempt {
   count: number;
   firstAttemptAt: number;
@@ -9,54 +8,67 @@ interface FailedAttempt {
 }
 
 const failedAttemptsMap = new Map<string, FailedAttempt>();
+const SESSION_TTL_MS = 24 * 60 * 60 * 1000;
+const MAX_FAILED_ATTEMPTS = 5;
+const LOCKOUT_MS = 15 * 60 * 1000;
 
-// Helper to clean up old entries periodically
 function cleanupAttempts() {
   const now = Date.now();
   for (const [ip, attempt] of failedAttemptsMap.entries()) {
     if (attempt.lockoutUntil && attempt.lockoutUntil < now) {
       failedAttemptsMap.delete(ip);
-    } else if (now - attempt.firstAttemptAt > 15 * 60 * 1000) {
+    } else if (now - attempt.firstAttemptAt > LOCKOUT_MS) {
       failedAttemptsMap.delete(ip);
     }
   }
 }
 
-// Secret signing token helper
-function getSecretSigner(): string {
-  return process.env.ADMIN_SECRET_KEY || 'admin_rise_fall_2026';
+function getConfiguredSecret(): string | null {
+  const secret = process.env.ADMIN_SECRET_KEY?.trim();
+  return secret ? secret : null;
 }
 
-function generateSessionToken(timestamp: number): string {
-  const secret = getSecretSigner();
+function generateSessionToken(timestamp: number, secret: string): string {
   const hash = crypto.createHmac('sha256', secret).update(`admin_session_${timestamp}`).digest('hex');
   return `${timestamp}.${hash}`;
 }
 
 export function verifySessionToken(token: string | undefined | null): boolean {
-  if (!token) return false;
+  const secret = getConfiguredSecret();
+  if (!secret || !token) return false;
+
   const parts = token.split('.');
   if (parts.length !== 2) return false;
 
-  const timestamp = parseInt(parts[0], 10);
-  if (isNaN(timestamp)) return false;
+  const timestamp = Number(parts[0]);
+  if (!Number.isSafeInteger(timestamp) || timestamp <= 0) return false;
 
-  // Expire session after 24 hours
   const now = Date.now();
-  if (now - timestamp > 24 * 60 * 60 * 1000) return false;
+  if (timestamp > now || now - timestamp > SESSION_TTL_MS) return false;
 
-  const expectedToken = generateSessionToken(timestamp);
-  return crypto.timingSafeEqual(Buffer.from(token), Buffer.from(expectedToken));
+  const expectedToken = generateSessionToken(timestamp, secret);
+  const provided = Buffer.from(token);
+  const expected = Buffer.from(expectedToken);
+  if (provided.length !== expected.length) return false;
+
+  return crypto.timingSafeEqual(provided, expected);
+}
+
+function getRequestIp(req: NextRequest): string {
+  return req.headers.get('x-forwarded-for')?.split(',')[0]?.trim()
+    || req.headers.get('x-real-ip')
+    || 'unknown';
 }
 
 export async function GET(req: NextRequest) {
+  const isConfigured = Boolean(getConfiguredSecret());
   const cookieToken = req.cookies.get('admin_session_token')?.value;
-  const headerToken = req.headers.get('x-admin-token') || req.headers.get('authorization')?.replace('Bearer ', '');
-
-  const isValid = verifySessionToken(cookieToken) || verifySessionToken(headerToken);
+  const headerToken = req.headers.get('x-admin-token') || req.headers.get('authorization')?.replace(/^Bearer\s+/i, '');
+  const isAuthenticated = verifySessionToken(cookieToken) || verifySessionToken(headerToken);
 
   return NextResponse.json({
-    isAuthenticated: isValid,
+    isAuthenticated,
+    configured: isConfigured,
     serverTime: new Date().toISOString(),
   });
 }
@@ -64,11 +76,18 @@ export async function GET(req: NextRequest) {
 export async function POST(req: NextRequest) {
   cleanupAttempts();
 
-  const ip = req.headers.get('x-forwarded-for') || req.headers.get('x-real-ip') || '127.0.0.1';
+  const configuredSecret = getConfiguredSecret();
+  if (!configuredSecret) {
+    return NextResponse.json(
+      { success: false, error: 'Admin authentication is not configured. Set ADMIN_SECRET_KEY in the deployment environment.' },
+      { status: 503 }
+    );
+  }
+
+  const ip = getRequestIp(req);
   const now = Date.now();
   const attempt = failedAttemptsMap.get(ip) || { count: 0, firstAttemptAt: now };
 
-  // Check if locked out
   if (attempt.lockoutUntil && attempt.lockoutUntil > now) {
     const remainingSeconds = Math.ceil((attempt.lockoutUntil - now) / 1000);
     return NextResponse.json(
@@ -89,60 +108,48 @@ export async function POST(req: NextRequest) {
       return NextResponse.json({ success: false, error: 'Admin passkey is required.' }, { status: 400 });
     }
 
-    const currentAdminKey = process.env.ADMIN_SECRET_KEY || 'admin_rise_fall_2026';
-
-    // Timing-safe string comparison
-    const keyBuffer = Buffer.from(key);
-    const expectedBuffer = Buffer.from(currentAdminKey);
-
-    let isMatch = false;
-    if (keyBuffer.length === expectedBuffer.length) {
-      isMatch = crypto.timingSafeEqual(keyBuffer, expectedBuffer);
-    }
+    const provided = Buffer.from(key);
+    const expected = Buffer.from(configuredSecret);
+    const isMatch = provided.length === expected.length && crypto.timingSafeEqual(provided, expected);
 
     if (!isMatch) {
       attempt.count += 1;
-      if (attempt.count >= 5) {
-        attempt.lockoutUntil = now + 15 * 60 * 1000; // 15 minutes lockout
+      if (attempt.count >= MAX_FAILED_ATTEMPTS) {
+        attempt.lockoutUntil = now + LOCKOUT_MS;
       }
       failedAttemptsMap.set(ip, attempt);
 
-      const attemptsRemaining = Math.max(0, 5 - attempt.count);
       return NextResponse.json(
         {
           success: false,
           error: 'Invalid admin authorization passkey.',
-          attemptsRemaining,
-          isLockedOut: attempt.count >= 5,
+          attemptsRemaining: Math.max(0, MAX_FAILED_ATTEMPTS - attempt.count),
+          isLockedOut: attempt.count >= MAX_FAILED_ATTEMPTS,
         },
         { status: 401 }
       );
     }
 
-    // Clear failed attempts on success
     failedAttemptsMap.delete(ip);
 
     const timestamp = Date.now();
-    const token = generateSessionToken(timestamp);
-
+    const token = generateSessionToken(timestamp, configuredSecret);
     const response = NextResponse.json({
       success: true,
-      token,
       message: 'Admin authorization granted successfully.',
-      expiresAt: timestamp + 24 * 60 * 60 * 1000,
+      expiresAt: timestamp + SESSION_TTL_MS,
     });
 
-    // Set secure HTTP-only cookie
     response.cookies.set('admin_session_token', token, {
       httpOnly: true,
       secure: process.env.NODE_ENV === 'production',
-      sameSite: 'lax',
+      sameSite: 'strict',
       path: '/',
-      maxAge: 86400, // 24 hours
+      maxAge: Math.floor(SESSION_TTL_MS / 1000),
     });
 
     return response;
-  } catch (err: any) {
+  } catch {
     return NextResponse.json({ success: false, error: 'Malformed request.' }, { status: 400 });
   }
 }
@@ -153,6 +160,13 @@ export async function DELETE() {
     message: 'Admin logged out successfully.',
   });
 
-  response.cookies.delete('admin_session_token');
+  response.cookies.set('admin_session_token', '', {
+    httpOnly: true,
+    secure: process.env.NODE_ENV === 'production',
+    sameSite: 'strict',
+    path: '/',
+    maxAge: 0,
+  });
+
   return response;
 }
