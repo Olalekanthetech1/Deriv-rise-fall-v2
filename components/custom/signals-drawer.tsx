@@ -24,7 +24,7 @@ import {
 import type { ActiveSymbol } from '@deriv/core';
 import type { TradeSignal, DurationPrediction } from '@/hooks/use-realtime-signals';
 import { MultiModelEvaluationCard } from './multi-model-evaluation-card';
-import { EnsembleEvaluationResult } from '@/lib/multi-model-evaluator';
+import type { EnsembleEvaluationResult } from '@/lib/multi-model-evaluator';
 
 interface SignalsDrawerProps {
   isOpen: boolean;
@@ -60,6 +60,7 @@ export function SignalsDrawer({
   const [activeTab, setActiveTab] = useState<'signals' | 'multimodel'>('signals');
   const [ensembleData, setEnsembleData] = useState<EnsembleEvaluationResult | null>(null);
   const [isEvaluating, setIsEvaluating] = useState<boolean>(false);
+  const [ensembleError, setEnsembleError] = useState<string | null>(null);
 
   useEffect(() => {
     if (isOpen && activeTab === 'multimodel') {
@@ -69,23 +70,30 @@ export function SignalsDrawer({
 
   const fetchEnsembleData = async () => {
     setIsEvaluating(true);
+    setEnsembleError(null);
     try {
       const sym = activeSymbol?.underlying_symbol || 'R_100';
       const res = await fetch('/api/ml/predict', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
+        cache: 'no-store',
         body: JSON.stringify({
           symbol: sym,
           durationSecs: 5,
           assetCategory: sym.startsWith('FRX') ? 1 : 0,
         }),
       });
-      const data = await res.json();
-      if (data.multiModelEnsemble) {
-        setEnsembleData(data.multiModelEnsemble);
+      const data = await res.json().catch(() => ({}));
+      if (!res.ok || data?.success !== true || !data?.multiModelEnsemble) {
+        const message = typeof data?.error === 'string' ? data.error : `Multi-Model evaluation request failed (${res.status})`;
+        throw new Error(message);
       }
+      setEnsembleData(data.multiModelEnsemble);
     } catch (err) {
+      const message = err instanceof Error ? err.message : 'Unable to load Multi-Model evaluation.';
       console.warn('[Ensemble Fetch Error]:', err);
+      setEnsembleError(message);
+      setEnsembleData(null);
     } finally {
       setIsEvaluating(false);
     }
@@ -261,7 +269,22 @@ export function SignalsDrawer({
                 <span>Refresh Matrix</span>
               </button>
             </div>
-            <MultiModelEvaluationCard ensemble={ensembleData} />
+            {ensembleError ? (
+              <div className="p-4 rounded-2xl bg-rose-950/30 border border-rose-500/30 text-xs text-rose-200 space-y-2">
+                <div className="font-bold">Multi-Model evaluation unavailable</div>
+                <div className="text-rose-300/80 break-words">{ensembleError}</div>
+                <button
+                  type="button"
+                  onClick={fetchEnsembleData}
+                  disabled={isEvaluating}
+                  className="px-3 py-1.5 rounded-lg bg-rose-500/10 border border-rose-500/30 text-rose-200 font-bold hover:bg-rose-500/20 disabled:opacity-50"
+                >
+                  Retry
+                </button>
+              </div>
+            ) : (
+              <MultiModelEvaluationCard ensemble={ensembleData} />
+            )}
           </div>
         ) : (
           <>
@@ -368,133 +391,3 @@ export function SignalsDrawer({
                   {/* Multi-Duration Prediction Matrix Bar */}
                   {sig.durationMatrix && sig.durationMatrix.length > 0 && (
                     <div className="space-y-1">
-                      <div className="text-[10px] font-extrabold uppercase text-gray-400 tracking-wider flex items-center justify-between">
-                        <span>Predicted Horizon Matrix</span>
-                        <span className="text-cyan-400 font-normal">Tap duration to select</span>
-                      </div>
-                      <div className="grid grid-cols-4 gap-1.5">
-                        {sig.durationMatrix.map((dur) => {
-                          const isDurRise = dur.direction === 'RISE';
-                          const isRecommended =
-                            sig.recommendedDurationValue === dur.value &&
-                            sig.recommendedDurationUnit === dur.unit;
-
-                          return (
-                            <button
-                              key={`${dur.value}${dur.unit}`}
-                              type="button"
-                              onClick={() => handleSelectDurationPrediction(sig, dur)}
-                              className={`p-1.5 rounded-xl text-center border transition-all flex flex-col items-center justify-center ${
-                                isRecommended
-                                  ? 'bg-cyan-500/20 border-cyan-400 text-white ring-1 ring-cyan-400/50'
-                                  : 'bg-black/30 border-white/5 text-gray-300 hover:border-white/20 hover:bg-white/5'
-                              }`}
-                            >
-                              <div className="text-[10px] font-bold tracking-tight text-gray-200">
-                                {dur.label}
-                              </div>
-                              <div
-                                className={`text-[10px] font-black flex items-center gap-0.5 ${
-                                  isDurRise ? 'text-emerald-400' : 'text-rose-400'
-                                }`}
-                              >
-                                {isDurRise ? (
-                                  <TrendingUp className="w-2.5 h-2.5" />
-                                ) : (
-                                  <TrendingDown className="w-2.5 h-2.5" />
-                                )}
-                                <span>{dur.confidence}%</span>
-                              </div>
-                            </button>
-                          );
-                        })}
-                      </div>
-                    </div>
-                  )}
-
-                  {/* Parameter Details: Duration, Target, Countdown */}
-                  <div className="grid grid-cols-3 gap-2 p-2 rounded-xl bg-black/40 border border-white/5 text-[11px]">
-                    <div className="flex items-center gap-1 text-gray-300">
-                      <Clock className="w-3.5 h-3.5 text-cyan-400 shrink-0" />
-                      <div>
-                        <div className="text-[9px] text-gray-400 uppercase">Rec. Duration</div>
-                        <div className="font-bold text-white">{sig.recommendedDurationLabel}</div>
-                      </div>
-                    </div>
-
-                    <div className="flex items-center gap-1 text-gray-300">
-                      <Target className="w-3.5 h-3.5 text-emerald-400 shrink-0" />
-                      <div>
-                        <div className="text-[9px] text-gray-400 uppercase">Target Level</div>
-                        <div className="font-bold font-mono text-white">
-                          {sig.targetBarrier || 'Market'}
-                        </div>
-                      </div>
-                    </div>
-
-                    <div className="flex items-center gap-1 text-gray-300 justify-end text-right">
-                      <div>
-                        <div className="text-[9px] text-gray-400 uppercase">Signal Expiry</div>
-                        <div className="font-bold font-mono text-cyan-400">
-                          {sig.expiresInSeconds || 0}s
-                        </div>
-                      </div>
-                    </div>
-                  </div>
-
-                  {/* Signal Validity Countdown Bar */}
-                  <div className="w-full bg-white/5 h-1 rounded-full overflow-hidden">
-                    <div
-                      className="bg-cyan-400 h-full transition-all duration-1000 ease-linear rounded-full"
-                      style={{
-                        width: `${((sig.expiresInSeconds || 0) / (sig.maxExpirySeconds || 1)) * 100}%`,
-                      }}
-                    />
-                  </div>
-
-                  {/* One-Tap Action Buttons */}
-                  <div className="grid grid-cols-2 gap-2 pt-1">
-                    {/* Auto-Fill Setup */}
-                    <button
-                      type="button"
-                      onClick={() => onAutoFillTrade(sig)}
-                      className="w-full py-2 px-3 rounded-xl bg-white/10 hover:bg-white/15 text-white text-xs font-bold transition-all border border-white/10 flex items-center justify-center gap-1.5"
-                    >
-                      <Sliders className="w-3.5 h-3.5 text-cyan-400" />
-                      Auto-Fill Form
-                    </button>
-
-                    {/* Quick Trade Buy */}
-                    <button
-                      type="button"
-                      disabled={isBuying || isExecThis}
-                      onClick={() => handleQuickExecute(sig)}
-                      className={`w-full py-2 px-3 rounded-xl text-xs font-extrabold transition-all border flex items-center justify-center gap-1.5 shadow-md ${
-                        isRise
-                          ? 'bg-emerald-600 hover:bg-emerald-500 text-white border-emerald-400/30'
-                          : 'bg-rose-600 hover:bg-rose-500 text-white border-rose-400/30'
-                      }`}
-                    >
-                      {isExecThis ? (
-                        <>
-                          <Radio className="w-3.5 h-3.5 animate-spin" /> Placing Trade...
-                        </>
-                      ) : (
-                        <>
-                          <CheckCircle2 className="w-3.5 h-3.5" /> Execute {sig.direction}
-                        </>
-                      )}
-                    </button>
-                  </div>
-                </div>
-              );
-            })
-          )}
-        </div>
-        </>
-        )}
-      </div>
-    </div>
-  );
-}
-
