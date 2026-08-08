@@ -11,6 +11,11 @@ import { ProposalSubmissionManager } from '@/lib/proposal-submission-manager';
 
 const CONTRACT_TYPES = ['CALL', 'PUT'];
 
+export interface BuyExecutionOverrides {
+  duration?: number;
+  durationUnit?: DurationSelectUnit;
+}
+
 interface UseRiseFallTradingReturn {
   ws: DerivWS | null;
   isConnected: boolean;
@@ -38,7 +43,7 @@ interface UseRiseFallTradingReturn {
   endTime: string;
   setEndTime: (time: string) => void;
   proposal: ProposalInfo | null;
-  buyContract: (targetDir?: Direction) => Promise<void>;
+  buyContract: (targetDir?: Direction, overrides?: BuyExecutionOverrides) => Promise<void>;
   buyWithCustomParams: (params: { direction: Direction; duration: number; durationUnit: DurationSelectUnit }) => Promise<void>;
   isBuying: boolean;
   buyResult: BuyResult | null;
@@ -179,16 +184,15 @@ export function useRiseFallTrading({ ws, isConnected, isExhausted, isAuthenticat
 
   /**
    * Always obtain a fresh one-shot proposal immediately before a purchase.
-   *
-   * This is important for multi-contract execution: the displayed proposal is
-   * only a UI quote and must not be reused for a second contract. Each call to
-   * buyContract therefore creates an independent proposal -> buy lifecycle.
-   * The Pro Mode batch executor awaits each call, so contracts are purchased
-   * sequentially rather than racing through the shared buy state.
+   * Optional duration overrides are used by the Auto Duration engine so the
+   * proposal sent to Deriv matches the duration selected for this execution.
    */
-  const buyContract = useCallback(async (targetDir?: Direction) => {
+  const buyContract = useCallback(async (targetDir?: Direction, overrides?: BuyExecutionOverrides) => {
     const dir = targetDir || direction;
-    const params = buildProposalParams(dir);
+    const proposalDuration = overrides?.duration ?? duration;
+    const proposalUnit = overrides?.durationUnit ?? durationUnit;
+    const params = buildProposalParams(dir, proposalDuration, proposalUnit);
+
     if (!params || !proposalManager || !tradingIsConnected) {
       throw new Error('Trading parameters are not ready. Please wait for the market connection.');
     }
@@ -199,7 +203,7 @@ export function useRiseFallTrading({ ws, isConnected, isExhausted, isAuthenticat
     }
 
     await buyWithProposal(targetProposal);
-  }, [direction, buildProposalParams, proposalManager, tradingIsConnected, buyWithProposal]);
+  }, [direction, duration, durationUnit, buildProposalParams, proposalManager, tradingIsConnected, buyWithProposal]);
 
   const buyWithCustomParams = useCallback(async (params: { direction: Direction; duration: number; durationUnit: DurationSelectUnit }) => {
     if (!tradingWs || !tradingIsConnected || !activeSymbol || !proposalManager) return;
