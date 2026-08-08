@@ -11,7 +11,7 @@ export interface ProductionEnsembleResult {
   probDown: number;
   confidence: number;
   marketRegime: string;
-  anomalyScore: number;
+  anomalyScore: number | null;
   features: EngineeredTickFeatures;
   evaluations: Array<{
     modelKey: string;
@@ -25,6 +25,7 @@ export interface ProductionEnsembleResult {
     dynamicWeight: number | null;
     runtimeMode: string;
     details: string;
+    validation: any;
   }>;
   modelBreakdown: Record<string, any>;
   regime: any;
@@ -54,44 +55,46 @@ function finiteProbability(value: unknown): number | null {
   return Number.isFinite(n) && n >= 0 && n <= 100 ? n : null;
 }
 
-function validationWeight(result: any): number {
+function validationWeight(result: any): number | null {
   const accuracy = Number(result?.validation?.accuracy);
   const logLoss = Number(result?.validation?.logLoss);
-  if (!Number.isFinite(accuracy) || !Number.isFinite(logLoss)) return 1;
-  // Weight is derived from the model's persisted validation performance and
-  // current probabilistic quality. It is not a fixed per-model weight.
-  return Math.max(0.0001, accuracy / (1 + Math.max(0, logLoss)));
+  if (!Number.isFinite(accuracy) || !Number.isFinite(logLoss) || logLoss < 0) return null;
+  const weight = accuracy / (1 + logLoss);
+  return Number.isFinite(weight) && weight > 0 ? weight : null;
 }
 
 export async function evaluateProductionEnsemble(
   ticks: TickPoint[],
   options: { symbol?: string; durationSecs?: number; assetCategory?: number } = {}
 ): Promise<ProductionEnsembleResult> {
-  const symbol = options.symbol || 'R_100';
-  const durationSecs = options.durationSecs || 5;
-  const assetCategory = options.assetCategory || 0;
+  const symbol = options.symbol?.trim();
+  if (!symbol) throw new Error('SYMBOL_REQUIRED');
+
+  const durationSecs = options.durationSecs;
+  if (!Number.isFinite(durationSecs) || Number(durationSecs) <= 0) throw new Error('DURATION_REQUIRED');
+
+  const assetCategory = options.assetCategory ?? (symbol.startsWith('FRX') ? 1 : symbol.startsWith('CWM') ? 2 : 0);
   const features = extract37TickFeatures(ticks, {
     symbol,
-    contractDurationSecs: durationSecs,
+    contractDurationSecs: Number(durationSecs),
     assetCategoryNum: assetCategory,
   });
 
   const remote = await xgboostDaemon.sendCommand('predict_ensemble', {
     symbol,
-    durationSecs,
+    durationSecs: Number(durationSecs),
     assetCategory,
     ticks: ticks.map(t => ({ price: t.price, timestamp: t.timestamp })),
   });
 
-  if (!remote?.success || !remote.models) {
-    throw new Error('NATIVE_ML_ENSEMBLE_UNAVAILABLE');
-  }
+  if (!remote?.success || !remote.models) throw new Error('NATIVE_ML_ENSEMBLE_UNAVAILABLE');
 
   const evaluations = PREDICTIVE_MODELS.map((key) => {
     const result = remote.models[key];
     const up = result?.success ? finiteProbability(result.probabilityUp) : null;
     const down = result?.success ? finiteProbability(result.probabilityDown) : null;
     const valid = up !== null && down !== null && Math.abs((up + down) - 100) < 0.25;
+    const dynamicWeight = valid ? validationWeight(result) : null;
     return {
       modelKey: key,
       modelName: MODEL_NAMES[key],
@@ -101,7 +104,7 @@ export async function evaluateProductionEnsemble(
       probabilityDown: valid ? down : null,
       signal: valid ? (up! >= down! ? ('RISE' as const) : ('FALL' as const)) : null,
       confidence: valid ? Math.max(up!, down!) : null,
-      dynamicWeight: valid ? validationWeight(result) : null,
+      dynamicWeight,
       runtimeMode: valid ? 'Native Python trained model' : 'Unavailable — no synthetic fallback',
       details: valid ? String(result.engine || 'Native trained model') : String(result?.error || 'MODEL_UNAVAILABLE'),
       validation: result?.validation || null,
@@ -113,14 +116,10 @@ export async function evaluateProductionEnsemble(
       e.status === 'AVAILABLE' && e.probabilityUp !== null && e.probabilityDown !== null && e.dynamicWeight !== null
   );
 
-  if (available.length === 0) {
-    throw new Error('NO_TRAINED_MODELS_AVAILABLE');
-  }
+  if (available.length === 0) throw new Error('NO_VALIDATED_TRAINED_MODELS_AVAILABLE');
 
   const totalWeight = available.reduce((sum, e) => sum + e.dynamicWeight, 0);
-  if (!Number.isFinite(totalWeight) || totalWeight <= 0) {
-    throw new Error('INVALID_MODEL_WEIGHTS');
-  }
+  if (!Number.isFinite(totalWeight) || totalWeight <= 0) throw new Error('INVALID_MODEL_WEIGHTS');
 
   const probUp = available.reduce((sum, e) => sum + e.probabilityUp * e.dynamicWeight, 0) / totalWeight;
   const probDown = 100 - probUp;
@@ -132,7 +131,7 @@ export async function evaluateProductionEnsemble(
   const hmmAvailable = hmm?.success === true;
   const isoAvailable = iso?.success === true;
   const marketRegime = hmmAvailable ? String(hmm.primaryRegime) : 'REGIME_UNAVAILABLE';
-  const anomalyScore = isoAvailable ? finiteProbability(Number(iso.anomalyScore) * 100) ?? 0 : 0;
+  const anomalyScore = isoAvailable ? finiteProbability(Number(iso.anomalyScore) * 100) : null;
 
   const modelBreakdown: Record<string, any> = {};
   for (const evaluation of evaluations) {
@@ -186,7 +185,7 @@ export async function evaluateProductionEnsemble(
     probDown: Number(probDown.toFixed(2)),
     confidence: Number(confidence.toFixed(2)),
     marketRegime,
-    anomalyScore: Number((anomalyScore / 100).toFixed(4)),
+    anomalyScore,
     features,
     evaluations,
     modelBreakdown,
@@ -200,8 +199,8 @@ export async function evaluateProductionEnsemble(
     },
     calibration: {
       rawProbability: direction === 'RISE' ? probUp : probDown,
-      calibratedProbability: direction === 'RISE' ? probUp : probDown,
-      confidenceReductionPct: 0,
+      calibratedProbability: null,
+      confidenceReductionPct: null,
       plattScaledProbability: null,
       isotonicProbability: null,
       expectedCalibrationError: null,
@@ -214,7 +213,7 @@ export async function evaluateProductionEnsemble(
       anomalyRisk: isoAvailable ? (Number(iso.anomalyScore) >= 0.7 ? 'HIGH' : Number(iso.anomalyScore) >= 0.4 ? 'MODERATE' : 'LOW') : 'UNKNOWN',
       finalCompositeScore: Number(confidence.toFixed(2)),
       confidenceGateThreshold: null,
-      gatePassed: true,
+      gatePassed: null,
       action: direction === 'RISE' ? 'EXECUTE_CALL' : 'EXECUTE_PUT',
     },
     timestamp: Date.now(),
