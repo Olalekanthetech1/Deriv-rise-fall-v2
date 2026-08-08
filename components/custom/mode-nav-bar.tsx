@@ -1,13 +1,13 @@
 'use client';
 
-import { useState } from 'react';
+import { useMemo, useState } from 'react';
 import { ArrowUpDown, Radio, TrendingUp, Sparkles, Users, FileText, Layers } from 'lucide-react';
 import { AppTradingMode, ModeSelectionModal } from './mode-selection-modal';
 import { SignalsDrawer } from './signals-drawer';
 import { SocialDrawer } from './social-drawer';
 import type { ActiveSymbol } from '@deriv/core';
 import type { TradeSignal } from '@/hooks/use-realtime-signals';
-import type { SignalConsensus, SignalModeRecommendation } from '@/lib/signal-manager';
+import { buildConsensus, buildModeRecommendations } from '@/lib/signal-manager';
 
 interface ModeNavBarProps {
   activeMode: AppTradingMode;
@@ -16,8 +16,6 @@ interface ModeNavBarProps {
   onOpenPositions?: () => void;
   activePositionsCount?: number;
   signals?: TradeSignal[];
-  consensus?: SignalConsensus | null;
-  modeRecommendations?: SignalModeRecommendation[];
   highConfidenceCount?: number;
   soundEnabled?: boolean;
   onToggleSound?: () => void;
@@ -27,10 +25,13 @@ interface ModeNavBarProps {
   isBuying?: boolean;
 }
 
-export function ModeNavBar({ activeMode, onSelectMode, activeSymbol, onOpenPositions, activePositionsCount = 0, signals = [], consensus = null, modeRecommendations = [], highConfidenceCount = 0, soundEnabled = true, onToggleSound = () => {}, winStats = { total: 0, winCount: 0, accuracy: '0.0%' }, onAutoFillTrade = () => {}, onQuickExecute = async () => {}, isBuying = false }: ModeNavBarProps) {
+export function ModeNavBar({ activeMode, onSelectMode, activeSymbol, onOpenPositions, activePositionsCount = 0, signals = [], highConfidenceCount = 0, soundEnabled = true, onToggleSound = () => {}, winStats = { total: 0, winCount: 0, accuracy: '0.0%' }, onAutoFillTrade = () => {}, onQuickExecute = async () => {}, isBuying = false }: ModeNavBarProps) {
   const [isModeModalOpen, setIsModeModalOpen] = useState(false);
   const [isSignalsOpen, setIsSignalsOpen] = useState(false);
   const [isSocialOpen, setIsSocialOpen] = useState(false);
+
+  const consensus = useMemo(() => buildConsensus(signals, Date.now()), [signals]);
+  const modeRecommendations = useMemo(() => buildModeRecommendations(signals), [signals]);
 
   const getActiveModeInfo = () => {
     switch (activeMode) {
