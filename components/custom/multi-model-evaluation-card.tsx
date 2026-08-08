@@ -13,10 +13,10 @@ import {
   Zap,
   Database,
 } from 'lucide-react';
-import type { EnsembleEvaluationResult } from '@/lib/multi-model-evaluator';
+import type { MultiModelEvaluationResult } from '@/lib/multi-model-ui-types';
 
 interface MultiModelEvaluationCardProps {
-  ensemble: EnsembleEvaluationResult | null;
+  ensemble: MultiModelEvaluationResult | null;
   className?: string;
 }
 

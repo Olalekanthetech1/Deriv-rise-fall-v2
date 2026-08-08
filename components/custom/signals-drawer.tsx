@@ -24,7 +24,7 @@ import {
 import type { ActiveSymbol } from '@deriv/core';
 import type { TradeSignal, DurationPrediction } from '@/hooks/use-realtime-signals';
 import { MultiModelEvaluationCard } from './multi-model-evaluation-card';
-import type { EnsembleEvaluationResult } from '@/lib/multi-model-evaluator';
+import type { MultiModelEvaluationResult } from '@/lib/multi-model-ui-types';
 
 interface SignalsDrawerProps {
   isOpen: boolean;
@@ -58,7 +58,7 @@ export function SignalsDrawer({
   const [executingId, setExecutingId] = useState<string | null>(null);
   const [selectedDurationFilter, setSelectedDurationFilter] = useState<string>('ALL');
   const [activeTab, setActiveTab] = useState<'signals' | 'multimodel'>('signals');
-  const [ensembleData, setEnsembleData] = useState<EnsembleEvaluationResult | null>(null);
+  const [ensembleData, setEnsembleData] = useState<MultiModelEvaluationResult | null>(null);
   const [isEvaluating, setIsEvaluating] = useState<boolean>(false);
   const [ensembleError, setEnsembleError] = useState<string | null>(null);
 
