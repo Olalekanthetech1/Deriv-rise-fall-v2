@@ -94,7 +94,6 @@ def train_one(kind,t,d,a,s,h):
         save(kind,s,d,{'schemaVersion':SCHEMA,'modelType':kind,'featureCount':FEATURES,'model':m,'validation':metrics}); return {'success':True,'modelId':f'{s}_{d}s_{kind}','modelType':kind,'samplesCount':len(X),'validationSamples':len(Xv),**metrics,'engine':f'Trained native Python {kind}'}
     if kind in ('tcn','lstm','transformer'):
         if train_deep is None:raise RuntimeError('PyTorch sequence runtime unavailable')
-        # Rebuild sequence dataset from the same canonical feature extractor.
         prices=[f(x.get('price')) for x in t]; look=max(1,int(d));
         if len(prices)<=SEQ+look:raise ValueError(f'Insufficient ticks: need at least {SEQ+look+1}')
         SX=[];sy=[]
@@ -103,13 +102,13 @@ def train_one(kind,t,d,a,s,h):
         with torch_no_grad():
             pr=predict_deep(kind,{x:v.cpu() for x,v in m.state_dict().items()},SX[k:])
         metrics={'accuracy':round(float(np.mean(np.argmax(pr,axis=1)==sy[k:]))*100,3),'logLoss':round(float(log_loss(sy[k:],pr,labels=[0,1])),6)}
-        save(kind,s,d,{'schemaVersion':SCHEMA,'modelType':kind,'state_dict':{x:v.cpu() for x,v in m.state_dict().items()},'validation':metrics}); return {'success':True,'modelId':f'{s}_{d}s_{kind}','modelType':kind,'samplesCount':len(SX),**metrics,'engine':f'Trained PyTorch {kind}'}
+        save(kind,s,d,{'schemaVersion':SCHEMA,'modelType':kind,'state_dict':{x:v.cpu() for x,v in m.state_dict().items()},'validation':metrics}); return {'success':True,'modelId':f'{s}_{d}s_{kind}','modelType':kind,'samplesCount':len(SX),'validationSamples':len(SX)-k,**metrics,'engine':f'Trained PyTorch {kind}'}
     if kind=='hmm':
         if GaussianHMM is None:raise RuntimeError('hmmlearn unavailable')
-        m=GaussianHMM(n_components=4,covariance_type='diag',n_iter=100,random_state=42).fit(Xt[:,[0,3,10,25]]); m.state_labels=['LOW_VOLATILITY','DIRECTIONAL_EXPANSION','CHOPPY_REVERSAL','SPIKE_REGIME']; save(kind,s,d,m); return {'success':True,'modelId':f'{s}_{d}s_hmm','modelType':'hmm','samplesCount':len(X),'engine':'Trained hmmlearn GaussianHMM'}
+        m=GaussianHMM(n_components=4,covariance_type='diag',n_iter=100,random_state=42).fit(Xt[:,[0,3,10,25]]); m.state_labels=['LOW_VOLATILITY','DIRECTIONAL_EXPANSION','CHOPPY_REVERSAL','SPIKE_REGIME']; save(kind,s,d,{'model':m,'validationSamples':len(Xv),'trainedAt':time.time(),'schemaVersion':SCHEMA}); return {'success':True,'modelId':f'{s}_{d}s_hmm','modelType':'hmm','samplesCount':len(X),'validationSamples':len(Xv),'engine':'Trained hmmlearn GaussianHMM'}
     if kind=='isolation_forest':
         if IsolationForest is None:raise RuntimeError('scikit-learn unavailable')
-        save(kind,s,d,{'model':IsolationForest(n_estimators=200,contamination='auto',random_state=42,n_jobs=2).fit(Xt)}); return {'success':True,'modelId':f'{s}_{d}s_isolation_forest','modelType':kind,'samplesCount':len(X),'engine':'Trained scikit-learn IsolationForest'}
+        model=IsolationForest(n_estimators=200,contamination='auto',random_state=42,n_jobs=2).fit(Xt); save(kind,s,d,{'model':model,'validationSamples':len(Xv),'trainedAt':time.time(),'schemaVersion':SCHEMA}); return {'success':True,'modelId':f'{s}_{d}s_isolation_forest','modelType':kind,'samplesCount':len(X),'validationSamples':len(Xv),'engine':'Trained scikit-learn IsolationForest'}
     raise ValueError(kind)
 
 def torch_no_grad():
@@ -118,15 +117,17 @@ def torch_no_grad():
 def predict_one(req):
     s=req.get('symbol','R_100');t=req.get('ticks',[]);d=int(req.get('durationSecs',5));a=req.get('assetCategory',0);k=req.get('modelType','xgboost');m=load(k,s,d)
     if m is None:return {'success':False,'id':req.get('id'),'modelType':k,'error':'MODEL_UNAVAILABLE'}
+    validation=m.get('validation',{}) if isinstance(m,dict) else {}
+    metadata={'validation':validation,'modelSchema':m.get('schemaVersion',SCHEMA) if isinstance(m,dict) else SCHEMA,'trainedAt':m.get('trainedAt') if isinstance(m,dict) else None}
     if k in ('xgboost','lightgbm','catboost'):
-        pr=m['model'].predict_proba(X(t,d,a,s))[0]; down,up=float(pr[0]),float(pr[1]); return result(req,k,up,down,m)
+        pr=m['model'].predict_proba(X(t,d,a,s))[0]; down,up=float(pr[0]),float(pr[1]); return {**result(req,k,up,down,m),**metadata}
     if k in ('tcn','lstm','transformer'):
         if predict_deep is None:return {'success':False,'id':req.get('id'),'modelType':k,'error':'PYTORCH_UNAVAILABLE'}
-        pr=predict_deep(k,m['state_dict'],seq_X(t,d,a,s))[0]; return result(req,k,float(pr[1]),float(pr[0]),m)
+        pr=predict_deep(k,m['state_dict'],seq_X(t,d,a,s))[0]; return {**result(req,k,float(pr[1]),float(pr[0]),m),**metadata}
     if k=='hmm':
-        v=X(t,d,a,s); obs=v[:,[0,3,10,25]]; state=int(m.predict(obs)[0]); p=m.predict_proba(obs)[0]; labels=getattr(m,'state_labels',['LOW_VOLATILITY','DIRECTIONAL_EXPANSION','CHOPPY_REVERSAL','SPIKE_REGIME']); return {'success':True,'id':req.get('id'),'modelType':'hmm','primaryRegime':labels[state%4],'regimeState':state+1,'regimeProbabilities':[round(float(x)*100,2) for x in p],'engine':'Trained GaussianHMM'}
+        model=m['model']; v=X(t,d,a,s); obs=v[:,[0,3,10,25]]; state=int(model.predict(obs)[0]); p=model.predict_proba(obs)[0]; labels=getattr(model,'state_labels',['LOW_VOLATILITY','DIRECTIONAL_EXPANSION','CHOPPY_REVERSAL','SPIKE_REGIME']); return {**{'success':True,'id':req.get('id'),'modelType':'hmm','primaryRegime':labels[state%4],'regimeState':state+1,'regimeProbabilities':[round(float(x)*100,2) for x in p],'engine':'Trained GaussianHMM'},**metadata}
     if k=='isolation_forest':
-        v=X(t,d,a,s); m=m['model']; raw=float(m.score_samples(v)[0]); return {'success':True,'id':req.get('id'),'modelType':k,'isAnomaly':int(m.predict(v)[0])==-1,'anomalyScore':round(max(0,min(1,.5-raw)),4),'engine':'Trained IsolationForest'}
+        v=X(t,d,a,s); model=m['model']; raw=float(model.score_samples(v)[0]); return {**{'success':True,'id':req.get('id'),'modelType':k,'isAnomaly':int(model.predict(v)[0])==-1,'anomalyScore':round(max(0,min(1,.5-raw)),4),'engine':'Trained IsolationForest'},**metadata}
     return {'success':False,'id':req.get('id'),'error':'UNSUPPORTED_MODEL'}
 def result(req,k,up,down,m): return {'success':True,'id':req.get('id'),'symbol':req.get('symbol','R_100'),'durationSecs':req.get('durationSecs',5),'modelType':k,'signal':'CALL' if up>=down else 'PUT','confidence':round(max(up,down)*100,2),'probabilityUp':round(up*100,2),'probabilityDown':round(down*100,2),'rawScore':round(up-down,6),'modelVersion':SCHEMA,'engine':f'Trained native {k}'}
 def main():
