@@ -59,15 +59,9 @@ export function buildConsensus(
 ): SignalConsensus {
   if (!signals.length) {
     return {
-      direction: 'WAIT',
-      confidence: 0,
-      agreement: 0,
-      totalEngines: 0,
-      recommendedDuration: createDuration(5, 't', '5 Ticks'),
-      expiresAt: now,
-      expiresInSeconds: 0,
-      status: 'WAIT',
-      modeRecommendations: [],
+      direction: 'WAIT', confidence: 0, agreement: 0, totalEngines: 0,
+      recommendedDuration: createDuration(5, 't', '5 Ticks'), expiresAt: now,
+      expiresInSeconds: 0, status: 'WAIT', modeRecommendations: [],
     };
   }
 
@@ -76,9 +70,7 @@ export function buildConsensus(
   const winner = rise.length >= fall.length ? 'RISE' : 'FALL';
   const aligned = winner === 'RISE' ? rise : fall;
   const agreement = aligned.length / signals.length;
-  const confidence = aligned.length
-    ? aligned.reduce((sum, signal) => sum + signal.confidence, 0) / aligned.length
-    : 0;
+  const confidence = aligned.length ? aligned.reduce((sum, signal) => sum + signal.confidence, 0) / aligned.length : 0;
 
   const durationVotes = new Map<string, { count: number; confidence: number; sample: (typeof signals)[number] }>();
   for (const signal of aligned) {
@@ -91,15 +83,8 @@ export function buildConsensus(
       durationVotes.set(key, { count: 1, confidence: signal.confidence, sample: signal });
     }
   }
-
-  const durationWinner = [...durationVotes.values()].sort(
-    (a, b) => b.count - a.count || b.confidence - a.confidence,
-  )[0];
-  const duration = createDuration(
-    durationWinner.sample.recommendedDurationValue,
-    durationWinner.sample.recommendedDurationUnit,
-    durationWinner.sample.recommendedDurationLabel,
-  );
+  const durationWinner = [...durationVotes.values()].sort((a, b) => b.count - a.count || b.confidence - a.confidence)[0];
+  const duration = createDuration(durationWinner.sample.recommendedDurationValue, durationWinner.sample.recommendedDurationUnit, durationWinner.sample.recommendedDurationLabel);
   const expiresAt = now + duration.seconds * 1000;
 
   return {
@@ -125,24 +110,19 @@ export function buildModeRecommendations(
     recommendedDurationLabel: string;
   }>,
 ): SignalModeRecommendation[] {
-  const byId = (id: string) => signals.find((s) => s.id === id);
-  const xgb = byId('xgb');
-  const trend = byId('trend');
-  const vol = byId('vol');
-  const sent = byId('sent');
-
-  const make = (mode: SignalMode, signal: typeof xgb, rationale: string): SignalModeRecommendation | null => {
-    if (!signal) return null;
-    return {
-      mode,
-      direction: signal.direction,
-      confidence: signal.confidence,
-      duration: createDuration(signal.recommendedDurationValue, signal.recommendedDurationUnit, signal.recommendedDurationLabel),
-      sourceSignalId: signal.id,
-      rationale,
-    };
-  };
-
+  const byPart = (part: string) => signals.find((s) => s.id.includes(`sig-${part}-`));
+  const xgb = byPart('xgb');
+  const trend = byPart('trend');
+  const vol = byPart('vol');
+  const sent = byPart('sent');
+  const make = (mode: SignalMode, signal: typeof xgb, rationale: string): SignalModeRecommendation | null => signal ? {
+    mode,
+    direction: signal.direction,
+    confidence: signal.confidence,
+    duration: createDuration(signal.recommendedDurationValue, signal.recommendedDurationUnit, signal.recommendedDurationLabel),
+    sourceSignalId: signal.id,
+    rationale,
+  } : null;
   return [
     make('CLASSIC', sent ?? trend, 'Tick direction and short-horizon flow recommendation.'),
     make('PRO', trend ?? vol, 'Regime, velocity and multi-horizon recommendation.'),
