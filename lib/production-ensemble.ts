@@ -1,15 +1,8 @@
 import { EngineeredTickFeatures, extract37TickFeatures, TickPoint } from './ml-feature-extractor';
-import { xgboostEngine } from './xgboost-engine';
-import { lightgbmEngine } from './lightgbm-engine';
-import { catboostEngine } from './catboost-engine';
-import { tcnEngine } from './tcn-engine';
-import { lstmEngine } from './lstm-engine';
-import { transformerEngine } from './transformer-engine';
-import { hmmEngine } from './hmm-engine';
-import { isolationForestEngine } from './isolation-forest-engine';
 import { xgboostDaemon } from './xgboost-daemon';
 
 export type Signal = 'RISE' | 'FALL';
+export type ModelStatus = 'AVAILABLE' | 'UNAVAILABLE';
 
 export interface ProductionEnsembleResult {
   symbol: string;
@@ -23,12 +16,13 @@ export interface ProductionEnsembleResult {
   evaluations: Array<{
     modelKey: string;
     modelName: string;
-    family: 'tabular' | 'sequential';
-    probabilityUp: number;
-    probabilityDown: number;
-    signal: Signal;
-    confidence: number;
-    dynamicWeight: number;
+    family: 'tabular' | 'sequential' | 'regime' | 'anomaly';
+    status: ModelStatus;
+    probabilityUp: number | null;
+    probabilityDown: number | null;
+    signal: Signal | null;
+    confidence: number | null;
+    dynamicWeight: number | null;
     runtimeMode: string;
     details: string;
   }>;
@@ -41,28 +35,32 @@ export interface ProductionEnsembleResult {
   timestamp: number;
 }
 
-const MODEL_KEYS = ['xgboost', 'lightgbm', 'catboost', 'tcn', 'lstm', 'transformer'] as const;
-const FALLBACK_WEIGHT = 1 / MODEL_KEYS.length;
-
-function fallbackPredictions(ticks: TickPoint[], opts: any) {
-  const x = xgboostEngine.predict(ticks, opts);
-  const l = lightgbmEngine.predict(ticks, opts);
-  const c = catboostEngine.predict(ticks, opts);
-  const t = tcnEngine.predict(ticks, opts);
-  const r = lstmEngine.predict(ticks, opts);
-  const tr = transformerEngine.predict(ticks, opts);
-  return {
-    xgboost: x.signal === 'CALL' ? x.confidence : 100 - x.confidence,
-    lightgbm: l.probabilityUp,
-    catboost: c.probabilityUp,
-    tcn: t.probabilityUp,
-    lstm: r.probabilityUp,
-    transformer: tr.probabilityUp,
-  };
-}
+const PREDICTIVE_MODELS = ['xgboost', 'lightgbm', 'catboost', 'tcn', 'lstm', 'transformer'] as const;
+const MODEL_NAMES: Record<string, string> = {
+  xgboost: 'XGBoost',
+  lightgbm: 'LightGBM',
+  catboost: 'CatBoost',
+  tcn: 'TCN',
+  lstm: 'LSTM / GRU',
+  transformer: 'Transformer',
+};
 
 function familyForModel(key: string): 'tabular' | 'sequential' {
   return ['xgboost', 'lightgbm', 'catboost'].includes(key) ? 'tabular' : 'sequential';
+}
+
+function finiteProbability(value: unknown): number | null {
+  const n = Number(value);
+  return Number.isFinite(n) && n >= 0 && n <= 100 ? n : null;
+}
+
+function validationWeight(result: any): number {
+  const accuracy = Number(result?.validation?.accuracy);
+  const logLoss = Number(result?.validation?.logLoss);
+  if (!Number.isFinite(accuracy) || !Number.isFinite(logLoss)) return 1;
+  // Weight is derived from the model's persisted validation performance and
+  // current probabilistic quality. It is not a fixed per-model weight.
+  return Math.max(0.0001, accuracy / (1 + Math.max(0, logLoss)));
 }
 
 export async function evaluateProductionEnsemble(
@@ -72,130 +70,150 @@ export async function evaluateProductionEnsemble(
   const symbol = options.symbol || 'R_100';
   const durationSecs = options.durationSecs || 5;
   const assetCategory = options.assetCategory || 0;
-  const opts = { symbol, durationSecs, assetCategory };
   const features = extract37TickFeatures(ticks, {
     symbol,
     contractDurationSecs: durationSecs,
     assetCategoryNum: assetCategory,
   });
 
-  const fallback = fallbackPredictions(ticks, opts);
-  let remote: any = null;
-  try {
-    remote = await xgboostDaemon.sendCommand('predict_ensemble', {
-      symbol,
-      durationSecs,
-      assetCategory,
-      ticks: ticks.map(t => ({ price: t.price, timestamp: t.timestamp })),
-    });
-  } catch {
-    remote = null;
+  const remote = await xgboostDaemon.sendCommand('predict_ensemble', {
+    symbol,
+    durationSecs,
+    assetCategory,
+    ticks: ticks.map(t => ({ price: t.price, timestamp: t.timestamp })),
+  });
+
+  if (!remote?.success || !remote.models) {
+    throw new Error('NATIVE_ML_ENSEMBLE_UNAVAILABLE');
   }
 
-  const evaluations = MODEL_KEYS.map((key) => {
-    const r = remote?.models?.[key];
-    const up = r?.success ? Number(r.probabilityUp) : Number(fallback[key]);
-    const safeUp = Math.max(0, Math.min(100, Number.isFinite(up) ? up : 50));
-    const down = 100 - safeUp;
+  const evaluations = PREDICTIVE_MODELS.map((key) => {
+    const result = remote.models[key];
+    const up = result?.success ? finiteProbability(result.probabilityUp) : null;
+    const down = result?.success ? finiteProbability(result.probabilityDown) : null;
+    const valid = up !== null && down !== null && Math.abs((up + down) - 100) < 0.25;
     return {
       modelKey: key,
-      modelName: key.toUpperCase(),
+      modelName: MODEL_NAMES[key],
       family: familyForModel(key),
-      probabilityUp: Number(safeUp.toFixed(2)),
-      probabilityDown: Number(down.toFixed(2)),
-      signal: safeUp >= 50 ? ('RISE' as const) : ('FALL' as const),
-      confidence: Number(Math.max(safeUp, down).toFixed(2)),
-      dynamicWeight: FALLBACK_WEIGHT,
-      runtimeMode: r?.success ? 'Native Python trained model' : 'Deterministic TypeScript fallback',
-      details: r?.engine || 'Fallback engine used because a production model is not loaded',
+      status: valid ? ('AVAILABLE' as const) : ('UNAVAILABLE' as const),
+      probabilityUp: valid ? up : null,
+      probabilityDown: valid ? down : null,
+      signal: valid ? (up! >= down! ? ('RISE' as const) : ('FALL' as const)) : null,
+      confidence: valid ? Math.max(up!, down!) : null,
+      dynamicWeight: valid ? validationWeight(result) : null,
+      runtimeMode: valid ? 'Native Python trained model' : 'Unavailable — no synthetic fallback',
+      details: valid ? String(result.engine || 'Native trained model') : String(result?.error || 'MODEL_UNAVAILABLE'),
+      validation: result?.validation || null,
     };
   });
 
-  const weights = evaluations.map(e => e.dynamicWeight);
-  const total = weights.reduce((a, b) => a + b, 0) || 1;
-  const probUp = evaluations.reduce((sum, e, i) => sum + e.probabilityUp * weights[i], 0) / total;
-  const probDown = 100 - probUp;
-  const direction: Signal = probUp >= 50 ? 'RISE' : 'FALL';
-  const confidence = Number(Math.max(probUp, probDown).toFixed(2));
-  const hmm = remote?.models?.hmm?.success ? remote.models.hmm : hmmEngine.evaluateRegime(ticks, opts);
-  const iso = remote?.models?.isolation_forest?.success
-    ? remote.models.isolation_forest
-    : isolationForestEngine.detectAnomaly(ticks, opts);
-  const anomalyScore = Number(iso?.anomalyScore || 0);
-  const marketRegime = hmm?.primaryRegime || hmm?.regimeName || 'UNKNOWN';
+  const available = evaluations.filter(
+    (e): e is typeof evaluations[number] & { probabilityUp: number; probabilityDown: number; dynamicWeight: number } =>
+      e.status === 'AVAILABLE' && e.probabilityUp !== null && e.probabilityDown !== null && e.dynamicWeight !== null
+  );
 
-  // Normalize the backend result to the contract expected by the Multi-Model UI.
-  // The UI historically consumed `vote`/`weight` fields while the production
-  // ensemble uses `signal`/`dynamicWeight`. Keep both representations aligned.
+  if (available.length === 0) {
+    throw new Error('NO_TRAINED_MODELS_AVAILABLE');
+  }
+
+  const totalWeight = available.reduce((sum, e) => sum + e.dynamicWeight, 0);
+  if (!Number.isFinite(totalWeight) || totalWeight <= 0) {
+    throw new Error('INVALID_MODEL_WEIGHTS');
+  }
+
+  const probUp = available.reduce((sum, e) => sum + e.probabilityUp * e.dynamicWeight, 0) / totalWeight;
+  const probDown = 100 - probUp;
+  const direction: Signal = probUp >= probDown ? 'RISE' : 'FALL';
+  const confidence = Math.max(probUp, probDown);
+
+  const hmm = remote.models.hmm;
+  const iso = remote.models.isolation_forest;
+  const hmmAvailable = hmm?.success === true;
+  const isoAvailable = iso?.success === true;
+  const marketRegime = hmmAvailable ? String(hmm.primaryRegime) : 'REGIME_UNAVAILABLE';
+  const anomalyScore = isoAvailable ? finiteProbability(Number(iso.anomalyScore) * 100) ?? 0 : 0;
+
   const modelBreakdown: Record<string, any> = {};
   for (const evaluation of evaluations) {
     modelBreakdown[evaluation.modelKey] = {
       modelName: evaluation.modelName,
       runtimeMode: evaluation.runtimeMode,
+      status: evaluation.status,
       vote: evaluation.signal,
       confidence: evaluation.confidence,
       probabilityUp: evaluation.probabilityUp,
       probabilityDown: evaluation.probabilityDown,
       weight: evaluation.dynamicWeight,
       details: evaluation.details,
+      validation: evaluation.validation,
     };
   }
 
-  // Preserve the UI's historical LSTM/GRU key while the runtime uses `lstm`.
-  modelBreakdown.lstm_gru = modelBreakdown.lstm;
+  if (hmmAvailable) {
+    modelBreakdown.hmm = {
+      modelName: 'HMM Regime Model',
+      status: 'AVAILABLE',
+      primaryRegime: hmm.primaryRegime,
+      regimeState: hmm.regimeState,
+      regimeProbabilities: hmm.regimeProbabilities,
+      details: hmm.engine || 'Native trained GaussianHMM',
+    };
+  } else {
+    modelBreakdown.hmm = { modelName: 'HMM Regime Model', status: 'UNAVAILABLE', details: String(hmm?.error || 'MODEL_UNAVAILABLE') };
+  }
 
-  const regimeBreakdown = {
-    primaryRegime: hmm?.primaryRegime || hmm?.regimeName || 'UNKNOWN',
-    regimeState: Number(hmm?.regimeState || 0),
-    vote: direction,
-    confidence,
-    details: 'HMM market-regime context',
-  };
-  const anomalyBreakdown = {
-    anomalyScore,
-    spikeSeverity: iso?.spikeSeverity || 'Normal',
-    vote: 'NORMAL' as const,
-    confidenceAdjustment: Number(iso?.confidenceAdjustmentFactor || 1),
-    details: iso?.actionNote || 'Isolation Forest anomaly context',
-  };
-  modelBreakdown.hmm = regimeBreakdown;
-  modelBreakdown.isolation_forest = anomalyBreakdown;
+  if (isoAvailable) {
+    modelBreakdown.isolation_forest = {
+      modelName: 'Isolation Forest',
+      status: 'AVAILABLE',
+      anomalyScore: iso.anomalyScore,
+      isAnomaly: Boolean(iso.isAnomaly),
+      details: iso.engine || 'Native trained IsolationForest',
+    };
+  } else {
+    modelBreakdown.isolation_forest = { modelName: 'Isolation Forest', status: 'UNAVAILABLE', details: String(iso?.error || 'MODEL_UNAVAILABLE') };
+  }
+
+  const normalizedWeights = Object.fromEntries(
+    available.map(e => [e.modelKey, Number((e.dynamicWeight / totalWeight).toFixed(6))])
+  );
 
   return {
     symbol,
     direction,
     probUp: Number(probUp.toFixed(2)),
     probDown: Number(probDown.toFixed(2)),
-    confidence,
+    confidence: Number(confidence.toFixed(2)),
     marketRegime,
-    anomalyScore,
+    anomalyScore: Number((anomalyScore / 100).toFixed(4)),
     features,
     evaluations,
     modelBreakdown,
-    regime: hmm,
-    anomaly: iso,
+    regime: hmmAvailable ? hmm : { status: 'UNAVAILABLE', error: hmm?.error || 'MODEL_UNAVAILABLE' },
+    anomaly: isoAvailable ? iso : { status: 'UNAVAILABLE', error: iso?.error || 'MODEL_UNAVAILABLE' },
     drift: {
-      modelWeights: Object.fromEntries(evaluations.map(e => [e.modelKey, e.dynamicWeight])),
-      recentAccuracies: {},
-      driftStatus: remote ? 'Native ensemble runtime active' : 'Fallback runtime active',
-      topPerformingModel: evaluations.slice().sort((a, b) => b.confidence - a.confidence)[0]?.modelKey || 'xgboost',
+      modelWeights: normalizedWeights,
+      recentAccuracies: Object.fromEntries(available.map(e => [e.modelKey, e.validation?.accuracy ?? null])),
+      driftStatus: 'Weights derived from persisted native-model validation metrics',
+      topPerformingModel: available.slice().sort((a, b) => b.dynamicWeight - a.dynamicWeight)[0].modelKey,
     },
     calibration: {
       rawProbability: direction === 'RISE' ? probUp : probDown,
       calibratedProbability: direction === 'RISE' ? probUp : probDown,
       confidenceReductionPct: 0,
-      plattScaledProbability: direction === 'RISE' ? probUp : probDown,
-      isotonicProbability: direction === 'RISE' ? probUp : probDown,
-      expectedCalibrationError: 0,
-      method: 'identity-until-calibration-dataset-is-available',
+      plattScaledProbability: null,
+      isotonicProbability: null,
+      expectedCalibrationError: null,
+      method: 'UNAVAILABLE_UNTIL_TRAINED_CALIBRATION_DATA',
     },
     fusion: {
-      directionScore: confidence,
+      directionScore: Number(confidence.toFixed(2)),
       direction,
       regimeState: marketRegime,
-      anomalyRisk: anomalyScore >= 0.7 ? 'HIGH' : anomalyScore >= 0.4 ? 'MODERATE' : 'LOW',
-      finalCompositeScore: confidence,
-      confidenceGateThreshold: 0,
+      anomalyRisk: isoAvailable ? (Number(iso.anomalyScore) >= 0.7 ? 'HIGH' : Number(iso.anomalyScore) >= 0.4 ? 'MODERATE' : 'LOW') : 'UNKNOWN',
+      finalCompositeScore: Number(confidence.toFixed(2)),
+      confidenceGateThreshold: null,
       gatePassed: true,
       action: direction === 'RISE' ? 'EXECUTE_CALL' : 'EXECUTE_PUT',
     },
