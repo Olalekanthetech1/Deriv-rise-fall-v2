@@ -2,15 +2,7 @@
 
 import { useState, useMemo, useCallback, useEffect, useRef } from 'react';
 import { useBuy } from '@deriv/core';
-import type {
-  DerivWS,
-  ActiveSymbol,
-  Tick,
-  ProposalInfo,
-  ProposalParams,
-  BuyResult,
-} from '@deriv/core';
-import type { ContractInfo } from '@deriv/core';
+import type { DerivWS, ActiveSymbol, Tick, ProposalInfo, ProposalParams, BuyResult } from '@deriv/core';
 import { useBaseTrading } from '@/hooks/use-base-trading';
 import type { UseBaseTradingParams } from '@/hooks/use-base-trading';
 import type { Direction, DurationSelectUnit, DurationOption, OpenPosition, ClosedPosition } from '../lib/types';
@@ -47,11 +39,7 @@ interface UseRiseFallTradingReturn {
   setEndTime: (time: string) => void;
   proposal: ProposalInfo | null;
   buyContract: (targetDir?: Direction) => Promise<void>;
-  buyWithCustomParams: (params: {
-    direction: Direction;
-    duration: number;
-    durationUnit: DurationSelectUnit;
-  }) => Promise<void>;
+  buyWithCustomParams: (params: { direction: Direction; duration: number; durationUnit: DurationSelectUnit }) => Promise<void>;
   isBuying: boolean;
   buyResult: BuyResult | null;
   buyError: string | null;
@@ -98,10 +86,7 @@ export function useRiseFallTrading({ ws, isConnected, isExhausted, isAuthenticat
   const [durationOptionsSymbol, setDurationOptionsSymbol] = useState<string | null>(null);
 
   const durationOptions = useMemo(() => getDurationOptions(contracts), [contracts]);
-  const proposalManager = useMemo(
-    () => (tradingWs ? new ProposalSubmissionManager(tradingWs) : null),
-    [tradingWs]
-  );
+  const proposalManager = useMemo(() => (tradingWs ? new ProposalSubmissionManager(tradingWs) : null), [tradingWs]);
 
   const durationUnitRef = useRef(durationUnit);
   const activeSymbolKeyRef = useRef(activeSymbol?.underlying_symbol);
@@ -158,16 +143,13 @@ export function useRiseFallTrading({ ws, isConnected, isExhausted, isAuthenticat
 
     const opt = durationOptions.find(o => o.unit === customUnit);
     if (!opt || customDuration < opt.min || customDuration > opt.max) return null;
-
-    if (customUnit === 'h') {
-      return { ...base, duration: customDuration * 60, durationUnit: 'm' };
-    }
-
+    if (customUnit === 'h') return { ...base, duration: customDuration * 60, durationUnit: 'm' };
     return { ...base, duration: customDuration, durationUnit: customUnit };
   }, [activeSymbol, durationOptions, durationOptionsSymbol, stake, allowEquals, duration, durationUnit, endDate, endTime]);
 
-  // Exactly one managed proposal subscription is maintained for the currently
-  // selected direction. CALL and PUT are no longer subscribed simultaneously.
+  // A one-shot proposal is fetched for the selected direction. This removes
+  // the two background useProposal subscriptions that were colliding with
+  // each other and causing Deriv's AlreadySubscribed response.
   useEffect(() => {
     let cancelled = false;
     const manager = proposalManager;
@@ -186,18 +168,14 @@ export function useRiseFallTrading({ ws, isConnected, isExhausted, isAuthenticat
 
     return () => {
       cancelled = true;
-      void manager.forget(params);
     };
   }, [proposalManager, tradingIsConnected, direction, buildProposalParams]);
 
-  // Ensure all managed subscriptions are cleaned up when the hook unmounts or
-  // the authenticated WebSocket changes.
   useEffect(() => {
     return () => proposalManager?.clear();
   }, [proposalManager]);
 
-  const { buyContract: buyWithProposal, isBuying, buyResult, buyError, clearBuyResult } =
-    useBuy(tradingWs, tradingIsConnected);
+  const { buyContract: buyWithProposal, isBuying, buyResult, buyError, clearBuyResult } = useBuy(tradingWs, tradingIsConnected);
 
   const buyContract = useCallback(async (targetDir?: Direction) => {
     const dir = targetDir || direction;
@@ -208,38 +186,24 @@ export function useRiseFallTrading({ ws, isConnected, isExhausted, isAuthenticat
 
     const params = buildProposalParams(dir);
     if (!params || !proposalManager) return;
-
     const targetProposal = await proposalManager.getProposal(params);
     if (targetProposal) await buyWithProposal(targetProposal);
   }, [direction, proposal, buildProposalParams, proposalManager, buyWithProposal]);
 
-  const buyWithCustomParams = useCallback(async (params: {
-    direction: Direction;
-    duration: number;
-    durationUnit: DurationSelectUnit;
-  }) => {
+  const buyWithCustomParams = useCallback(async (params: { direction: Direction; duration: number; durationUnit: DurationSelectUnit }) => {
     if (!tradingWs || !tradingIsConnected || !activeSymbol || !proposalManager) return;
-    const stakeNum = parseFloat(stake);
-    if (!stakeNum || stakeNum <= 0) return;
+    if (!parseFloat(stake) || parseFloat(stake) <= 0) return;
 
     const proposalParams = buildProposalParams(params.direction, params.duration, params.durationUnit);
     if (!proposalParams) return;
 
-    try {
-      // Every execution path now goes through the same idempotent manager.
-      const targetProposal = await proposalManager.getProposal(proposalParams);
-      if (!targetProposal) return;
+    const targetProposal = await proposalManager.getProposal(proposalParams);
+    if (!targetProposal) return;
 
-      await buyWithProposal(targetProposal);
-
-      // Update UI state only after the proposal was successfully submitted.
-      setDirection(params.direction);
-      setDurationUnit(params.durationUnit);
-      setDuration(params.duration);
-    } catch (err) {
-      console.error('[ProposalManager] trade submission failed:', err);
-      throw err;
-    }
+    await buyWithProposal(targetProposal);
+    setDirection(params.direction);
+    setDurationUnit(params.durationUnit);
+    setDuration(params.duration);
   }, [tradingWs, tradingIsConnected, activeSymbol, proposalManager, stake, buildProposalParams, buyWithProposal, setDurationUnit]);
 
   return {
