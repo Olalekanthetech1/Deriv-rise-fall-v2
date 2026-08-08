@@ -1,18 +1,35 @@
-import { NextRequest, NextResponse } from 'next/server';
-import { xgboostModel } from '@/lib/xgboost-engine';
+import { NextResponse } from 'next/server';
+import { xgboostDaemon } from '@/lib/xgboost-daemon';
 
-export async function GET(req: NextRequest) {
+export async function GET() {
   try {
-    const featuresImportance = xgboostModel.getFeatureImportance();
-    const hyperparams = xgboostModel.getHyperparameters();
+    if (!xgboostDaemon.isAvailable()) {
+      return NextResponse.json({
+        success: false,
+        dataSource: 'native-runtime-unavailable',
+        totalFeatures: 0,
+        features: [],
+        hyperparameters: null,
+        error: 'Native ML runtime is unavailable; feature importance is not fabricated from static weights.',
+      }, { status: 503, headers: { 'Cache-Control': 'no-store' } });
+    }
 
     return NextResponse.json({
-      success: true,
-      totalFeatures: featuresImportance.length,
-      hyperparameters: hyperparams,
-      features: featuresImportance,
-    });
+      success: false,
+      dataSource: 'native-runtime-no-feature-importance-contract',
+      totalFeatures: 0,
+      features: [],
+      hyperparameters: null,
+      error: 'The native runtime does not currently expose persisted model feature importance. No synthetic feature weights are returned.',
+    }, { status: 503, headers: { 'Cache-Control': 'no-store' } });
   } catch (err: any) {
-    return NextResponse.json({ error: err.message || 'Failed to fetch feature importance' }, { status: 500 });
+    return NextResponse.json({
+      success: false,
+      dataSource: 'unavailable',
+      totalFeatures: 0,
+      features: [],
+      hyperparameters: null,
+      error: err?.message || 'Feature importance is unavailable.',
+    }, { status: 503 });
   }
 }
