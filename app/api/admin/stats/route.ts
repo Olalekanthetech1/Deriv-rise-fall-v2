@@ -16,27 +16,13 @@ let redisClient: Redis | null = null;
 if (process.env.UPSTASH_REDIS_REST_URL && process.env.UPSTASH_REDIS_REST_TOKEN) {
   try {
     redisClient = Redis.fromEnv();
-  } catch (err) {
+  } catch {
     logger.warn('Unable to initialize Redis client for admin stats');
   }
 }
 
 const CACHE_KEY = 'admin_stats_cache_v3';
 const CACHE_TTL_SECONDS = 30;
-
-// Empty-state helpers intentionally return fresh values. These are UI-safe zero states,
-// not historical/mock analytics, and are only used when there is no persisted data.
-function createEmptyConfidenceBrackets() {
-  return [
-    { bracket: '70-79%', wins: 0, losses: 0, total: 0, winRate: 0 },
-    { bracket: '80-89%', wins: 0, losses: 0, total: 0, winRate: 0 },
-    { bracket: '90-100%', wins: 0, losses: 0, total: 0, winRate: 0 },
-  ];
-}
-
-function createEmptyPnlCurve() {
-  return [{ tradeIndex: 0, pnl: 0 }];
-}
 
 export async function GET(req: NextRequest) {
   if (!isAuthValid(req)) {
@@ -73,10 +59,10 @@ export async function GET(req: NextRequest) {
           activeModel: 'Unavailable (DB Offline)',
           activeAccuracy: null,
         },
-        confidenceBrackets: createEmptyConfidenceBrackets(),
-        pnlCurve: createEmptyPnlCurve(),
+        confidenceBrackets: [],
+        pnlCurve: [],
         recentTrades: [],
-      });
+      }, { headers: { 'Cache-Control': 'no-store' } });
     }
 
     const [tradeRows, totalTradesRes, ticksCountRes, modelCountRes, activeModelRes] = await Promise.all([
@@ -85,11 +71,11 @@ export async function GET(req: NextRequest) {
         FROM trades
         ORDER BY executed_at DESC
         LIMIT 100
-      `.catch(() => []),
-      sql`SELECT COUNT(*) as cnt FROM trades`.catch(() => [{ cnt: '0' }]),
-      sql`SELECT COUNT(*) as cnt FROM ticks`.catch(() => [{ cnt: '0' }]),
-      sql`SELECT COUNT(*) as cnt FROM ml_models`.catch(() => [{ cnt: '0' }]),
-      sql`SELECT model_id, accuracy FROM ml_models ORDER BY trained_at DESC LIMIT 1`.catch(() => []),
+      `,
+      sql`SELECT COUNT(*) as cnt FROM trades`,
+      sql`SELECT COUNT(*) as cnt FROM ticks`,
+      sql`SELECT COUNT(*) as cnt FROM ml_models`,
+      sql`SELECT model_id, accuracy FROM ml_models ORDER BY trained_at DESC LIMIT 1`,
     ]);
 
     const totalTrades = parseInt(totalTradesRes[0]?.cnt || '0', 10);
@@ -99,7 +85,7 @@ export async function GET(req: NextRequest) {
     const parsedAccuracy = activeModelRes.length > 0 ? Number(activeModelRes[0].accuracy) : NaN;
     const activeAccuracy = Number.isFinite(parsedAccuracy) ? parsedAccuracy : null;
 
-    if (!tradeRows || tradeRows.length === 0) {
+    if (tradeRows.length === 0) {
       return NextResponse.json({
         isDbConnected: true,
         dataSource: 'live-database',
@@ -116,20 +102,16 @@ export async function GET(req: NextRequest) {
           activeModel,
           activeAccuracy,
         },
-        confidenceBrackets: createEmptyConfidenceBrackets(),
-        pnlCurve: createEmptyPnlCurve(),
+        confidenceBrackets: [],
+        pnlCurve: [],
         recentTrades: [],
-      });
+      }, { headers: { 'Cache-Control': 'no-store' } });
     }
 
     let wins = 0;
     let losses = 0;
     let pnlDataPoints = 0;
-    const bracketsMap: Record<string, { wins: number; losses: number; total: number }> = {
-      '70-79%': { wins: 0, losses: 0, total: 0 },
-      '80-89%': { wins: 0, losses: 0, total: 0 },
-      '90-100%': { wins: 0, losses: 0, total: 0 },
-    };
+    const bracketsMap: Record<string, { wins: number; losses: number; total: number }> = {};
 
     let cumPnl = 0;
     const pnlCurve: Array<{ tradeIndex: number; pnl: number }> = [];
@@ -155,7 +137,6 @@ export async function GET(req: NextRequest) {
       if (isWin) strategyMap[strategy].wins++;
       if (isLoss) strategyMap[strategy].losses++;
 
-      // Only calculate P&L from actual persisted monetary values. Never invent payout/stake values.
       if ((isWin || isLoss) && hasStake && hasPayout) {
         cumPnl += payout - stake;
         pnlDataPoints++;
@@ -175,6 +156,7 @@ export async function GET(req: NextRequest) {
       else if (confidence >= 70) bracketKey = '70-79%';
 
       if (!bracketKey) return;
+      bracketsMap[bracketKey] ??= { wins: 0, losses: 0, total: 0 };
       bracketsMap[bracketKey].total++;
       if (isWin) bracketsMap[bracketKey].wins++;
       else if (isLoss) bracketsMap[bracketKey].losses++;
@@ -183,11 +165,13 @@ export async function GET(req: NextRequest) {
     const resolvedTrades = wins + losses;
     const winRate = resolvedTrades > 0 ? Number(((wins / resolvedTrades) * 100).toFixed(1)) : 0;
 
-    const confidenceBrackets = Object.keys(bracketsMap).map((key) => {
-      const b = bracketsMap[key];
-      const wr = b.total > 0 ? Number(((b.wins / b.total) * 100).toFixed(1)) : 0;
-      return { bracket: key, wins: b.wins, losses: b.losses, total: b.total, winRate: wr };
-    });
+    const confidenceBrackets = Object.entries(bracketsMap).map(([bracket, b]) => ({
+      bracket,
+      wins: b.wins,
+      losses: b.losses,
+      total: b.total,
+      winRate: b.total > 0 ? Number(((b.wins / b.total) * 100).toFixed(1)) : 0,
+    }));
 
     const strategyBreakdown = Object.values(strategyMap)
       .map((s) => ({
@@ -234,7 +218,7 @@ export async function GET(req: NextRequest) {
       }
     }
 
-    return NextResponse.json(responseData);
+    return NextResponse.json(responseData, { headers: { 'Cache-Control': 'no-store' } });
   } catch (err: any) {
     logger.error(`Error fetching admin stats: ${err.message}`);
     return NextResponse.json({
@@ -271,10 +255,21 @@ export async function POST(req: NextRequest) {
         return NextResponse.json({ success: false, error: 'PostgreSQL Database not connected' }, { status: 400 });
       }
 
-      const { ensureMinTicks } = await import('@/lib/ticks-helper');
-      const symbolsToSync = ['R_100', '1HZ100V', 'R_75', '1HZ75V', 'R_50', '1HZ50V', 'FRXEURUSD', 'CWMXAUUSD'];
-      let syncedTotal = 0;
+      const symbolsResponse = await fetch(new URL('/api/symbols', req.url), { cache: 'no-store' });
+      const symbolsPayload = await symbolsResponse.json().catch(() => null);
+      if (!symbolsResponse.ok || !Array.isArray(symbolsPayload?.symbols)) {
+        return NextResponse.json({ success: false, error: symbolsPayload?.error || 'Live Deriv symbol discovery is unavailable.' }, { status: 503 });
+      }
 
+      const symbolsToSync = symbolsPayload.symbols
+        .filter((item: any) => item?.isOpen && typeof item?.symbol === 'string' && item.symbol.trim())
+        .map((item: any) => item.symbol.trim());
+
+      if (!symbolsToSync.length) {
+        return NextResponse.json({ success: false, error: 'No open Deriv symbols were returned by the live symbol service.' }, { status: 503 });
+      }
+
+      let syncedTotal = 0;
       for (const sym of symbolsToSync) {
         const ticks = await ensureMinTicks(sym, 1000, true);
         syncedTotal += ticks.length;
@@ -287,8 +282,9 @@ export async function POST(req: NextRequest) {
       return NextResponse.json({
         success: true,
         syncedTotal,
+        symbolsCount: symbolsToSync.length,
         dataSource: 'deriv-live-ticks',
-        message: `Successfully synchronized ${syncedTotal.toLocaleString()} real Deriv ticks across ${symbolsToSync.length} assets directly into PostgreSQL.`,
+        message: `Successfully synchronized ${syncedTotal.toLocaleString()} real Deriv ticks across ${symbolsToSync.length} live assets directly into PostgreSQL.`,
       });
     }
 
