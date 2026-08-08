@@ -6,60 +6,6 @@ interface AdminIntegrityGuardProps {
   children: ReactNode;
 }
 
-const SYNTHETIC_BUTTON_TEXT = [
-  'Seed 20 Test Trades',
-  'Seed Execution Trades',
-  'Seeding Trades...',
-];
-
-const EMPTY_STATE_HEADINGS = [
-  'Win/Loss Distribution vs Confidence',
-  'Multi-Model Ensemble Performance',
-  'Cumulative AI Profit Curve ($)',
-];
-
-function removeSyntheticControls(root: ParentNode) {
-  root.querySelectorAll('button').forEach((button) => {
-    const label = button.textContent?.replace(/\s+/g, ' ').trim() ?? '';
-    if (SYNTHETIC_BUTTON_TEXT.some((text) => label.includes(text))) {
-      button.remove();
-    }
-  });
-}
-
-function hideSyntheticPerformancePanels(root: ParentNode) {
-  EMPTY_STATE_HEADINGS.forEach((heading) => {
-    root.querySelectorAll('h2, h3, span').forEach((node) => {
-      if (node.textContent?.replace(/\s+/g, ' ').trim() !== heading) return;
-      const panel = node.closest('.bg-slate-900\\/80');
-      if (panel instanceof HTMLElement) panel.style.display = 'none';
-    });
-  });
-}
-
-function replaceLegacyLabels(root: ParentNode) {
-  root.querySelectorAll('*').forEach((node) => {
-    if (node.children.length > 0) return;
-    const text = node.textContent?.trim();
-    if (text === 'Demo & Live') {
-      node.textContent = 'Persisted live trade records';
-      return;
-    }
-    if (text === 'XGBoost-Default') {
-      node.textContent = 'No production model';
-      return;
-    }
-    if (text === 'WINS' || text === 'LOSSES') {
-      const valueNode = node.parentElement?.querySelector('p:first-child');
-      if (!valueNode || valueNode === node) return;
-      const value = Number(valueNode.textContent);
-      if (Number.isFinite(value) && (value === 54 || value === 9)) {
-        valueNode.textContent = '0';
-      }
-    }
-  });
-}
-
 export function AdminIntegrityGuard({ children }: AdminIntegrityGuardProps) {
   const [hasLiveTradeRecords, setHasLiveTradeRecords] = useState<boolean | null>(null);
 
@@ -85,22 +31,6 @@ export function AdminIntegrityGuard({ children }: AdminIntegrityGuardProps) {
       cancelled = true;
     };
   }, []);
-
-  useEffect(() => {
-    const sanitize = () => {
-      removeSyntheticControls(document);
-      replaceLegacyLabels(document);
-      if (hasLiveTradeRecords !== true) {
-        hideSyntheticPerformancePanels(document);
-      }
-    };
-
-    sanitize();
-    const observer = new MutationObserver(sanitize);
-    observer.observe(document.body, { childList: true, subtree: true });
-
-    return () => observer.disconnect();
-  }, [hasLiveTradeRecords]);
 
   return (
     <>
