@@ -25,17 +25,16 @@ jobs:
           if not admin.exists():
               raise SystemExit('app/admin/page.tsx not found')
           text = admin.read_text(encoding='utf-8')
-          original = text
 
           def remove_line_containing(src, marker):
-              return '\n'.join(line for line in src.splitlines() if marker not in line) + ('\n' if src.endswith('\n') else '')
+              lines = src.splitlines(True)
+              return ''.join(line for line in lines if marker not in line)
 
           def remove_const(src, name):
-              marker = re.compile(r'(^|\\n)([ \\t]*)(?:export[ \\t]+)?const[ \\t]+' + re.escape(name) + r'\\s*=')
-              m = marker.search(src)
+              m = re.search(r'(?m)^\s*(?:export\s+)?const\s+' + re.escape(name) + r'\s*=', src)
               if not m:
                   return src, False
-              start = m.start(0) + (1 if m.group(1) else 0)
+              start = m.start()
               eq = src.find('=', m.start())
               i = eq + 1
               depth = {'(': 0, '[': 0, '{': 0}
@@ -47,7 +46,7 @@ jobs:
                   if quote:
                       if escaped:
                           escaped = False
-                      elif ch == '\\\\':
+                      elif ch == '\\':
                           escaped = True
                       elif ch == quote:
                           quote = None
@@ -70,21 +69,20 @@ jobs:
                   return src, False
               line_start = src.rfind('\n', 0, pos) + 1
               before = src[:line_start]
-              matches = list(re.finditer(r'(?m)^\\s*(?:export\\s+)?const\\s+[A-Za-z0-9_$]+\\s*=', before))
+              matches = list(re.finditer(r'(?m)^\s*(?:export\s+)?const\s+[A-Za-z0-9_$]+\s*=', before))
               if not matches:
                   raise SystemExit(f'Found {marker_text!r} but could not locate containing const')
-              start = matches[-1].start()
-              name_m = re.search(r'const\\s+([A-Za-z0-9_$]+)\\s*=', matches[-1].group(0))
-              name = name_m.group(1)
-              out, ok = remove_const(src, name)
-              if not ok:
-                  raise SystemExit(f'Could not remove containing const {name}')
-              return out, True
+              name_m = re.search(r'const\s+([A-Za-z0-9_$]+)\s*=', matches[-1].group(0))
+              if not name_m:
+                  raise SystemExit(f'Could not determine containing const for {marker_text!r}')
+              return remove_const(src, name_m.group(1))
 
           def remove_function(src, name):
-              m = re.search(r'(?m)^\\s*const\\s+' + re.escape(name) + r'\\s*=\\s*async?\\s*', src)
-              if not m:
-                  m = re.search(r'(?m)^\\s*async\\s+function\\s+' + re.escape(name) + r'\\s*\\(', src)
+              patterns = [
+                  r'(?m)^\s*const\s+' + re.escape(name) + r'\s*=\s*(?:async\s*)?',
+                  r'(?m)^\s*async\s+function\s+' + re.escape(name) + r'\s*\('
+              ]
+              m = next((re.search(p, src) for p in patterns if re.search(p, src)), None)
               if not m:
                   return src, False
               start = m.start()
@@ -100,7 +98,7 @@ jobs:
                   if quote:
                       if escaped:
                           escaped = False
-                      elif ch == '\\\\':
+                      elif ch == '\\':
                           escaped = True
                       elif ch == quote:
                           quote = None
@@ -127,63 +125,54 @@ jobs:
               if start < 0:
                   raise SystemExit(f'Found {label!r} but no opening button')
               depth = 0
-              token = re.compile(r'<button\\b|</button>')
-              end = None
-              for m in token.finditer(src, start):
-                  if m.group(0).startswith('<button'):
+              for m in re.finditer(r'<button\b|</button>', src[start:]):
+                  token = m.group(0)
+                  if token.startswith('<button'):
                       depth += 1
                   else:
                       depth -= 1
                       if depth == 0:
-                          end = m.end()
-                          break
-              if end is None:
-                  raise SystemExit(f'Unbalanced button containing {label!r}')
-              return src[:start] + src[end:], True
+                          end = start + m.end()
+                          return src[:start] + src[end:], True
+              raise SystemExit(f'Unbalanced button containing {label!r}')
 
-          # 1) Remove seeding state and handler/button from the Admin Dashboard.
+          # Admin dashboard cleanup.
           text = remove_line_containing(text, 'isSeedingTrades')
           text, _ = remove_function(text, 'handleSeedTrades')
           text, _ = remove_button_with_text(text, 'Seed 20 Test Trades')
-
-          # 2) Remove synthetic confidence/PnL defaults if present.
           for name in ('defaultConfidenceBrackets', 'defaultPnlCurve'):
               text, _ = remove_const(text, name)
 
-          # 3) Remove the known hard-coded ensemble performance dataset wherever it lives in admin UI code.
-          for marker in ('XGBoost Horizon 5t', 'LightGBM', 'Random Forest'):
-              for path in root.rglob('*'):
-                  if path.suffix not in ('.ts', '.tsx') or 'node_modules' in path.parts or '.next' in path.parts:
-                      continue
-                  try:
-                      src = path.read_text(encoding='utf-8')
-                  except Exception:
-                      continue
+          # Remove known hard-coded ensemble performance data from TS/TSX UI/data definitions.
+          markers = ('XGBoost Horizon 5t', 'LightGBM — 84.0%', 'ONNX — 83.3%', 'Random Forest — 75.0%')
+          changed_paths = set()
+          for path in root.rglob('*'):
+              if path.suffix not in ('.ts', '.tsx') or 'node_modules' in path.parts or '.next' in path.parts:
+                  continue
+              try:
+                  src = path.read_text(encoding='utf-8')
+              except Exception:
+                  continue
+              for marker in markers:
                   if marker not in src:
                       continue
-                  if path == admin:
-                      src2, changed = remove_const_containing(src, marker)
-                  else:
-                      # Only remove a containing const in UI/data-definition files; fail closed for arbitrary files.
-                      src2, changed = remove_const_containing(src, marker)
+                  src2, changed = remove_const_containing(src, marker)
                   if changed:
                       path.write_text(src2, encoding='utf-8')
-                      if path == admin:
-                          text = src2
+                      changed_paths.add(str(path))
+                      src = src2
 
-          # 4) Replace legacy model/status labels with truthful empty/live semantics.
+          # Truthful labels; no fabricated production model or demo records.
           text = text.replace('XGBoost-Default', 'No production model')
           text = text.replace('Demo & Live', 'Live records')
           text = text.replace('Demo &amp; Live', 'Live records')
+          admin.write_text(text, encoding='utf-8')
 
-          if text != original:
-              admin.write_text(text, encoding='utf-8')
-
-          # 5) Verify the legacy 5A markers are gone from source code.
           forbidden = [
               'isSeedingTrades', 'handleSeedTrades', 'Seed 20 Test Trades',
               'defaultConfidenceBrackets', 'defaultPnlCurve',
-              'XGBoost Horizon 5t', 'XGBoost-Default', 'Demo & Live'
+              'XGBoost Horizon 5t', 'LightGBM — 84.0%', 'ONNX — 83.3%',
+              'Random Forest — 75.0%', 'XGBoost-Default', 'Demo & Live'
           ]
           hits = []
           for path in root.rglob('*'):
@@ -197,11 +186,10 @@ jobs:
                   if marker in src:
                       hits.append(f'{path}: {marker}')
           if hits:
-              print('Remaining 5A markers:')
               print('\n'.join(hits))
               raise SystemExit(1)
 
-          print('5A deterministic cleanup completed.')
+          print('5A source cleanup verification passed.')
 
       - name: Install dependencies
         run: npm ci
