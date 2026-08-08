@@ -31,7 +31,6 @@ type Experiment = {
   result?: Record<string, unknown>;
   created_at: string;
 };
-
 type DataSource = 'live-database' | 'unavailable' | 'not-loaded';
 
 const asNumber = (value: unknown) => {
@@ -47,10 +46,12 @@ function Metric({ label, value, suffix = '' }: { label: string; value: unknown; 
 
 export default function TestingResearchPage() {
   const [symbols, setSymbols] = useState<SymbolItem[]>([]);
-  const [symbol, setSymbol] = useState('R_100');
-  const [confidence, setConfidence] = useState(78);
-  const [stake, setStake] = useState(10);
-  const [duration, setDuration] = useState(5);
+  const [symbol, setSymbol] = useState('');
+  const [horizons, setHorizons] = useState<number[]>([]);
+  const [confidence, setConfidence] = useState<number | null>(null);
+  const [stake, setStake] = useState<number | null>(null);
+  const [payoutRate, setPayoutRate] = useState<number | null>(null);
+  const [duration, setDuration] = useState<number | null>(null);
   const [tab, setTab] = useState<'backtest' | 'multi-horizon' | 'paper-shadow' | 'history'>('backtest');
   const [loading, setLoading] = useState(false);
   const [historyLoading, setHistoryLoading] = useState(false);
@@ -62,21 +63,37 @@ export default function TestingResearchPage() {
 
   const selectedSymbolName = useMemo(() => {
     const item = symbols.find((entry) => entry.symbol === symbol);
-    return item?.displayName || item?.name || symbol;
+    return item?.displayName || item?.name || symbol || 'No live market selected';
   }, [symbols, symbol]);
 
   const loadSymbols = async () => {
     try {
       const response = await fetch('/api/symbols', { cache: 'no-store' });
-      const data = await response.json();
-      if (Array.isArray(data?.symbols)) {
-        setSymbols(data.symbols);
-        if (data.symbols.length && !data.symbols.some((entry: SymbolItem) => entry.symbol === symbol)) {
-          setSymbol(data.symbols[0].symbol || 'R_100');
-        }
+      const data = await response.json().catch(() => null);
+      if (!response.ok || !Array.isArray(data?.symbols) || data.symbols.length === 0) {
+        throw new Error(data?.error || 'Live Deriv symbols are unavailable.');
       }
+      setSymbols(data.symbols);
+      setSymbol((current) => current && data.symbols.some((entry: SymbolItem) => entry.symbol === current) ? current : String(data.symbols[0]?.symbol || ''));
+    } catch (err: any) {
+      setSymbols([]);
+      setSymbol('');
+      setError(err?.message || 'Unable to load live Deriv symbols.');
+    }
+  };
+
+  const loadRegistryHorizons = async () => {
+    try {
+      const response = await fetch('/api/ml/registry', { cache: 'no-store' });
+      const data = await response.json().catch(() => null);
+      if (!response.ok || !Array.isArray(data?.models)) {
+        setHorizons([]);
+        return;
+      }
+      const values = Array.from(new Set(data.models.map((model: any) => Number(model?.horizon_secs)).filter((value: number) => Number.isFinite(value) && value > 0))).sort((a, b) => a - b);
+      setHorizons(values);
     } catch {
-      // The experiment API remains authoritative; keep the current symbol if the symbol directory is unavailable.
+      setHorizons([]);
     }
   };
 
@@ -97,11 +114,13 @@ export default function TestingResearchPage() {
   };
 
   useEffect(() => {
-    loadSymbols();
-    loadHistory();
+    void loadSymbols();
+    void loadRegistryHorizons();
+    void loadHistory();
   }, []);
 
   const persistExperiment = async (experimentType: string, parameters: Record<string, unknown>, experimentResult: Record<string, unknown>, horizonSeconds?: number) => {
+    if (!symbol) throw new Error('A live market symbol is required.');
     const response = await fetch('/api/admin/experiments', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
@@ -114,6 +133,10 @@ export default function TestingResearchPage() {
   };
 
   const runBacktest = async () => {
+    if (!symbol || confidence === null || stake === null || payoutRate === null) {
+      setError('Select a live market and provide minimum confidence, stake, and payout rate before running a backtest.');
+      return;
+    }
     setLoading(true);
     setError(null);
     setResult(null);
@@ -121,12 +144,12 @@ export default function TestingResearchPage() {
       const response = await fetch('/api/admin/backtest', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ symbol, minConfidence: confidence, stake }),
+        body: JSON.stringify({ symbol, minConfidence: confidence, stake, payoutRate }),
       });
       const data = await response.json();
       if (!response.ok || !data?.success) throw new Error(data?.error || 'Backtest failed.');
       setResult(data);
-      await persistExperiment('backtest', { minConfidence: confidence, stake, selectedSymbolName }, data);
+      await persistExperiment('backtest', { minConfidence: confidence, stake, payoutRate, selectedSymbolName }, data);
     } catch (err: any) {
       setError(err?.message || 'Backtest failed.');
     } finally {
@@ -135,6 +158,10 @@ export default function TestingResearchPage() {
   };
 
   const runMultiHorizon = async () => {
+    if (!symbol || horizons.length === 0) {
+      setError('No live model-registry horizons are available for multi-horizon evaluation.');
+      return;
+    }
     setLoading(true);
     setError(null);
     setResult(null);
@@ -142,13 +169,13 @@ export default function TestingResearchPage() {
       const response = await fetch('/api/ml/backtest', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ symbol, horizons: [5, 60, 300] }),
+        body: JSON.stringify({ symbol, horizons }),
       });
       const data = await response.json();
       if (!response.ok || !data?.success) throw new Error(data?.error || 'Multi-horizon evaluation failed.');
       setResult(data);
       const bestHorizon = asNumber(data?.bestHorizon) ?? undefined;
-      await persistExperiment('multi-horizon', { horizons: [5, 60, 300], selectedSymbolName }, data, bestHorizon);
+      await persistExperiment('multi-horizon', { horizons, selectedSymbolName }, data, bestHorizon);
     } catch (err: any) {
       setError(err?.message || 'Multi-horizon evaluation failed.');
     } finally {
@@ -157,6 +184,10 @@ export default function TestingResearchPage() {
   };
 
   const runPaperShadow = async () => {
+    if (!symbol || duration === null || !Number.isFinite(duration) || duration < 1) {
+      setError('Select a live market and provide a valid prediction duration.');
+      return;
+    }
     setLoading(true);
     setError(null);
     setResult(null);
@@ -164,7 +195,7 @@ export default function TestingResearchPage() {
       const response = await fetch('/api/ml/predict', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ symbol, durationSecs: duration, assetCategory: symbol.startsWith('FRX') ? 1 : 0 }),
+        body: JSON.stringify({ symbol, durationSecs: duration, assetCategory: symbol.startsWith('FRX') ? 1 : symbol.startsWith('CWM') ? 2 : 0 }),
       });
       const data = await response.json();
       if (!response.ok || !data?.prediction) throw new Error(data?.error || 'Paper/shadow prediction failed.');
@@ -179,14 +210,13 @@ export default function TestingResearchPage() {
   };
 
   const runCurrent = () => tab === 'backtest' ? runBacktest() : tab === 'multi-horizon' ? runMultiHorizon() : runPaperShadow();
-
   const typeLabel = (type: string) => type === 'backtest' ? 'BACKTEST' : type === 'multi-horizon' ? 'MULTI-HORIZON' : 'PAPER / SHADOW';
 
   return <main className="min-h-screen bg-[#05070b] px-4 py-5 text-slate-100 sm:px-6 lg:px-8">
     <div className="mx-auto max-w-[1500px]">
       <header className="mb-6 flex flex-col gap-4 rounded-3xl border border-white/10 bg-white/[0.03] p-5 backdrop-blur-xl sm:flex-row sm:items-center sm:justify-between">
         <div className="flex items-center gap-3"><Link href="/admin" className="rounded-xl border border-white/10 bg-white/5 p-2 text-slate-300 hover:bg-white/10"><ArrowLeft className="h-5 w-5" /></Link><div className="rounded-2xl border border-cyan-400/20 bg-cyan-400/10 p-3"><FlaskConical className="h-6 w-6 text-cyan-300" /></div><div><p className="text-[11px] font-semibold uppercase tracking-[0.22em] text-cyan-300">5B-5</p><h1 className="text-2xl font-black sm:text-3xl">Testing & Research</h1><p className="mt-1 text-xs text-slate-500">Controlled evaluation environment — production execution is never implied.</p></div></div>
-        <div className="flex flex-wrap items-center gap-2"><span className="inline-flex items-center gap-2 rounded-full border border-emerald-400/20 bg-emerald-400/10 px-3 py-1.5 text-[10px] font-bold tracking-wider text-emerald-300"><Database className="h-3.5 w-3.5" />{dataSource === 'live-database' ? 'LIVE DATABASE' : dataSource === 'unavailable' ? 'DATABASE UNAVAILABLE' : 'CHECKING DATA'}</span><button onClick={loadHistory} disabled={historyLoading} className="inline-flex items-center gap-2 rounded-xl border border-white/10 bg-white/5 px-3 py-2 text-xs font-semibold text-slate-300 hover:bg-white/10 disabled:opacity-50"><RefreshCw className={`h-4 w-4 ${historyLoading ? 'animate-spin' : ''}`} />Refresh</button></div>
+        <div className="flex flex-wrap items-center gap-2"><span className="inline-flex items-center gap-2 rounded-full border border-emerald-400/20 bg-emerald-400/10 px-3 py-1.5 text-[10px] font-bold tracking-wider text-emerald-300"><Database className="h-3.5 w-3.5" />{dataSource === 'live-database' ? 'LIVE DATABASE' : dataSource === 'unavailable' ? 'DATABASE UNAVAILABLE' : 'CHECKING DATA'}</span><button onClick={() => { void loadHistory(); void loadSymbols(); void loadRegistryHorizons(); }} disabled={historyLoading} className="inline-flex items-center gap-2 rounded-xl border border-white/10 bg-white/5 px-3 py-2 text-xs font-semibold text-slate-300 hover:bg-white/10 disabled:opacity-50"><RefreshCw className={`h-4 w-4 ${historyLoading ? 'animate-spin' : ''}`} />Refresh</button></div>
       </header>
 
       <section className="mb-6 grid gap-3 sm:grid-cols-2 xl:grid-cols-4">
@@ -203,11 +233,11 @@ export default function TestingResearchPage() {
       {tab !== 'history' && <section className="grid gap-5 lg:grid-cols-[360px_1fr]">
         <aside className="rounded-2xl border border-white/10 bg-white/[0.025] p-5">
           <h2 className="text-base font-bold">Experiment Controls</h2><p className="mt-1 text-xs leading-5 text-slate-500">Parameters are sent to the existing production API contracts. No synthetic metrics are generated in the UI.</p>
-          <label className="mt-5 block text-xs font-semibold uppercase tracking-wider text-slate-500">Market</label><select value={symbol} onChange={(e) => setSymbol(e.target.value)} className="mt-2 w-full rounded-xl border border-white/10 bg-black/30 px-3 py-3 text-sm outline-none focus:border-cyan-400/40">{symbols.length ? symbols.map((item) => <option key={item.symbol} value={item.symbol}>{item.displayName || item.name || item.symbol}</option>) : <option value={symbol}>{symbol}</option>}</select>
-          {tab === 'backtest' && <><label className="mt-5 block text-xs font-semibold uppercase tracking-wider text-slate-500">Minimum confidence</label><input type="number" min="0" max="100" value={confidence} onChange={(e) => setConfidence(Number(e.target.value))} className="mt-2 w-full rounded-xl border border-white/10 bg-black/30 px-3 py-3 text-sm" /><label className="mt-5 block text-xs font-semibold uppercase tracking-wider text-slate-500">Stake</label><input type="number" min="0" step="0.01" value={stake} onChange={(e) => setStake(Number(e.target.value))} className="mt-2 w-full rounded-xl border border-white/10 bg-black/30 px-3 py-3 text-sm" /></>}
-          {tab === 'paper-shadow' && <><label className="mt-5 block text-xs font-semibold uppercase tracking-wider text-slate-500">Prediction duration (seconds)</label><input type="number" min="1" value={duration} onChange={(e) => setDuration(Number(e.target.value))} className="mt-2 w-full rounded-xl border border-white/10 bg-black/30 px-3 py-3 text-sm" /></>}
-          {tab === 'multi-horizon' && <div className="mt-5 rounded-xl border border-cyan-400/15 bg-cyan-400/[0.04] p-4 text-xs leading-5 text-slate-400">The evaluation uses the established <span className="font-semibold text-cyan-200">5s / 60s / 300s</span> horizon set and lets the server determine the best available horizon.</div>}
-          <button onClick={runCurrent} disabled={loading} className="mt-6 flex w-full items-center justify-center gap-2 rounded-xl bg-cyan-400 px-4 py-3 text-sm font-bold text-slate-950 hover:bg-cyan-300 disabled:cursor-not-allowed disabled:opacity-60">{loading ? <Loader2 className="h-4 w-4 animate-spin" /> : <Play className="h-4 w-4" />}{loading ? 'Running evaluation…' : tab === 'backtest' ? 'Run Backtest' : tab === 'multi-horizon' ? 'Run 5s / 60s / 300s Evaluation' : 'Run Paper / Shadow Test'}</button>
+          <label className="mt-5 block text-xs font-semibold uppercase tracking-wider text-slate-500">Market</label><select value={symbol} onChange={(e) => setSymbol(e.target.value)} className="mt-2 w-full rounded-xl border border-white/10 bg-black/30 px-3 py-3 text-sm outline-none focus:border-cyan-400/40"><option value="">Select live market</option>{symbols.map((item) => <option key={item.symbol} value={item.symbol}>{item.displayName || item.name || item.symbol}</option>)}</select>
+          {tab === 'backtest' && <><label className="mt-5 block text-xs font-semibold uppercase tracking-wider text-slate-500">Minimum confidence (%)</label><input type="number" min="0" max="100" value={confidence ?? ''} onChange={(e) => setConfidence(e.target.value === '' ? null : Number(e.target.value))} className="mt-2 w-full rounded-xl border border-white/10 bg-black/30 px-3 py-3 text-sm" /><label className="mt-5 block text-xs font-semibold uppercase tracking-wider text-slate-500">Stake</label><input type="number" min="0" step="0.01" value={stake ?? ''} onChange={(e) => setStake(e.target.value === '' ? null : Number(e.target.value))} className="mt-2 w-full rounded-xl border border-white/10 bg-black/30 px-3 py-3 text-sm" /><label className="mt-5 block text-xs font-semibold uppercase tracking-wider text-slate-500">Payout rate (decimal)</label><input type="number" min="0.0001" max="1" step="0.0001" value={payoutRate ?? ''} onChange={(e) => setPayoutRate(e.target.value === '' ? null : Number(e.target.value))} className="mt-2 w-full rounded-xl border border-white/10 bg-black/30 px-3 py-3 text-sm" /></>}
+          {tab === 'paper-shadow' && <><label className="mt-5 block text-xs font-semibold uppercase tracking-wider text-slate-500">Prediction duration (seconds)</label><input type="number" min="1" value={duration ?? ''} onChange={(e) => setDuration(e.target.value === '' ? null : Number(e.target.value))} className="mt-2 w-full rounded-xl border border-white/10 bg-black/30 px-3 py-3 text-sm" /></>}
+          {tab === 'multi-horizon' && <div className="mt-5 rounded-xl border border-cyan-400/15 bg-cyan-400/[0.04] p-4 text-xs leading-5 text-slate-400">{horizons.length ? <>The live model registry currently exposes <span className="font-semibold text-cyan-200">{horizons.join('s / ')}s</span> horizons for evaluation.</> : 'No live model-registry horizons are currently available.'}</div>}
+          <button onClick={runCurrent} disabled={loading || !symbol || (tab === 'multi-horizon' && horizons.length === 0)} className="mt-6 flex w-full items-center justify-center gap-2 rounded-xl bg-cyan-400 px-4 py-3 text-sm font-bold text-slate-950 hover:bg-cyan-300 disabled:cursor-not-allowed disabled:opacity-60">{loading ? <Loader2 className="h-4 w-4 animate-spin" /> : <Play className="h-4 w-4" />}{loading ? 'Running evaluation…' : tab === 'backtest' ? 'Run Backtest' : tab === 'multi-horizon' ? 'Run Multi-Horizon Evaluation' : 'Run Paper / Shadow Test'}</button>
         </aside>
 
         <div className="rounded-2xl border border-white/10 bg-white/[0.025] p-5">
