@@ -114,11 +114,15 @@ class XGBoostDaemonManager {
     if (!this.child?.stdin?.writable) throw new Error('Python ML daemon unavailable');
 
     const schemaContract = await getMlRuntimeSchemaContract();
-    const sanitized = { ...payload, schemaContract };
-    if (typeof sanitized.symbol === 'string') {
-      sanitized.symbol = sanitized.symbol.replace(/[^A-Za-z0-9_]/g, '');
+    const sanitized: Record<string, unknown> = { ...payload, schemaContract };
+
+    const symbol = sanitized.symbol;
+    if (typeof symbol === 'string') {
+      sanitized.symbol = symbol.replace(/[^A-Za-z0-9_]/g, '');
     }
-    if (sanitized.ticks !== undefined && !Array.isArray(sanitized.ticks)) {
+
+    const ticks = sanitized.ticks;
+    if (ticks !== undefined && !Array.isArray(ticks)) {
       throw new Error('ticks must be an array');
     }
 
