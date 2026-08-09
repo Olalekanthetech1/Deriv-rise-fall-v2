@@ -1,4 +1,5 @@
 import crypto from 'crypto';
+import { assertFeatureOrder, getFeatureOrder, type FeatureKey } from './ml-feature-registry';
 
 export type FeatureWindowConfig = {
   micro: number;
@@ -16,7 +17,7 @@ export type FeaturePipelineConfig = {
   regimeThreshold: number;
   digitPrecision: number;
   syntheticSymbolPrefixes: string[];
-  featureOrder: string[];
+  featureOrder: FeatureKey[];
   splitRatios: {
     train: number;
     validation: number;
@@ -28,7 +29,7 @@ export type FeaturePipelineConfig = {
 };
 
 export type FeatureVectorSnapshot = {
-  featureOrder: string[];
+  featureOrder: FeatureKey[];
   featureCount: number;
   schemaVersion: string;
 };
@@ -45,7 +46,6 @@ const REQUIRED_CONFIG_KEYS = [
   'regimeThreshold',
   'digitPrecision',
   'syntheticSymbolPrefixes',
-  'featureOrder',
   'splitRatios',
   'splitGapMultiplier',
   'normalizationMethod',
@@ -167,6 +167,14 @@ function parseExternalConfig(): FeaturePipelineConfig {
     throw new Error(`[ML Config] Unsupported normalizationMethod: ${normalizationMethod}.`);
   }
 
+  // featureOrder is now registry-owned. An older deployment may still send it
+  // in ML_PIPELINE_CONFIG_JSON; accept it only when it exactly matches the
+  // canonical registry so two competing schemas can never silently diverge.
+  if ('featureOrder' in source) {
+    const suppliedFeatureOrder = requiredStringArray(source.featureOrder, 'featureOrder');
+    assertFeatureOrder(suppliedFeatureOrder);
+  }
+
   return {
     pipelineVersion: requiredString(source.pipelineVersion, 'pipelineVersion'),
     canonicalFeatureWindowTicks,
@@ -176,7 +184,7 @@ function parseExternalConfig(): FeaturePipelineConfig {
     regimeThreshold: requiredFiniteNumber(source.regimeThreshold, 'regimeThreshold'),
     digitPrecision: requiredNonNegativeInteger(source.digitPrecision, 'digitPrecision'),
     syntheticSymbolPrefixes: requiredStringArray(source.syntheticSymbolPrefixes, 'syntheticSymbolPrefixes'),
-    featureOrder: requiredStringArray(source.featureOrder, 'featureOrder'),
+    featureOrder: getFeatureOrder(),
     splitRatios,
     splitGapMultiplier: requiredPositiveInteger(source.splitGapMultiplier, 'splitGapMultiplier'),
     normalizationMethod: 'zscore',
@@ -201,7 +209,7 @@ export function getFeatureVectorSnapshot(config: FeaturePipelineConfig = getMlPi
   };
 }
 
-export function deriveFeatureSchemaVersion(featureOrder: string[], pipelineVersion = getMlPipelineConfig().pipelineVersion): string {
+export function deriveFeatureSchemaVersion(featureOrder: readonly string[], pipelineVersion = getMlPipelineConfig().pipelineVersion): string {
   const digest = crypto.createHash('sha256').update(`${pipelineVersion}|${featureOrder.join('|')}`).digest('hex').slice(0, 12);
   return `feature-schema-${featureOrder.length}-${digest}`;
 }
