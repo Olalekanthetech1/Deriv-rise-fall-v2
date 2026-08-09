@@ -1,40 +1,73 @@
 import { NextResponse } from 'next/server';
 import { initDbSchema, getDb } from '@/lib/db';
+import { ensureTrainingDurationSchema } from '@/lib/training-duration-schema';
+import { xgboostDaemon } from '@/lib/xgboost-daemon';
 
 export async function GET() {
   try {
     const isDbConnected = await initDbSchema();
     const sql = getDb();
-
-    let modelCount = 0;
-    let latestAccuracy = 88.4;
-    let recentLogs: any[] = [];
-
-    if (sql && isDbConnected) {
-      try {
-        const models = await sql`SELECT * FROM ml_models ORDER BY trained_at DESC LIMIT 1`;
-        if (models.length > 0) {
-          latestAccuracy = parseFloat(models[0].accuracy) || 88.4;
-        }
-
-        const countRes = await sql`SELECT COUNT(*) as cnt FROM ml_models`;
-        modelCount = parseInt(countRes[0]?.cnt || '1', 10);
-
-        recentLogs = await sql`SELECT * FROM ml_training_logs ORDER BY created_at DESC LIMIT 5`;
-      } catch (dbErr) {
-        console.warn('[ML Status Query Error]:', dbErr);
-      }
+    if (!sql || !isDbConnected) {
+      return NextResponse.json({
+        status: 'degraded',
+        isDbConnected: false,
+        daemonReady: false,
+        modelRegistry: { total: 0, production: 0, candidate: 0, validated: 0 },
+      }, { status: 503, headers: { 'Cache-Control': 'no-store' } });
     }
 
+    await ensureTrainingDurationSchema(sql);
+
+    const [registryRows, runRows] = await Promise.all([
+      sql`SELECT
+        COUNT(*)::int AS total,
+        COUNT(*) FILTER (WHERE status = 'production')::int AS production,
+        COUNT(*) FILTER (WHERE status = 'candidate')::int AS candidate,
+        COUNT(*) FILTER (
+          WHERE status IN ('candidate','staging','production')
+            AND COALESCE((metrics->>'accuracy')::numeric, NULL) IS NOT NULL
+            AND COALESCE((metrics->>'logLoss')::numeric, NULL) IS NOT NULL
+        )::int AS validated
+        FROM ml_model_registry_v2`,
+      sql`SELECT status, COUNT(*)::int AS count FROM ml_training_runs GROUP BY status`,
+    ]);
+
+    let daemonReady = false;
+    let daemon: Record<string, unknown> = {};
+    try {
+      const ping = await xgboostDaemon.sendCommand('ping');
+      daemonReady = ping?.success === true && ping?.pong === true;
+      daemon = {
+        schemaVersion: ping?.schemaVersion ?? null,
+        schemaFingerprint: ping?.schemaFingerprint ?? null,
+        featureCount: ping?.featureCount ?? null,
+        supportedModels: Array.isArray(ping?.models) ? ping.models : [],
+      };
+    } catch (error) {
+      daemon = { error: error instanceof Error ? error.message : 'Python ML daemon unavailable' };
+    }
+
+    const registry = registryRows[0] || {};
+    const trainingRuns = Object.fromEntries((runRows as Array<{ status: string; count: number }>).map((row) => [row.status, Number(row.count)]));
+    const healthy = daemonReady;
+
     return NextResponse.json({
-      activeModel: 'XGBoost v3.4.0 (37 Tick Properties)',
-      isDbConnected,
-      featureCount: 37,
-      latestAccuracy,
-      totalModelsTrained: modelCount,
-      recentLogs,
-    });
-  } catch (err: any) {
-    return NextResponse.json({ error: err.message || 'Status check failed' }, { status: 500 });
+      status: healthy ? 'healthy' : 'degraded',
+      isDbConnected: true,
+      daemonReady,
+      modelRegistry: {
+        total: Number(registry.total || 0),
+        production: Number(registry.production || 0),
+        candidate: Number(registry.candidate || 0),
+        validated: Number(registry.validated || 0),
+      },
+      trainingRuns,
+      daemon,
+    }, { status: healthy ? 200 : 503, headers: { 'Cache-Control': 'no-store' } });
+  } catch (error) {
+    return NextResponse.json({
+      status: 'degraded',
+      error: error instanceof Error ? error.message : 'Status check failed',
+    }, { status: 503, headers: { 'Cache-Control': 'no-store' } });
   }
 }
