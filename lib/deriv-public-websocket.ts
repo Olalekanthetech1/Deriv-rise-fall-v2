@@ -1,14 +1,14 @@
 import WebSocket from 'ws';
 
-const DEFAULT_PUBLIC_WS_URL = 'wss://ws.binaryws.com/websockets/v3';
-
 /**
- * Resolves the public Deriv market-data WebSocket endpoint at runtime.
+ * Public Deriv market-data endpoint.
  *
- * Public market-data operations (active_symbols, ticks, ticks_history) do not
- * require an App ID or account authentication. The endpoint can be overridden
- * per environment without changing application code.
+ * The endpoint is configuration-driven: DERIV_PUBLIC_WS_URL may override it
+ * per environment. No account credentials or App ID are required for public
+ * market-data operations.
  */
+const DEFAULT_PUBLIC_WS_URL = 'wss://api.derivws.com/trading/v1/options/ws/public';
+
 export function getDerivPublicWebSocketUrl(): string {
   const configured = process.env.DERIV_PUBLIC_WS_URL?.trim();
   const url = configured || DEFAULT_PUBLIC_WS_URL;
