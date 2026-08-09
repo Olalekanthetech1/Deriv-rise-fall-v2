@@ -132,7 +132,7 @@ function buildFeatureVector(windowTicks: SanitizedTick[], symbol: string, assetC
     symbol,
     assetCategoryNum: assetCategory,
     contractDurationSecs: DEFAULT_HORIZON_TICKS,
-  }) as Record<string, number>;
+  }) as unknown as Record<string, number>;
 
   const featureKeys = Object.keys(featureObject);
   const featureVector = featureKeys.map((key) => Number(featureObject[key] ?? 0));
@@ -224,6 +224,20 @@ function updateChecksum(hash: crypto.Hash, sample: DatasetSample) {
 async function insertSamples(sql: Sql, datasetId: string, samples: DatasetSample[]) {
   for (let offset = 0; offset < samples.length; offset += INSERT_BATCH_SIZE) {
     const batch = samples.slice(offset, offset + INSERT_BATCH_SIZE);
+    const datasetIds = batch.map(() => datasetId);
+    const indexes = batch.map((sample) => sample.sampleIndex);
+    const splits = batch.map((sample) => sample.split);
+    const anchorEpochs = batch.map((sample) => sample.anchorEpoch);
+    const anchorTimes = batch.map((sample) => sample.anchorTime);
+    const outcomeEpochs = batch.map((sample) => sample.outcomeEpoch);
+    const outcomeTimes = batch.map((sample) => sample.outcomeTime);
+    const entryPrices = batch.map((sample) => sample.entryPrice);
+    const outcomePrices = batch.map((sample) => sample.outcomePrice);
+    const labels = batch.map((sample) => sample.label);
+    const featureVectors = batch.map((sample) => JSON.stringify(sample.featureVector));
+    const windowFrom = batch.map((sample) => sample.sourceWindowFromEpoch);
+    const windowTo = batch.map((sample) => sample.sourceWindowToEpoch);
+
     await sql`
       INSERT INTO training_dataset_samples (
         dataset_id, sample_index, split, anchor_tick_epoch, anchor_tick_time,
@@ -231,19 +245,19 @@ async function insertSamples(sql: Sql, datasetId: string, samples: DatasetSample
         feature_vector, source_window_from_epoch, source_window_to_epoch
       )
       SELECT * FROM UNNEST(
-        ${batch.map(() => datasetId)}::uuid[],
-        ${batch.map((sample) => sample.sampleIndex)}::integer[],
-        ${batch.map((sample) => sample.split)}::text[],
-        ${batch.map((sample) => sample.anchorEpoch)}::bigint[],
-        ${batch.map((sample) => sample.anchorTime)}::timestamptz[],
-        ${batch.map((sample) => sample.outcomeEpoch)}::bigint[],
-        ${batch.map((sample) => sample.outcomeTime)}::timestamptz[],
-        ${batch.map((sample) => sample.entryPrice)}::numeric[],
-        ${batch.map((sample) => sample.outcomePrice)}::numeric[],
-        ${batch.map((sample) => sample.label)}::text[],
-        ${batch.map((sample) => JSON.stringify(sample.featureVector))}::jsonb[],
-        ${batch.map((sample) => sample.sourceWindowFromEpoch)}::bigint[],
-        ${batch.map((sample) => sample.sourceWindowToEpoch)}::bigint[]
+        ${datasetIds}::uuid[],
+        ${indexes}::integer[],
+        ${splits}::text[],
+        ${anchorEpochs}::bigint[],
+        ${anchorTimes}::timestamptz[],
+        ${outcomeEpochs}::bigint[],
+        ${outcomeTimes}::timestamptz[],
+        ${entryPrices}::numeric[],
+        ${outcomePrices}::numeric[],
+        ${labels}::text[],
+        ${featureVectors}::jsonb[],
+        ${windowFrom}::bigint[],
+        ${windowTo}::bigint[]
       )
       ON CONFLICT (dataset_id, sample_index) DO NOTHING
     `;
@@ -251,19 +265,15 @@ async function insertSamples(sql: Sql, datasetId: string, samples: DatasetSample
 }
 
 export async function buildTrainingDataset(request: DatasetBuildRequest): Promise<DatasetBuildResult> {
-  const symbol = String(request.symbol ?? '').trim().toUpperCase();
+  const symbol = String(request.symbol ?? '').trim();
   if (!symbol) throw new Error('A Deriv symbol is required.');
 
   const horizonTicks = normalizePositiveInteger(request.horizonTicks, DEFAULT_HORIZON_TICKS, 5000);
   const windowTicks = normalizePositiveInteger(request.windowTicks, DEFAULT_WINDOW_TICKS, DEFAULT_WINDOW_TICKS);
-  if (windowTicks !== DEFAULT_WINDOW_TICKS) {
-    throw new Error('The canonical 37-feature dataset requires a 300-tick feature window.');
-  }
+  if (windowTicks !== DEFAULT_WINDOW_TICKS) throw new Error('The canonical 37-feature schema requires a 300-tick feature window.');
 
   const sql = getSql();
-  if (!sql || !(await initDbSchema())) {
-    throw new Error('Database is unavailable or the Operations schema could not be initialized.');
-  }
+  if (!sql || !(await initDbSchema())) throw new Error('Database is unavailable or the Operations schema could not be initialized.');
   await ensureDatasetSampleSchema(sql);
 
   const ticks = await loadTicks(sql, symbol);
@@ -271,54 +281,40 @@ export async function buildTrainingDataset(request: DatasetBuildRequest): Promis
     throw new Error(`Insufficient real Deriv ticks for ${symbol}. Need at least ${windowTicks + horizonTicks + 1}; found ${ticks.length}.`);
   }
 
-  const assetContext = await resolveAssetContext(sql, symbol);
-  const deadZone = inferDeadZone(ticks);
+  const { displayName, assetCategory } = await resolveAssetContext(sql, symbol);
   const now = new Date();
   const version = `v${compactIsoStamp(now)}`;
+  const name = String(request.datasetName ?? `Deriv ${displayName} ${horizonTicks}-tick direction dataset`).trim().slice(0, 160);
   const datasetId = crypto.randomUUID();
-  const datasetName = String(request.datasetName ?? `Deriv ${assetContext.displayName} ${horizonTicks}-tick direction dataset`).trim().slice(0, 160);
-  const checksumHash = crypto.createHash('sha256');
+  const hash = crypto.createHash('sha256');
 
   const firstUsableAnchor = windowTicks - 1;
   const lastUsableAnchor = ticks.length - horizonTicks - 1;
   const totalCandidates = lastUsableAnchor - firstUsableAnchor + 1;
   const trainBoundary = firstUsableAnchor + Math.floor(totalCandidates * 0.70);
   const validationBoundary = firstUsableAnchor + Math.floor(totalCandidates * 0.85);
+  const labelDeadZone = inferDeadZone(ticks.slice(0, Math.min(ticks.length, windowTicks + horizonTicks + 100)));
 
   const samples: DatasetSample[] = [];
-  let ambiguousSkipped = 0;
-  let rejectedEmptyWindows = 0;
-  let featureKeys: string[] = [];
-
   for (let anchorIndex = firstUsableAnchor; anchorIndex <= lastUsableAnchor; anchorIndex += 1) {
-    const window = ticks.slice(anchorIndex - windowTicks + 1, anchorIndex + 1);
-    if (window.length !== windowTicks) {
-      rejectedEmptyWindows += 1;
-      continue;
-    }
-
+    const outcomeIndex = anchorIndex + horizonTicks;
     const entry = ticks[anchorIndex];
-    const outcome = ticks[anchorIndex + horizonTicks];
-    if (!entry || !outcome) {
-      rejectedEmptyWindows += 1;
-      continue;
-    }
+    const outcome = ticks[outcomeIndex];
+    if (!entry || !outcome) continue;
 
     const delta = outcome.price - entry.price;
-    if (Math.abs(delta) <= deadZone) {
-      ambiguousSkipped += 1;
-      continue;
-    }
+    if (Math.abs(delta) <= labelDeadZone) continue;
 
     const split = anchorIndex < trainBoundary ? 'train' : anchorIndex < validationBoundary ? 'validation' : 'test';
-    const { featureKeys: currentFeatureKeys, featureVector } = buildFeatureVector(window, symbol, assetContext.assetCategory);
-
-    if (!featureKeys.length) {
-      featureKeys = currentFeatureKeys;
-    } else if (featureKeys.join('|') !== currentFeatureKeys.join('|')) {
-      throw new Error('Feature schema changed mid-build. No dataset was persisted.');
-    }
-
+    const featureWindow = ticks.slice(anchorIndex - windowTicks + 1, anchorIndex + 1);
+    const tickPoints: TickPoint[] = featureWindow.map((tick) => ({ price: tick.price, timestamp: tick.tick_epoch * 1000 }));
+    const features = extract37TickFeatures(tickPoints, {
+      symbol,
+      assetCategoryNum: assetCategory,
+      contractDurationSecs: horizonTicks,
+    }) as unknown as Record<string, number>;
+    const featureKeys = Object.keys(features);
+    const featureVector = featureKeys.map((key) => Number(features[key] ?? 0));
     const sample: DatasetSample = {
       sampleIndex: samples.length,
       split,
@@ -330,31 +326,24 @@ export async function buildTrainingDataset(request: DatasetBuildRequest): Promis
       outcomePrice: outcome.price,
       label: delta > 0 ? 'RISE' : 'FALL',
       featureVector,
-      sourceWindowFromEpoch: window[0].tick_epoch,
-      sourceWindowToEpoch: window[window.length - 1].tick_epoch,
+      sourceWindowFromEpoch: featureWindow[0].tick_epoch,
+      sourceWindowToEpoch: featureWindow[featureWindow.length - 1].tick_epoch,
     };
-
     samples.push(sample);
-    updateChecksum(checksumHash, sample);
+    updateChecksum(hash, sample);
   }
 
-  if (!samples.length) {
-    throw new Error('No non-flat directional samples could be constructed from the persisted real ticks.');
-  }
+  if (!samples.length) throw new Error('No non-flat directional samples could be constructed from the persisted real ticks.');
 
   const trainCount = samples.filter((sample) => sample.split === 'train').length;
   const validationCount = samples.filter((sample) => sample.split === 'validation').length;
   const testCount = samples.filter((sample) => sample.split === 'test').length;
   const leakageCheckPassed = samples.every((sample) => sample.outcomeEpoch > sample.anchorEpoch && sample.sourceWindowToEpoch === sample.anchorEpoch);
-  if (!leakageCheckPassed) {
-    throw new Error('Dataset leakage validation failed. No dataset was persisted.');
-  }
+  if (!leakageCheckPassed) throw new Error('Dataset leakage validation failed. No dataset was persisted.');
 
-  const checksum = checksumHash.digest('hex');
+  const checksum = hash.digest('hex');
   const sourceFrom = ticks[0].tick_time;
   const sourceTo = ticks[ticks.length - 1].tick_time;
-  const featureSchemaVersion = deriveFeatureSchemaVersion(featureKeys);
-  const labelSchemaVersion = deriveLabelSchemaVersion(deadZone);
 
   await sql`
     INSERT INTO training_datasets (
@@ -362,22 +351,17 @@ export async function buildTrainingDataset(request: DatasetBuildRequest): Promis
       label_schema_version, source_from, source_to, sample_count, train_count,
       validation_count, test_count, status, checksum, leakage_check_passed, metadata
     ) VALUES (
-      ${datasetId}, ${datasetName}, ${version}, ${symbol}, ${horizonTicks}, ${featureSchemaVersion},
-      ${labelSchemaVersion}, ${sourceFrom}, ${sourceTo}, ${samples.length}, ${trainCount},
+      ${datasetId}, ${name}, ${version}, ${symbol}, ${horizonTicks}, ${deriveFeatureSchemaVersion(samples[0].featureVector.map((_, index) => `f${index}`))},
+      ${deriveLabelSchemaVersion(labelDeadZone)}, ${sourceFrom}, ${sourceTo}, ${samples.length}, ${trainCount},
       ${validationCount}, ${testCount}, 'completed', ${checksum}, ${leakageCheckPassed},
       ${JSON.stringify({
         source: 'deriv',
-        displayName: assetContext.displayName,
         windowTicks,
-        horizonTicks,
-        featureCount: featureKeys.length,
+        featureCount: samples[0].featureVector.length,
         labelValues: ['RISE', 'FALL'],
-        deadZone,
-        totalCandidates,
-        ambiguousSkipped,
-        rejectedEmptyWindows,
-        featureKeys,
         splitStrategy: 'chronological-70-15-15',
+        labelDeadZone,
+        excludedFlatSamples: totalCandidates - samples.length,
         generatedAt: now.toISOString(),
       })}::jsonb
     )
@@ -392,7 +376,7 @@ export async function buildTrainingDataset(request: DatasetBuildRequest): Promis
 
   return {
     datasetId,
-    name: datasetName,
+    name,
     version,
     symbol,
     horizonTicks,
@@ -413,7 +397,6 @@ export async function listTrainingDatasets(symbol?: string) {
   const sql = getSql();
   if (!sql || !(await initDbSchema())) return [];
   await ensureDatasetSampleSchema(sql);
-
   if (symbol) {
     return await sql`
       SELECT id, name, version, asset_symbol, horizon_ticks, feature_schema_version,
@@ -426,7 +409,6 @@ export async function listTrainingDatasets(symbol?: string) {
       LIMIT 50
     `;
   }
-
   return await sql`
     SELECT id, name, version, asset_symbol, horizon_ticks, feature_schema_version,
       label_schema_version, source_from, source_to, sample_count, train_count,
