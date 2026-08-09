@@ -7,14 +7,11 @@ export type DerivDurationDiscovery = { symbol: string; ranges: DerivDurationRang
 type RecordLike = Record<string, unknown>;
 type ContractCapability = { type: string; expiryType: string; probe: Record<string, unknown> };
 
-const UNIT_ALIASES: Record<string, DerivDurationUnit> = {
-  t: 't', tick: 't', ticks: 't', s: 's', second: 's', seconds: 's', m: 'm', minute: 'm', minutes: 'm', h: 'h', hour: 'h', hours: 'h', d: 'd', day: 'd', days: 'd',
-};
 const MAX_PROBE: Record<DerivDurationUnit, number> = { t: 1000, s: 86400, m: 1440, h: 168, d: 365 };
 const DISCOVERY_TTL_MS = 10 * 60 * 1000;
 const PROBE_INTERVAL_MS = 1000;
 const MAX_RATE_LIMIT_RETRIES = 2;
-const PROBEABLE_TYPES = new Set(['CALL', 'PUT', 'CALLE', 'PUTE', 'UPORDOWN', 'MULTUP', 'MULTDOWN', 'TICKHIGH', 'TICKLOW', 'RESETCALL', 'RESETPUT', 'RUNHIGH', 'RUNLOW']);
+const PROBEABLE_TYPES = new Set(['CALL', 'PUT', 'CALLE', 'PUTE', 'UPORDOWN', 'MULTUP', 'MULTDOWN', 'TICKHIGH', 'TICKLOW', 'RESETCALL', 'RESETPUT']);
 const cache = new Map<string, { value: DerivDurationDiscovery; expiresAt: number }>();
 const inFlight = new Map<string, Promise<DerivDurationDiscovery>>();
 
@@ -71,7 +68,6 @@ function probeParams(type: string): Record<string, unknown> | null {
   switch (type) {
     case 'MULTUP': case 'MULTDOWN': return { multiplier: 10 };
     case 'TICKHIGH': case 'TICKLOW': return { selected_tick: 1 };
-    case 'RUNHIGH': case 'RUNLOW': return { barrier: '0' };
     case 'CALL': case 'PUT': case 'CALLE': case 'PUTE': case 'UPORDOWN': case 'RESETCALL': case 'RESETPUT': return {};
     default: return null;
   }
@@ -102,20 +98,31 @@ function unitsForExpiryType(expiryType: string): DerivDurationUnit[] {
   }
 }
 
-async function discoverUnit(session: DerivDiscoverySession, symbol: string, capability: ContractCapability, unit: DerivDurationUnit): Promise<{ min: number; max: number } | null> {
-  const max = MAX_PROBE[unit];
-  if (!(await session.proposal(symbol, capability, 1, unit))) return null;
-  let validMax = 1; let invalidUpper: number | null = null;
-  while (validMax < max) {
-    const next = Math.min(max, validMax * 2); if (next === validMax) break;
-    if (await session.proposal(symbol, capability, next, unit)) validMax = next; else { invalidUpper = next; break; }
+function capabilityPriority(capability: ContractCapability): number {
+  if (capability.type === 'MULTUP' || capability.type === 'MULTDOWN') return 0;
+  if (capability.type === 'CALL' || capability.type === 'PUT' || capability.type === 'CALLE' || capability.type === 'PUTE' || capability.type === 'UPORDOWN') return 1;
+  return 2;
+}
+
+async function discoverUnit(session: DerivDiscoverySession, symbol: string, capabilities: ContractCapability[], unit: DerivDurationUnit): Promise<{ range: { min: number; max: number }; capability: ContractCapability } | null> {
+  const ordered = [...capabilities].sort((a, b) => capabilityPriority(a) - capabilityPriority(b));
+  for (const capability of ordered) {
+    if (!unitsForExpiryType(capability.expiryType).includes(unit)) continue;
+    const max = MAX_PROBE[unit];
+    if (!(await session.proposal(symbol, capability, 1, unit))) continue;
+    let validMax = 1; let invalidUpper: number | null = null;
+    while (validMax < max) {
+      const next = Math.min(max, validMax * 2); if (next === validMax) break;
+      if (await session.proposal(symbol, capability, next, unit)) validMax = next; else { invalidUpper = next; break; }
+    }
+    if (invalidUpper !== null) {
+      let left = validMax; let right = invalidUpper;
+      while (left + 1 < right) { const mid = Math.floor((left + right) / 2); if (await session.proposal(symbol, capability, mid, unit)) left = mid; else right = mid; }
+      validMax = left;
+    }
+    return { range: { min: 1, max: validMax }, capability };
   }
-  if (invalidUpper !== null) {
-    let left = validMax; let right = invalidUpper;
-    while (left + 1 < right) { const mid = Math.floor((left + right) / 2); if (await session.proposal(symbol, capability, mid, unit)) left = mid; else right = mid; }
-    validMax = left;
-  }
-  return { min: 1, max: validMax };
+  return null;
 }
 
 async function discover(symbol: string): Promise<DerivDurationDiscovery> {
@@ -125,11 +132,18 @@ async function discover(symbol: string): Promise<DerivDurationDiscovery> {
     const contracts = await session.request({ contracts_for: symbol }, 'contracts_for');
     const capabilities = contractCapabilities(contracts);
     if (!capabilities.length) throw new Error(`Deriv returned no duration-probeable contracts for ${symbol}.`);
-    const preferred = capabilities.find(c => ['CALL', 'PUT', 'CALLE', 'PUTE', 'UPORDOWN'].includes(c.type)) ?? capabilities.find(c => ['MULTUP', 'MULTDOWN'].includes(c.type)) ?? capabilities[0];
+
+    // Build the duration registry from the UNION of broker contract capabilities.
+    // A tick-only CALL/PUT contract must not hide time-based MULTUP/MULTDOWN
+    // capabilities on the same asset.
+    const units = Array.from(new Set(capabilities.flatMap(c => unitsForExpiryType(c.expiryType))));
+    const unitOrder: DerivDurationUnit[] = ['t', 's', 'm', 'h', 'd'];
+    units.sort((a, b) => unitOrder.indexOf(a) - unitOrder.indexOf(b));
     const ranges: DerivDurationRange[] = [];
-    for (const unit of unitsForExpiryType(preferred.expiryType)) {
-      const range = await discoverUnit(session, symbol, preferred, unit);
-      if (range) ranges.push({ id: `${symbol}:${preferred.type}:${unit}:${range.min}-${range.max}`, unit, min: range.min, max: range.max, tradeTypes: [preferred.type], source: 'deriv-proposal-probe' });
+    for (const unit of units) {
+      const result = await discoverUnit(session, symbol, capabilities, unit);
+      if (!result) continue;
+      ranges.push({ id: `${symbol}:${result.capability.type}:${unit}:${result.range.min}-${result.range.max}`, unit, min: result.range.min, max: result.range.max, tradeTypes: [result.capability.type], source: 'deriv-proposal-probe' });
     }
     if (!ranges.length) throw new Error(`Deriv proposal capability probing found no supported durations for ${symbol}.`);
     return { symbol, ranges, fetchedAt: new Date().toISOString(), source: 'deriv-proposal-probe' };
