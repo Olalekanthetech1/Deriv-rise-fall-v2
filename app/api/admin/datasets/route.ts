@@ -1,6 +1,6 @@
 import { NextRequest, NextResponse } from 'next/server';
 import { verifySessionToken } from '../auth/route';
-import { buildTrainingDataset, getDatasetBuilderSchema, listTrainingDatasets } from '@/lib/training-dataset-builder';
+import { buildTrainingDataset, getDatasetBuilderSchema, listTrainingDatasets } from '@/lib/training-dataset-builder-v2';
 
 function isAuthenticated(req: NextRequest): boolean {
   const cookieToken = req.cookies.get('admin_session_token')?.value;
