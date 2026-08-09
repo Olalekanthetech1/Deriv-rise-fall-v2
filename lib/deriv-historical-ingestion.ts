@@ -67,7 +67,7 @@ function normalizeTicks(symbol: string, ticks: TickPoint[]): HistoricalTick[] {
   return [...deduped.values()].sort((a, b) => a.epochMs - b.epochMs);
 }
 
-async function getAssetId(sql: ReturnType<typeof neon>, symbol: string): Promise<number> {
+async function getAssetId<TSql extends ReturnType<typeof neon>>(sql: TSql, symbol: string): Promise<number> {
   const rows = (await sql`
     INSERT INTO market_assets (symbol, display_name, asset_class, market_type, source, is_active)
     VALUES (${symbol}, ${symbol}, 'unknown', 'unknown', 'deriv', TRUE)
@@ -82,7 +82,7 @@ async function getAssetId(sql: ReturnType<typeof neon>, symbol: string): Promise
   return id;
 }
 
-async function createRunRecord(sql: ReturnType<typeof neon>, run: HistoricalIngestionRun): Promise<void> {
+async function createRunRecord<TSql extends ReturnType<typeof neon>>(sql: TSql, run: HistoricalIngestionRun): Promise<void> {
   await sql`
     INSERT INTO data_ingestion_runs (
       id, source, asset_symbol, requested_from, requested_to, started_at, completed_at, status,
@@ -95,7 +95,7 @@ async function createRunRecord(sql: ReturnType<typeof neon>, run: HistoricalInge
   `;
 }
 
-async function updateRunRecord(sql: ReturnType<typeof neon>, run: HistoricalIngestionRun): Promise<void> {
+async function updateRunRecord<TSql extends ReturnType<typeof neon>>(sql: TSql, run: HistoricalIngestionRun): Promise<void> {
   await sql`
     UPDATE data_ingestion_runs
     SET completed_at = ${run.completedAt},
@@ -111,7 +111,7 @@ async function updateRunRecord(sql: ReturnType<typeof neon>, run: HistoricalInge
   `;
 }
 
-async function upsertCheckpoint(sql: ReturnType<typeof neon>, symbol: string, lastTickEpoch: number, lastTickTime: string): Promise<void> {
+async function upsertCheckpoint<TSql extends ReturnType<typeof neon>>(sql: TSql, symbol: string, lastTickEpoch: number, lastTickTime: string): Promise<void> {
   await sql`
     INSERT INTO data_ingestion_checkpoints (source, asset_symbol, last_tick_epoch, last_tick_time, updated_at)
     VALUES ('deriv', ${symbol}, ${lastTickEpoch}, ${lastTickTime}, NOW())
@@ -122,8 +122,8 @@ async function upsertCheckpoint(sql: ReturnType<typeof neon>, symbol: string, la
   `;
 }
 
-async function insertTickBatch(
-  sql: ReturnType<typeof neon>,
+async function insertTickBatch<TSql extends ReturnType<typeof neon>>(
+  sql: TSql,
   symbol: string,
   assetId: number,
   runId: string,
