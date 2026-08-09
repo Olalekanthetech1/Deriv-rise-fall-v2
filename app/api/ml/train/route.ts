@@ -2,6 +2,7 @@ import { NextRequest, NextResponse } from 'next/server';
 import { TrainSchema } from '@/lib/validation-schemas';
 import { getDb, registerModelInDb } from '@/lib/db';
 import { ensureMinTicks } from '@/lib/ticks-helper';
+import { initializeMlPipelineConfig } from '@/lib/ml-pipeline-config';
 import { verifySessionToken } from '../../admin/auth/route';
 
 const CATEGORY_MAP: Record<string, string[]> = {
@@ -20,15 +21,15 @@ function isAdmin(req: NextRequest): boolean {
 }
 
 export async function POST(req: NextRequest) {
-  if (!isAdmin(req)) {
-    return NextResponse.json({ error: 'Unauthorized admin access.' }, { status: 401 });
-  }
+  if (!isAdmin(req)) return NextResponse.json({ error: 'Unauthorized admin access.' }, { status: 401 });
 
   try {
     const parsed = TrainSchema.safeParse(await req.json().catch(() => ({})));
     if (!parsed.success) return NextResponse.json({ error: 'Invalid training parameters', details: parsed.error.format() }, { status: 400 });
 
     const { symbol, category, retrainAll, modelType, durationSecs, maxDepth, learningRate, numEstimators, subsample, epochs, batchSize } = parsed.data;
+    const pipeline = await initializeMlPipelineConfig();
+    const minimumTrainingTicks = pipeline.config.canonicalFeatureWindowTicks + Math.max(1, durationSecs);
     const symbols = category && CATEGORY_MAP[category] ? CATEGORY_MAP[category] : (retrainAll || symbol === 'ALL') ? CATEGORY_MAP.ALL : [symbol];
     const models = modelType === 'all' || retrainAll ? MODEL_TYPES : [modelType];
     const daemon = (await import('@/lib/xgboost-daemon')).xgboostDaemon;
@@ -36,9 +37,9 @@ export async function POST(req: NextRequest) {
     const results: any[] = [];
 
     for (const sym of symbols) {
-      const ticks = await ensureMinTicks(sym, 500);
-      if (!ticks || ticks.length < 20) {
-        for (const model of models) results.push({ symbol: sym, modelType: model, success: false, error: 'INSUFFICIENT_REAL_TICKS' });
+      const ticks = await ensureMinTicks(sym, minimumTrainingTicks);
+      if (!ticks || ticks.length < minimumTrainingTicks) {
+        for (const model of models) results.push({ symbol: sym, modelType: model, success: false, error: 'INSUFFICIENT_REAL_TICKS', requiredTicks: minimumTrainingTicks, availableTicks: ticks?.length ?? 0 });
         continue;
       }
 
@@ -53,7 +54,7 @@ export async function POST(req: NextRequest) {
         });
 
         if (!result?.success) {
-          results.push({ symbol: sym, modelType: model, success: false, error: result?.error || 'Training failed' });
+          results.push({ symbol: sym, modelType: model, success: false, error: result?.error || 'Training failed', schemaVersion: result?.schemaVersion, schemaFingerprint: result?.schemaFingerprint });
           continue;
         }
 
@@ -70,9 +71,6 @@ export async function POST(req: NextRequest) {
               format: result.format || (model === 'tcn' || model === 'lstm' || model === 'transformer' ? 'PT_STATE' : 'PKL'),
               status: 'production',
               accuracy: Number.isFinite(Number(result.accuracy)) ? Number(result.accuracy) : undefined,
-              // These metrics are not returned by the training daemon yet.
-              // Omit them rather than passing null, because registerModelInDb
-              // accepts optional numeric fields and applies its own DB defaults.
               backtestWinRate: undefined,
               backtestProfitFactor: undefined,
               filePath: `${sym}_${durationSecs}s_${model}.pkl`,
@@ -92,6 +90,8 @@ export async function POST(req: NextRequest) {
       modelTypes: models,
       trainedCount: successes,
       totalJobs: results.length,
+      requiredTrainingTicks: minimumTrainingTicks,
+      schemaVersion: pipeline.featureSchemaVersion,
       results,
       trainedAt: new Date().toISOString(),
     });
