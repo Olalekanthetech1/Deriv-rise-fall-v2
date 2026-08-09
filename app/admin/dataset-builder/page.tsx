@@ -2,7 +2,7 @@
 
 import Link from 'next/link';
 import { useEffect, useMemo, useState } from 'react';
-import { ArrowLeft, Beaker, CheckCircle2, Database, RefreshCw, ShieldCheck, Sparkles, TriangleAlert } from 'lucide-react';
+import { AlertTriangle, ArrowLeft, Beaker, CheckCircle2, Database, RefreshCw, ShieldCheck, Sparkles } from 'lucide-react';
 
 type SymbolItem = {
   symbol: string;
@@ -113,7 +113,7 @@ export default function TrainingDatasetBuilderPage() {
         <button onClick={() => void load()} disabled={loading || building} className="inline-flex items-center justify-center gap-2 rounded-xl border border-white/10 bg-white/5 px-4 py-2.5 text-sm font-semibold text-slate-200 disabled:opacity-50"><RefreshCw className={`h-4 w-4 ${loading ? 'animate-spin' : ''}`} />Refresh</button>
       </header>
 
-      {error && <div className="mb-5 flex items-start gap-3 rounded-2xl border border-amber-400/20 bg-amber-400/5 p-4 text-sm text-amber-200"><TriangleAlert className="mt-0.5 h-4 w-4 shrink-0" /><span>{error}</span></div>}
+      {error && <div className="mb-5 flex items-start gap-3 rounded-2xl border border-amber-400/20 bg-amber-400/5 p-4 text-sm text-amber-200"><AlertTriangle className="mt-0.5 h-4 w-4 shrink-0" /><span>{error}</span></div>}
       {success && <div className="mb-5 rounded-2xl border border-emerald-400/20 bg-emerald-400/5 p-4"><div className="flex items-center gap-2 text-sm font-bold text-emerald-300"><CheckCircle2 className="h-4 w-4" />Dataset built from real Deriv ticks</div><p className="mt-2 text-xs text-slate-400">{success.sampleCount.toLocaleString()} samples · Train {success.trainCount.toLocaleString()} · Validation {success.validationCount.toLocaleString()} · Test {success.testCount.toLocaleString()}</p><p className="mt-1 break-all text-[11px] text-slate-500">SHA-256: {success.checksum}</p></div>}
 
       <section className="mb-5 grid gap-4 lg:grid-cols-[1.15fr_.85fr]">
