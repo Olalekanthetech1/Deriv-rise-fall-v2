@@ -64,8 +64,18 @@ class XGBoostDaemonManager {
     const id = `req_${Date.now()}_${++this.reqIdCounter}`;
     const packet = JSON.stringify({ action, id, ...sanitized }) + '\n';
     return new Promise((resolve, reject) => {
-      const timeoutMs = action === 'train' || action === 'train_partitioned' ? 10 * 60 * 1000 : action === 'backtest' ? 60000 : 5000;
-      const timer = setTimeout(() => { if (this.pending.has(id)) { this.pending.delete(id); reject(new Error(`Daemon request ${action} timed out`)); } }, timeoutMs);
+      const defaultTimeoutMs = action === 'train' || action === 'train_partitioned'
+        ? 10 * 60 * 1000
+        : action === 'backtest'
+          ? 60000
+          : action === 'predict_ensemble'
+            ? 15000
+            : 5000;
+      const configuredTimeout = Number(process.env.ML_PREDICT_ENSEMBLE_TIMEOUT_MS);
+      const timeoutMs = action === 'predict_ensemble' && Number.isFinite(configuredTimeout) && configuredTimeout >= 5000 && configuredTimeout <= 60000
+        ? configuredTimeout
+        : defaultTimeoutMs;
+      const timer = setTimeout(() => { if (this.pending.has(id)) { this.pending.delete(id); reject(new Error(`Daemon request ${action} timed out after ${timeoutMs}ms`)); } }, timeoutMs);
       this.pending.set(id, { resolve, reject, timer });
       try { this.child!.stdin!.write(packet); } catch (err) { clearTimeout(timer); this.pending.delete(id); reject(err); }
     });
