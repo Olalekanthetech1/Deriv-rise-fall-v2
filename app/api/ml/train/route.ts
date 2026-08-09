@@ -4,6 +4,7 @@ import { getDb, registerModelInDb } from '@/lib/db';
 import { ensureMinTicks } from '@/lib/ticks-helper';
 import { initializeMlPipelineConfig } from '@/lib/ml-pipeline-config';
 import { getMlRuntimeSchemaContract } from '@/lib/ml-runtime-schema';
+import { buildSequenceFeatureDataset, buildTabularFeatureDataset } from '@/lib/ml-feature-dataset';
 import { verifySessionToken } from '../../admin/auth/route';
 
 const CATEGORY_MAP: Record<string, string[]> = {
@@ -14,6 +15,7 @@ const CATEGORY_MAP: Record<string, string[]> = {
 };
 CATEGORY_MAP.ALL = Object.values(CATEGORY_MAP).flat();
 const MODEL_TYPES = ['xgboost','lightgbm','catboost','tcn','lstm','transformer','hmm','isolation_forest'];
+const SEQUENCE_MODELS = new Set(['tcn', 'lstm', 'transformer']);
 
 function isAdmin(req: NextRequest): boolean {
   const cookieToken = req.cookies.get('admin_session_token')?.value;
@@ -29,9 +31,10 @@ export async function POST(req: NextRequest) {
     if (!parsed.success) return NextResponse.json({ error: 'Invalid training parameters', details: parsed.error.format() }, { status: 400 });
 
     const { symbol, category, retrainAll, modelType, durationSecs, maxDepth, learningRate, numEstimators, subsample, epochs, batchSize } = parsed.data;
-    const pipeline = await initializeMlPipelineConfig();
+    await initializeMlPipelineConfig();
     const schema = await getMlRuntimeSchemaContract();
-    const minimumTrainingTicks = schema.canonicalFeatureWindowTicks + Math.max(1, durationSecs);
+    const requiredContextTicks = Math.max(schema.canonicalFeatureWindowTicks, schema.sequenceLength);
+    const minimumTrainingTicks = requiredContextTicks + Math.max(1, durationSecs);
     const symbols = category && CATEGORY_MAP[category] ? CATEGORY_MAP[category] : (retrainAll || symbol === 'ALL') ? CATEGORY_MAP.ALL : [symbol];
     const models = modelType === 'all' || retrainAll ? MODEL_TYPES : [modelType];
     const daemon = (await import('@/lib/xgboost-daemon')).xgboostDaemon;
@@ -45,13 +48,25 @@ export async function POST(req: NextRequest) {
         continue;
       }
 
+      const assetCategory = category === 'forex' ? 1 : category === 'commodities' ? 2 : 0;
+      const context = { symbol: sym, durationSecs, assetCategory };
+      let tabularDataset: Awaited<ReturnType<typeof buildTabularFeatureDataset>> | null = null;
+      let sequenceDataset: Awaited<ReturnType<typeof buildSequenceFeatureDataset>> | null = null;
+
       for (const model of models) {
+        if (SEQUENCE_MODELS.has(model)) {
+          sequenceDataset ??= await buildSequenceFeatureDataset(ticks, context);
+        } else {
+          tabularDataset ??= await buildTabularFeatureDataset(ticks, context);
+        }
+
         const result = await daemon.sendCommand('train', {
           symbol: sym,
-          ticks,
           durationSecs,
           modelType: model,
-          assetCategory: category === 'forex' ? 1 : category === 'commodities' ? 2 : 0,
+          assetCategory,
+          featureDataset: tabularDataset,
+          sequenceDataset,
           hyperparams: { maxDepth, learningRate, numEstimators, subsample, epochs, batchSize },
         });
 
@@ -70,7 +85,7 @@ export async function POST(req: NextRequest) {
               version: result.modelVersion || result.schemaVersion || 'native-runtime',
               symbol: sym,
               horizonSecs: durationSecs,
-              format: result.format || (model === 'tcn' || model === 'lstm' || model === 'transformer' ? 'PT_STATE' : 'PKL'),
+              format: result.format || (SEQUENCE_MODELS.has(model) ? 'PT_STATE' : 'PKL'),
               status: 'production',
               accuracy: Number.isFinite(Number(result.accuracy)) ? Number(result.accuracy) : undefined,
               backtestWinRate: undefined,
