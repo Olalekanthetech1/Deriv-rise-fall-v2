@@ -9,9 +9,10 @@ import json
 import sys
 
 import ml_native_runtime as runtime
+import ml_duration_training as duration_training
 
 
-ACTIONS = ("predict", "predict_ensemble", "train", "list_models", "ping", "backtest")
+ACTIONS = ("predict", "predict_ensemble", "train", "train_partitioned", "list_models", "ping", "backtest")
 
 
 def dispatch(request: dict) -> dict:
@@ -23,6 +24,9 @@ def dispatch(request: dict) -> dict:
 
     if action == "train":
         return runtime.train_one(request.get("modelType", "xgboost"), request)
+
+    if action == "train_partitioned":
+        return duration_training.train_partitioned(request.get("modelType", "xgboost"), request)
 
     if action == "predict_ensemble":
         requested = request.get("modelTypes")
@@ -61,11 +65,7 @@ def dispatch(request: dict) -> dict:
             "supportedModelTypes": runtime.model_types(),
         }
 
-    return {
-        "success": False,
-        "id": request.get("id"),
-        "error": f"Unknown action {action}",
-    }
+    return {"success": False, "id": request.get("id"), "error": f"Unknown action {action}"}
 
 
 def main() -> None:
@@ -90,11 +90,7 @@ def main() -> None:
             request = json.loads(line)
             output = dispatch(request)
         except Exception as exc:
-            output = {
-                "success": False,
-                "id": request.get("id") if isinstance(request, dict) else None,
-                "error": str(exc),
-            }
+            output = {"success": False, "id": request.get("id") if isinstance(request, dict) else None, "error": str(exc)}
         sys.stdout.write(json.dumps(output, default=str) + "\n")
         sys.stdout.flush()
 
