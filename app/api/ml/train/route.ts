@@ -107,7 +107,7 @@ export async function POST(req: NextRequest) {
               backtestWinRate: undefined,
               backtestProfitFactor: undefined,
               filePath: `${sym}_${durationSecs}s_${model}.pkl`,
-              hyperparameters,
+              hyperparameters: hyperparams,
               metrics: {
                 schemaFingerprint: result.schemaFingerprint || schema.schemaFingerprint,
                 featureSchemaVersion: result.schemaVersion || schema.featureSchemaVersion,
