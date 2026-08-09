@@ -61,8 +61,18 @@ function aggregatePartialRuns(runs: IngestionRun[]): IngestionRun[] {
     existing.completedAt = existing.completedAt && run.completedAt
       ? new Date(Math.max(new Date(existing.completedAt).getTime(), new Date(run.completedAt).getTime())).toISOString()
       : existing.completedAt || run.completedAt;
-    if (run.firstTickTime && (!existing.firstTickTime || new Date(run.firstTickTime) < new Date(existing.firstTickTime))) existing.firstTickTime = run.firstTickTime;
-    if (run.lastTickTime && (!existing.lastTickTime || new Date(run.lastTickTime) > new Date(existing.lastTickTime))) existing.lastTickTime = run.lastTickTime;
+
+    if (run.firstTickTime) {
+      const runTime = new Date(run.firstTickTime).getTime();
+      const existingTime = existing.firstTickTime ? new Date(existing.firstTickTime).getTime() : Number.POSITIVE_INFINITY;
+      if (runTime < existingTime) existing.firstTickTime = run.firstTickTime;
+    }
+    if (run.lastTickTime) {
+      const runTime = new Date(run.lastTickTime).getTime();
+      const existingTime = existing.lastTickTime ? new Date(existing.lastTickTime).getTime() : Number.NEGATIVE_INFINITY;
+      if (runTime > existingTime) existing.lastTickTime = run.lastTickTime;
+    }
+
     existing.errorMessage = run.errorMessage || existing.errorMessage;
     existing.metadata = { ...existing.metadata, aggregatedBatches: Number(existing.metadata?.aggregatedBatches || 1) + 1 };
   }
@@ -217,7 +227,8 @@ export default function MarketDataIngestionPage() {
         <div className="mb-4 flex items-center gap-2 text-sm font-semibold text-emerald-300"><ShieldCheck className="h-4 w-4" />Recent ingestion runs</div>
         {loading ? <div className="text-sm text-slate-500">Loading ingestion state…</div> : displayRuns.length === 0 ? <div className="text-sm text-slate-500">No historical ingestion runs recorded yet.</div> : <div className="grid gap-3 lg:grid-cols-2 xl:grid-cols-3">{displayRuns.map((run) => {
           const progress = Math.min(100, (run.recordsInserted / Math.max(1, run.requestedCount)) * 100);
-          const batchCount = Number(run.metadata?.aggregatedBatches || (Array.isArray(run.metadata?.batches) ? run.metadata?.batches.length : 0));
+          const rawBatches = run.metadata?.batches;
+          const batchCount = Number(run.metadata?.aggregatedBatches || (Array.isArray(rawBatches) ? rawBatches.length : 0));
           return <article key={run.runId} className="rounded-xl border border-white/10 bg-black/20 p-4 text-sm">
             <div className="flex items-start justify-between gap-3"><div><div className="font-bold text-slate-100">{run.symbol}</div><div className="mt-1 text-xs text-slate-500">{run.startedAt}</div></div><span className={`rounded-full border px-2.5 py-1 text-[10px] font-semibold tracking-wider ${run.status === 'completed' ? 'border-emerald-400/20 bg-emerald-400/10 text-emerald-300' : run.status === 'partial' ? 'border-amber-400/20 bg-amber-400/10 text-amber-200' : run.status === 'failed' ? 'border-red-400/20 bg-red-400/5 text-red-200' : 'border-cyan-400/20 bg-cyan-400/10 text-cyan-200'}`}>{run.status === 'partial' ? 'IN PROGRESS' : run.status.toUpperCase()}</span></div>
             <div className="mt-3 h-2 overflow-hidden rounded-full bg-white/10"><div className="h-full rounded-full bg-cyan-400 transition-all" style={{ width: `${progress}%` }} /></div>
