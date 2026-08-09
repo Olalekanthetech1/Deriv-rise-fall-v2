@@ -2,6 +2,7 @@ import { NextResponse } from 'next/server';
 import WebSocket from 'ws';
 import CircuitBreaker from 'opossum';
 import { logger } from '@/lib/logger';
+import { openDerivPublicWebSocket } from '@/lib/deriv-public-websocket';
 
 export interface ActiveSymbolItem {
   symbol: string;
@@ -13,13 +14,10 @@ export interface ActiveSymbolItem {
 }
 
 type DerivActiveSymbol = {
-  symbol?: string;
   underlying_symbol?: string;
-  display_name?: string;
   underlying_symbol_name?: string;
   market?: string;
   submarket?: string;
-  submarket_display_name?: string;
   exchange_is_open?: number | string | boolean;
   is_trading_suspended?: number | string | boolean;
 };
@@ -29,21 +27,19 @@ function asBoolean(value: unknown): boolean {
 }
 
 async function fetchLiveSymbols(): Promise<ActiveSymbolItem[]> {
-  const appId = process.env.NEXT_PUBLIC_DERIV_APP_ID?.trim();
-  if (!appId) throw new Error('NEXT_PUBLIC_DERIV_APP_ID is not configured.');
-
-  const wsUrl = `wss://ws.derivws.com/websockets/v3?app_id=${encodeURIComponent(appId)}`;
+  // active_symbols is a public market-data operation. Do not attach an
+  // application ID or account credential to this connection.
+  const ws = await openDerivPublicWebSocket(10_000);
 
   return new Promise<ActiveSymbolItem[]>((resolve, reject) => {
     let handled = false;
     const timeout = setTimeout(() => {
       if (!handled) {
         handled = true;
+        try { ws.close(); } catch {}
         reject(new Error('Deriv symbol discovery timed out.'));
       }
-    }, 7000);
-
-    const ws = new WebSocket(wsUrl);
+    }, 10_000);
 
     const fail = (error: Error) => {
       if (handled) return;
@@ -53,16 +49,15 @@ async function fetchLiveSymbols(): Promise<ActiveSymbolItem[]> {
       reject(error);
     };
 
-    ws.on('open', () => {
-      ws.send(JSON.stringify({ active_symbols: 'brief', req_id: 1 }));
-    });
+    ws.send(JSON.stringify({ active_symbols: 'brief', req_id: 1 }));
 
     ws.on('message', (data: WebSocket.Data) => {
       try {
         const response = JSON.parse(data.toString());
 
         if (response.error) {
-          fail(new Error(String(response.error.message || 'Deriv symbol discovery failed.')));
+          const code = response.error.code ? ` (${response.error.code})` : '';
+          fail(new Error(`Deriv symbol discovery failed${code}: ${String(response.error.message || 'Unknown Deriv error')}`));
           return;
         }
 
@@ -75,7 +70,7 @@ async function fetchLiveSymbols(): Promise<ActiveSymbolItem[]> {
 
         const formatted = (response.active_symbols as DerivActiveSymbol[])
           .map((item): ActiveSymbolItem | null => {
-            const symbol = String(item.underlying_symbol || item.symbol || '').trim();
+            const symbol = String(item.underlying_symbol || '').trim();
             if (!symbol) return null;
 
             const exchangeIsOpen = asBoolean(item.exchange_is_open);
@@ -83,14 +78,10 @@ async function fetchLiveSymbols(): Promise<ActiveSymbolItem[]> {
 
             return {
               symbol,
-              displayName: String(item.underlying_symbol_name || item.display_name || symbol),
+              displayName: String(item.underlying_symbol_name || symbol),
               market: String(item.market || ''),
-              submarket: String(item.submarket || item.submarket_display_name || ''),
-              // Exchange hours are kept separately from availability. This is
-              // important for 24/7 Deriv markets and for weekends/closed exchanges.
+              submarket: String(item.submarket || ''),
               isOpen: exchangeIsOpen && !tradingSuspended,
-              // active_symbols itself represents currently available trading
-              // underlyings; only an explicit suspension makes one unavailable.
               isAvailable: !tradingSuspended,
             };
           })
@@ -103,7 +94,7 @@ async function fetchLiveSymbols(): Promise<ActiveSymbolItem[]> {
 
         handled = true;
         clearTimeout(timeout);
-        ws.close();
+        try { ws.close(); } catch {}
         resolve(formatted);
       } catch (error) {
         fail(error instanceof Error ? error : new Error('Invalid Deriv symbol response.'));
@@ -118,9 +109,9 @@ async function fetchLiveSymbols(): Promise<ActiveSymbolItem[]> {
 }
 
 const derivCircuitBreaker = new CircuitBreaker(fetchLiveSymbols, {
-  timeout: 8000,
+  timeout: 12_000,
   errorThresholdPercentage: 50,
-  resetTimeout: 10000,
+  resetTimeout: 10_000,
 });
 
 derivCircuitBreaker.on('open', () => logger.warn('Deriv WS Circuit Breaker OPENED (API Degraded)'));
