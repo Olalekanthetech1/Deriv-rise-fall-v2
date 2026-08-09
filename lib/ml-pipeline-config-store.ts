@@ -145,19 +145,18 @@ export async function activateMlPipelineConfigVersion(id: string): Promise<Store
   const sql = getSql();
   if (!sql || !(await ensureMlPipelineConfigStore())) return null;
   try {
-    const [targetRows] = await sql.transaction((tx) => [
+    const results = await sql.transaction((tx) => [
+      tx`SELECT pg_advisory_xact_lock(hashtext('ml_pipeline_config_registry'))`,
       tx`SELECT id FROM ml_pipeline_config_versions WHERE id = ${id} FOR UPDATE`,
-      tx`SELECT pg_advisory_xact_lock(hashtext('ml_pipeline_config_registry'))`,
-    ]);
-    if (!targetRows[0]) return null;
-
-    await sql.transaction((tx) => [
-      tx`SELECT pg_advisory_xact_lock(hashtext('ml_pipeline_config_registry'))`,
       tx`UPDATE ml_pipeline_config_versions SET status = 'archived' WHERE status = 'active'`,
       tx`UPDATE ml_pipeline_config_versions SET status = 'active', activated_at = NOW() WHERE id = ${id}`,
+      tx`SELECT id, version, status, config, config_hash, feature_schema_version, created_by, created_at, activated_at
+         FROM ml_pipeline_config_versions WHERE id = ${id} LIMIT 1`,
     ]);
-
-    return getMlPipelineConfigVersion(id);
+    const targetRows = results[1] as any[];
+    if (!targetRows[0]) return null;
+    const finalRows = results[4] as any[];
+    return finalRows[0] ? rowToStored(finalRows[0]) : null;
   } catch (error) {
     console.error('[ML Config Store] config activation failed:', error);
     return null;
