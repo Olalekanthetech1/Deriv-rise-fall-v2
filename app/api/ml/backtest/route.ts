@@ -14,7 +14,7 @@ export async function POST(req: NextRequest) {
     if (!parseResult.success) {
       return NextResponse.json(
         { error: 'Invalid input parameters', details: parseResult.error.format() },
-        { status: 400 }
+        { status: 400 },
       );
     }
 
@@ -33,7 +33,7 @@ export async function POST(req: NextRequest) {
 
     const backtestRes = await xgboostDaemon.sendCommand('backtest', {
       symbol,
-      ticks,
+      prices: ticks.map((tick) => tick.price),
       horizons,
       featureVectorsByHorizon,
     });
