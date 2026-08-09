@@ -1,18 +1,27 @@
 import crypto from 'crypto';
 import { neon } from '@neondatabase/serverless';
-import { extract37TickFeatures, featureObjToArray, type TickPoint } from './ml-feature-extractor';
+import { extract37TickFeatures, type TickPoint } from './ml-feature-extractor';
 import { initDbSchema, getDbConnectionString } from './db';
+import {
+  ensureDatasetSchemaRegistry,
+  featureVectorFromRecord,
+  getActiveFeatureSchema,
+  getActiveHorizons,
+  getFeatureSchemaVersion,
+  getRequiredWindowTicks,
+  getWindowProfile,
+  type FeatureDefinition,
+  type HorizonDefinition,
+} from './dataset-schema-registry';
 
-const FEATURE_SCHEMA_VERSION = 'tick-features-v37';
 const LABEL_SCHEMA_VERSION = 'direction-v1';
-const DEFAULT_WINDOW_TICKS = 300;
-const DEFAULT_HORIZON_TICKS = 5;
 const INSERT_BATCH_SIZE = 250;
+const MAX_HORIZON_TICKS = 5000;
+const MAX_WINDOW_TICKS = 5000;
 
 export type DatasetBuildRequest = {
   symbol: string;
-  horizonTicks?: number;
-  windowTicks?: number;
+  horizonTicks: number;
   datasetName?: string;
 };
 
@@ -23,6 +32,8 @@ export type DatasetBuildResult = {
   symbol: string;
   horizonTicks: number;
   windowTicks: number;
+  featureCount: number;
+  featureSchemaVersion: string;
   sampleCount: number;
   trainCount: number;
   validationCount: number;
@@ -61,11 +72,10 @@ function getSql() {
   return dbUrl ? neon(dbUrl) : null;
 }
 
-function normalizePositiveInteger(value: unknown, fallback: number, max: number): number {
-  if (value === undefined || value === null || value === '') return fallback;
+function normalizePositiveInteger(value: unknown, field: string, max: number): number {
   const parsed = Number(value);
   if (!Number.isSafeInteger(parsed) || parsed <= 0 || parsed > max) {
-    throw new Error(`Value must be a positive integer no greater than ${max}.`);
+    throw new Error(`${field} must be a positive integer no greater than ${max}.`);
   }
   return parsed;
 }
@@ -117,12 +127,24 @@ async function loadTicks(sql: ReturnType<typeof neon>, symbol: string): Promise<
     ORDER BY tick_epoch ASC, id ASC
   `;
 
-  return rows.map((row: any) => ({
+  const ticks = rows.map((row: any) => ({
     price: Number(row.price),
     tick_epoch: Number(row.tick_epoch),
     tick_time: new Date(row.tick_time).toISOString(),
     source_tick_id: row.source_tick_id == null ? null : String(row.source_tick_id),
   })).filter((tick) => Number.isFinite(tick.price) && tick.price > 0 && Number.isSafeInteger(tick.tick_epoch));
+
+  if (ticks.length < 2) return ticks;
+
+  const ordered: RawTick[] = [];
+  let previousEpoch = -Infinity;
+  for (const tick of ticks) {
+    if (tick.tick_epoch < previousEpoch) continue;
+    if (tick.tick_epoch === previousEpoch && ordered.length) continue;
+    ordered.push(tick);
+    previousEpoch = tick.tick_epoch;
+  }
+  return ordered;
 }
 
 async function resolveAssetContext(sql: ReturnType<typeof neon>, symbol: string) {
@@ -133,9 +155,7 @@ async function resolveAssetContext(sql: ReturnType<typeof neon>, symbol: string)
     LIMIT 1
   `;
   const row = rows[0] as any;
-  return {
-    assetCategory: resolveAssetCategory(row?.asset_class, row?.market_type),
-  };
+  return { assetCategory: resolveAssetCategory(row?.asset_class, row?.market_type) };
 }
 
 function updateChecksum(hash: crypto.Hash, sample: DatasetSample) {
@@ -194,52 +214,92 @@ async function insertSamples(sql: ReturnType<typeof neon>, datasetId: string, sa
   }
 }
 
+export async function getDatasetBuilderSchema() {
+  const sql = getSql();
+  if (!sql || !(await initDbSchema())) throw new Error('Database is unavailable.');
+  await ensureDatasetSchemaRegistry(sql);
+  const [features, horizons] = await Promise.all([
+    getActiveFeatureSchema(sql),
+    getActiveHorizons(sql),
+  ]);
+  if (!features.length) throw new Error('No active dataset features are configured.');
+  if (!horizons.length) throw new Error('No active prediction horizons are configured.');
+  return {
+    featureCount: features.length,
+    featureSchemaVersion: getFeatureSchemaVersion(features),
+    requiredWindowTicks: getRequiredWindowTicks(features),
+    features,
+    horizons,
+  };
+}
+
 export async function buildTrainingDataset(request: DatasetBuildRequest): Promise<DatasetBuildResult> {
   const symbol = String(request.symbol ?? '').trim();
   if (!symbol) throw new Error('A Deriv symbol is required.');
 
-  const horizonTicks = normalizePositiveInteger(request.horizonTicks, DEFAULT_HORIZON_TICKS, 5000);
-  const windowTicks = normalizePositiveInteger(request.windowTicks, DEFAULT_WINDOW_TICKS, DEFAULT_WINDOW_TICKS);
-  if (windowTicks !== DEFAULT_WINDOW_TICKS) throw new Error('The canonical 37-feature schema requires a 300-tick feature window.');
-
+  const horizonTicks = normalizePositiveInteger(request.horizonTicks, 'horizonTicks', MAX_HORIZON_TICKS);
   const sql = getSql();
   if (!sql || !(await initDbSchema())) throw new Error('Database is unavailable or the Operations schema could not be initialized.');
+  await ensureDatasetSchemaRegistry(sql);
   await ensureDatasetSampleSchema(sql);
 
+  const [featureSchema, horizons] = await Promise.all([
+    getActiveFeatureSchema(sql),
+    getActiveHorizons(sql),
+  ]);
+  if (!featureSchema.length) throw new Error('No active dataset features are configured.');
+  const horizon = horizons.find((item) => item.tickCount === horizonTicks);
+  if (!horizon) throw new Error(`Horizon ${horizonTicks} ticks is not an active configured dataset horizon.`);
+
+  const windowTicks = getRequiredWindowTicks(featureSchema);
+  if (!Number.isSafeInteger(windowTicks) || windowTicks <= 0 || windowTicks > MAX_WINDOW_TICKS) {
+    throw new Error(`Configured feature window is invalid: ${windowTicks}.`);
+  }
+  const windowProfile = getWindowProfile(featureSchema);
+
   const ticks = await loadTicks(sql, symbol);
-  if (ticks.length < windowTicks + horizonTicks + 1) {
-    throw new Error(`Insufficient real Deriv ticks for ${symbol}. Need at least ${windowTicks + horizonTicks + 1}; found ${ticks.length}.`);
+  const minimumRequired = windowTicks + horizon.tickCount + 1;
+  if (ticks.length < minimumRequired) {
+    throw new Error(`Insufficient real Deriv ticks for ${symbol}. Need at least ${minimumRequired}; found ${ticks.length}.`);
   }
 
   const { assetCategory } = await resolveAssetContext(sql, symbol);
   const now = new Date();
+  const featureSchemaVersion = getFeatureSchemaVersion(featureSchema);
   const version = `v${now.toISOString().replace(/[-:.TZ]/g, '').slice(0, 14)}`;
-  const name = String(request.datasetName ?? `Deriv ${symbol} ${horizonTicks}-tick direction dataset`).trim().slice(0, 160);
+  const name = String(request.datasetName ?? `Deriv ${symbol} ${horizon.tickCount}-tick direction dataset`).trim().slice(0, 160);
   const datasetId = crypto.randomUUID();
   const hash = crypto.createHash('sha256');
 
   const firstUsableAnchor = windowTicks - 1;
-  const lastUsableAnchor = ticks.length - horizonTicks - 1;
+  const lastUsableAnchor = ticks.length - horizon.tickCount - 1;
   const totalCandidates = lastUsableAnchor - firstUsableAnchor + 1;
   const trainBoundary = firstUsableAnchor + Math.floor(totalCandidates * 0.70);
   const validationBoundary = firstUsableAnchor + Math.floor(totalCandidates * 0.85);
 
   const samples: DatasetSample[] = [];
   for (let anchorIndex = firstUsableAnchor; anchorIndex <= lastUsableAnchor; anchorIndex += 1) {
-    const outcomeIndex = anchorIndex + horizonTicks;
+    const outcomeIndex = anchorIndex + horizon.tickCount;
     const entry = ticks[anchorIndex];
     const outcome = ticks[outcomeIndex];
-    if (!entry || !outcome || entry.price === outcome.price) continue;
+    if (!entry || !outcome || outcome.tick_epoch <= entry.tick_epoch || entry.price === outcome.price) continue;
 
     const split = anchorIndex < trainBoundary ? 'train' : anchorIndex < validationBoundary ? 'validation' : 'test';
     const featureWindow = ticks.slice(anchorIndex - windowTicks + 1, anchorIndex + 1);
-    const tickPoints: TickPoint[] = featureWindow.map((tick) => ({ price: tick.price, timestamp: tick.tick_epoch * 1000 }));
+    if (featureWindow.length !== windowTicks) continue;
+
+    const tickPoints: TickPoint[] = featureWindow.map((tick) => ({
+      price: tick.price,
+      timestamp: tick.tick_epoch * 1000,
+    }));
     const features = extract37TickFeatures(tickPoints, {
       symbol,
       assetCategoryNum: assetCategory,
-      contractDurationSecs: horizonTicks,
+      contractDurationSecs: horizon.durationSeconds ?? horizon.tickCount,
+      windowProfile,
     });
-    const featureVector = featureObjToArray(features);
+    const featureVector = featureVectorFromRecord(features as unknown as Record<string, number>, featureSchema);
+
     const sample: DatasetSample = {
       sampleIndex: samples.length,
       split,
@@ -263,7 +323,11 @@ export async function buildTrainingDataset(request: DatasetBuildRequest): Promis
   const trainCount = samples.filter((sample) => sample.split === 'train').length;
   const validationCount = samples.filter((sample) => sample.split === 'validation').length;
   const testCount = samples.filter((sample) => sample.split === 'test').length;
-  const leakageCheckPassed = samples.every((sample) => sample.outcomeEpoch >= sample.anchorEpoch && sample.sourceWindowToEpoch === sample.anchorEpoch);
+  const leakageCheckPassed = samples.every((sample) => (
+    sample.outcomeEpoch > sample.anchorEpoch &&
+    sample.sourceWindowToEpoch === sample.anchorEpoch &&
+    sample.outcomeEpoch > sample.sourceWindowToEpoch
+  ));
   if (!leakageCheckPassed) throw new Error('Dataset leakage validation failed. No dataset was persisted.');
 
   const checksum = hash.digest('hex');
@@ -276,13 +340,17 @@ export async function buildTrainingDataset(request: DatasetBuildRequest): Promis
       label_schema_version, source_from, source_to, sample_count, train_count,
       validation_count, test_count, status, checksum, leakage_check_passed, metadata
     ) VALUES (
-      ${datasetId}, ${name}, ${version}, ${symbol}, ${horizonTicks}, ${FEATURE_SCHEMA_VERSION},
+      ${datasetId}, ${name}, ${version}, ${symbol}, ${horizon.tickCount}, ${featureSchemaVersion},
       ${LABEL_SCHEMA_VERSION}, ${sourceFrom}, ${sourceTo}, ${samples.length}, ${trainCount},
       ${validationCount}, ${testCount}, 'completed', ${checksum}, ${leakageCheckPassed},
       ${JSON.stringify({
         source: 'deriv',
         windowTicks,
-        featureCount: 37,
+        featureCount: featureSchema.length,
+        featureSchemaVersion,
+        featureKeys: featureSchema.map((feature) => feature.key),
+        horizonId: horizon.id,
+        horizonLabel: horizon.label,
         labelValues: ['RISE', 'FALL'],
         splitStrategy: 'chronological-70-15-15',
         excludedFlatSamples: totalCandidates - samples.length,
@@ -303,8 +371,10 @@ export async function buildTrainingDataset(request: DatasetBuildRequest): Promis
     name,
     version,
     symbol,
-    horizonTicks,
+    horizonTicks: horizon.tickCount,
     windowTicks,
+    featureCount: featureSchema.length,
+    featureSchemaVersion,
     sampleCount: samples.length,
     trainCount,
     validationCount,
@@ -320,6 +390,7 @@ export async function buildTrainingDataset(request: DatasetBuildRequest): Promis
 export async function listTrainingDatasets(symbol?: string) {
   const sql = getSql();
   if (!sql || !(await initDbSchema())) return [];
+  await ensureDatasetSchemaRegistry(sql);
   await ensureDatasetSampleSchema(sql);
   if (symbol) {
     return await sql`
