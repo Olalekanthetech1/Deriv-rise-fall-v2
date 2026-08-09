@@ -115,7 +115,7 @@ COPY --from=deps /app/scripts ./scripts
 # layer so a stale Render/Docker source layer cannot survive a
 # source-boundary fix.
 # ------------------------------------------------------------
-ARG APP_SOURCE_REV=23b73c4
+ARG APP_SOURCE_REV=9cb8349
 RUN echo "Building application source revision: ${APP_SOURCE_REV}"
 
 # ------------------------------------------------------------
@@ -226,3 +226,11 @@ COPY --from=builder /app/scripts ./scripts
 # Ensure runtime user owns application files
 # ------------------------------------------------------------
 RUN chown -R nextjs:nodejs /app
+
+# ------------------------------------------------------------
+# Start the production server.
+# Explicit CMD is required for Docker/Render; without it the
+# container builds successfully but exits immediately at runtime.
+# ------------------------------------------------------------
+USER nextjs
+CMD ["npm", "run", "start"]
