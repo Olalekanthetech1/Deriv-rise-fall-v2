@@ -1,6 +1,6 @@
 import { NextRequest, NextResponse } from 'next/server';
 import { verifySessionToken } from '../auth/route';
-import { buildAllSupportedDurationDatasets, buildDurationTrainingDataset, getSupportedDurationDiscovery, listDurationTrainingDatasets } from '@/lib/training-dataset-builder-duration';
+import { buildAllSupportedDurationDatasets, buildDurationTrainingDataset, getSupportedDurationDiscovery, listDurationTrainingDatasets } from '@/lib/training-dataset-builder-duration-v2';
 import { expandTrainingDurations } from '@/lib/deriv-duration-registry';
 
 function isAuthenticated(req: NextRequest): boolean {
@@ -31,13 +31,11 @@ export async function POST(req: NextRequest) {
     const body = await req.json().catch(() => ({}));
     const symbol = typeof body?.symbol === 'string' ? body.symbol.trim().toUpperCase() : '';
     if (!symbol) return NextResponse.json({ success: false, error: 'A Deriv symbol is required.' }, { status: 400, headers: noStore() });
-
     const discovery = await getSupportedDurationDiscovery(symbol);
     if (body?.buildAllSupportedHorizons === true) {
       const result = await buildAllSupportedDurationDatasets(symbol);
       return NextResponse.json({ success: true, dataSource: 'deriv-real-ticks', durationSource: discovery.source, result }, { status: 201, headers: noStore() });
     }
-
     const legacyHorizon = body?.horizonTicks;
     const durationValue = legacyHorizon != null ? Number(legacyHorizon) : Number(body?.durationValue);
     const durationUnit = legacyHorizon != null ? 't' : body?.durationUnit;
@@ -45,16 +43,12 @@ export async function POST(req: NextRequest) {
     const datasetName = typeof body?.datasetName === 'string' ? body.datasetName.trim() : undefined;
     const requestedContractType = typeof body?.contractType === 'string' ? body.contractType.trim() : undefined;
     const durationRangeId = typeof body?.durationRangeId === 'string' ? body.durationRangeId.trim() : undefined;
-
     if (!Number.isSafeInteger(durationValue) || durationValue <= 0) return NextResponse.json({ success: false, error: 'A broker-discovered positive duration value is required.' }, { status: 400, headers: noStore() });
     if (!validUnit(durationUnit)) return NextResponse.json({ success: false, error: 'A valid Deriv duration unit (ticks, seconds, minutes, hours, or days) is required.' }, { status: 400, headers: noStore() });
-
     const supported = matchingRanges(discovery, durationValue, durationUnit);
     if (!supported.length) return NextResponse.json({ success: false, error: `Deriv does not currently advertise ${durationValue}${durationUnit} for ${symbol}.` }, { status: 422, headers: noStore() });
-
     const discoveredContractTypes = Array.from(new Set(supported.flatMap((range) => range.tradeTypes))).filter(Boolean).join(',').slice(0, 64) || undefined;
-    const contractType = requestedContractType || discoveredContractTypes;
-    const result = await buildDurationTrainingDataset({ symbol, durationValue, durationUnit, windowTicks, datasetName, contractType, durationRangeId });
+    const result = await buildDurationTrainingDataset({ symbol, durationValue, durationUnit, windowTicks, datasetName, contractType: requestedContractType || discoveredContractTypes, durationRangeId });
     return NextResponse.json({ success: true, dataSource: 'deriv-real-ticks', durationSource: discovery.source, dataset: result }, { status: 201, headers: noStore() });
   } catch (error) {
     const message = error instanceof Error ? error.message : 'Training dataset construction failed.';
