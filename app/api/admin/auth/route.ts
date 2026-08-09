@@ -38,6 +38,10 @@ function getRequestId(req: NextRequest): string {
   return req.headers.get('x-request-id')?.trim() || crypto.randomUUID();
 }
 
+function noStoreHeaders() {
+  return { 'Cache-Control': 'no-store, max-age=0' };
+}
+
 export function verifySessionToken(token: string | undefined | null): boolean {
   const secret = getConfiguredSecret();
   if (!secret || !token) return false;
@@ -65,17 +69,22 @@ function getRequestIp(req: NextRequest): string {
     || 'unknown';
 }
 
-export async function GET(req: NextRequest) {
-  const isConfigured = Boolean(getConfiguredSecret());
-  const cookieToken = req.cookies.get('admin_session_token')?.value;
-  const headerToken = req.headers.get('x-admin-token') || req.headers.get('authorization')?.replace(/^Bearer\s+/i, '');
-  const isAuthenticated = verifySessionToken(cookieToken) || verifySessionToken(headerToken);
+function getPresentedToken(req: NextRequest): string | undefined {
+  return req.cookies.get('admin_session_token')?.value
+    || req.headers.get('x-admin-token')
+    || req.headers.get('authorization')?.replace(/^Bearer\s+/i, '');
+}
 
-  return NextResponse.json({
-    isAuthenticated,
-    configured: isConfigured,
-    serverTime: new Date().toISOString(),
-  });
+export async function GET(req: NextRequest) {
+  const isAuthenticated = verifySessionToken(getPresentedToken(req));
+
+  return NextResponse.json(
+    {
+      isAuthenticated,
+      ...(isAuthenticated ? { configured: Boolean(getConfiguredSecret()) } : {}),
+    },
+    { headers: noStoreHeaders() },
+  );
 }
 
 export async function POST(req: NextRequest) {
@@ -90,7 +99,7 @@ export async function POST(req: NextRequest) {
     });
     return NextResponse.json(
       { success: false, error: 'Admin authentication is not configured. Set ADMIN_SECRET_KEY in the deployment environment.' },
-      { status: 503 }
+      { status: 503, headers: noStoreHeaders() },
     );
   }
 
@@ -111,7 +120,7 @@ export async function POST(req: NextRequest) {
         error: `Too many failed attempts. Admin access locked for ${remainingSeconds} seconds.`,
         lockoutRemainingSeconds: remainingSeconds,
       },
-      { status: 429 }
+      { status: 429, headers: noStoreHeaders() },
     );
   }
 
@@ -124,7 +133,7 @@ export async function POST(req: NextRequest) {
         category: 'security', severity: 'warn', service: 'admin-auth', eventType: 'auth_missing_key',
         message: 'Admin authentication request did not include a valid passkey value.', requestId,
       });
-      return NextResponse.json({ success: false, error: 'Admin passkey is required.' }, { status: 400 });
+      return NextResponse.json({ success: false, error: 'Admin passkey is required.' }, { status: 400, headers: noStoreHeaders() });
     }
 
     const provided = Buffer.from(key);
@@ -152,7 +161,7 @@ export async function POST(req: NextRequest) {
           attemptsRemaining: Math.max(0, MAX_FAILED_ATTEMPTS - attempt.count),
           isLockedOut: attempt.count >= MAX_FAILED_ATTEMPTS,
         },
-        { status: 401 }
+        { status: 401, headers: noStoreHeaders() },
       );
     }
 
@@ -160,11 +169,14 @@ export async function POST(req: NextRequest) {
 
     const timestamp = Date.now();
     const token = generateSessionToken(timestamp, configuredSecret);
-    const response = NextResponse.json({
-      success: true,
-      message: 'Admin authorization granted successfully.',
-      expiresAt: timestamp + SESSION_TTL_MS,
-    });
+    const response = NextResponse.json(
+      {
+        success: true,
+        message: 'Admin authorization granted successfully.',
+        expiresAt: timestamp + SESSION_TTL_MS,
+      },
+      { headers: noStoreHeaders() },
+    );
 
     response.cookies.set('admin_session_token', token, {
       httpOnly: true,
@@ -185,7 +197,7 @@ export async function POST(req: NextRequest) {
       category: 'security', severity: 'warn', service: 'admin-auth', eventType: 'auth_malformed_request',
       message: 'Admin authentication request could not be parsed.', requestId,
     });
-    return NextResponse.json({ success: false, error: 'Malformed request.' }, { status: 400 });
+    return NextResponse.json({ success: false, error: 'Malformed request.' }, { status: 400, headers: noStoreHeaders() });
   }
 }
 
@@ -196,10 +208,13 @@ export async function DELETE(req: NextRequest) {
     message: 'Admin session logout requested.', requestId,
   });
 
-  const response = NextResponse.json({
-    success: true,
-    message: 'Admin logged out successfully.',
-  });
+  const response = NextResponse.json(
+    {
+      success: true,
+      message: 'Admin logged out successfully.',
+    },
+    { headers: noStoreHeaders() },
+  );
 
   response.cookies.set('admin_session_token', '', {
     httpOnly: true,
