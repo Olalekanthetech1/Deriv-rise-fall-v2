@@ -2,16 +2,13 @@ import WebSocket from 'ws';
 import { openDerivPublicWebSocket } from './deriv-public-websocket';
 
 export type DerivDurationUnit = 't' | 's' | 'm' | 'h' | 'd';
-export type DerivDurationRange = { id: string; unit: DerivDurationUnit; min: number; max: number; tradeTypes: string[]; source: 'deriv-proposal-probe' };
+export type DerivDurationRange = { id: string; unit: DerivDurationUnit; min: number; max: number; step: number; tradeTypes: string[]; source: 'deriv-proposal-probe' };
 export type DerivDurationDiscovery = { symbol: string; ranges: DerivDurationRange[]; fetchedAt: string; source: 'deriv-proposal-probe' };
 type RecordLike = Record<string, unknown>;
 type ContractCapability = { type: string; expiryType: string; probe: Record<string, unknown> };
 
 const MAX_PROBE: Record<DerivDurationUnit, number> = { t: 1000, s: 86400, m: 1440, h: 168, d: 365 };
 const PROBE_SEEDS: Record<DerivDurationUnit, number[]> = {
-  // Do not assume that 1 is a valid broker duration. Many contracts have a
-  // minimum duration greater than one, so discovery must find a valid seed
-  // before attempting to bracket the supported range.
   t: [1, 2, 3, 5, 10, 15, 20, 30, 60, 100, 200, 500, 1000],
   s: [1, 2, 5, 10, 15, 20, 30, 60, 120, 300, 600, 900, 1800, 3600, 7200, 14400, 28800, 43200, 86400],
   m: [1, 2, 5, 10, 15, 30, 60, 120, 240, 480, 720, 1440],
@@ -21,6 +18,7 @@ const PROBE_SEEDS: Record<DerivDurationUnit, number[]> = {
 const DISCOVERY_TTL_MS = 10 * 60 * 1000;
 const PROBE_INTERVAL_MS = 1000;
 const MAX_RATE_LIMIT_RETRIES = 2;
+const STEP_DISCOVERY_WINDOW = 128;
 const PROBEABLE_TYPES = new Set(['CALL', 'PUT', 'CALLE', 'PUTE', 'UPORDOWN', 'MULTUP', 'MULTDOWN', 'TICKHIGH', 'TICKLOW', 'RESETCALL', 'RESETPUT']);
 const ALL_DURATION_UNITS: DerivDurationUnit[] = ['t', 's', 'm', 'h', 'd'];
 const cache = new Map<string, { value: DerivDurationDiscovery; expiresAt: number }>();
@@ -100,9 +98,6 @@ function contractCapabilities(response: RecordLike): ContractCapability[] {
 }
 
 function unitsForExpiryType(expiryType: string): DerivDurationUnit[] {
-  // expiry_type is advisory metadata only. The proposal endpoint is the
-  // authority for the actual duration unit/value. We therefore keep the
-  // hint for documentation but probe every supported Deriv duration unit.
   void expiryType;
   return ALL_DURATION_UNITS;
 }
@@ -121,46 +116,66 @@ async function findValidSeed(session: DerivDiscoverySession, symbol: string, cap
   return null;
 }
 
-async function discoverUnit(session: DerivDiscoverySession, symbol: string, capabilities: ContractCapability[], unit: DerivDurationUnit): Promise<{ range: { min: number; max: number }; capability: ContractCapability } | null> {
+async function findStep(session: DerivDiscoverySession, symbol: string, capability: ContractCapability, unit: DerivDurationUnit, min: number, max: number): Promise<number | null> {
+  if (min >= max) return 1;
+  const upper = Math.min(max, min + STEP_DISCOVERY_WINDOW);
+  for (let value = min + 1; value <= upper; value += 1) {
+    if (await session.proposal(symbol, capability, value, unit)) return value - min;
+  }
+  return null;
+}
+
+async function discoverUnit(session: DerivDiscoverySession, symbol: string, capabilities: ContractCapability[], unit: DerivDurationUnit): Promise<{ range: { min: number; max: number; step: number }; capability: ContractCapability } | null> {
   const ordered = [...capabilities].sort((a, b) => capabilityPriority(a) - capabilityPriority(b));
   for (const capability of ordered) {
     if (!unitsForExpiryType(capability.expiryType).includes(unit)) continue;
     const seed = await findValidSeed(session, symbol, capability, unit);
     if (seed === null) continue;
 
-    // Once a valid seed is found, locate the lowest supported duration.
-    // We cannot assume that duration=1 is valid, so search the values below
-    // the seed directly. The broker remains the source of truth.
     let validMin = seed;
     for (let value = seed - 1; value >= 1; value -= 1) {
       if (await session.proposal(symbol, capability, value, unit)) validMin = value;
       else break;
     }
 
+    const step = await findStep(session, symbol, capability, unit, validMin, MAX_PROBE[unit]);
+    if (step === null) continue;
+
     const max = MAX_PROBE[unit];
-    let validMax = seed;
+    let validMax = validMin;
     let invalidUpper: number | null = null;
-    let next = Math.max(seed + 1, seed * 2);
+    let next = validMin + step;
     while (next <= max) {
       if (await session.proposal(symbol, capability, next, unit)) {
         validMax = next;
-        next = Math.max(next + 1, next * 2);
+        next += step;
       } else {
         invalidUpper = next;
         break;
       }
     }
-    if (invalidUpper !== null) {
-      let left = validMax; let right = invalidUpper;
-      while (left + 1 < right) {
-        const mid = Math.floor((left + right) / 2);
-        if (await session.proposal(symbol, capability, mid, unit)) left = mid; else right = mid;
-      }
-      validMax = left;
-    } else {
-      validMax = Math.min(validMax, max);
+
+    // The previous implementation stopped at the last exponential probe and
+    // could incorrectly report 61440s as the maximum simply because 86400s was
+    // never tested. Always test the broker's configured upper bound before
+    // concluding that the discovered range ends below it.
+    if (invalidUpper === null) {
+      if (await session.proposal(symbol, capability, max, unit)) validMax = max;
+      else invalidUpper = max;
     }
-    return { range: { min: validMin, max: validMax }, capability };
+
+    if (invalidUpper !== null && validMax < invalidUpper) {
+      // Preserve the discovered step while finding the final supported point.
+      // Only values on the broker-verified progression are tested.
+      let candidate = validMax + step;
+      while (candidate < invalidUpper) {
+        const accepted = await session.proposal(symbol, capability, candidate, unit);
+        if (accepted) validMax = candidate;
+        candidate += step;
+      }
+    }
+
+    return { range: { min: validMin, max: validMax, step }, capability };
   }
   return null;
 }
@@ -173,15 +188,12 @@ async function discover(symbol: string): Promise<DerivDurationDiscovery> {
     const capabilities = contractCapabilities(contracts);
     if (!capabilities.length) throw new Error(`Deriv returned no duration-probeable contracts for ${symbol}.`);
 
-    // Build the duration registry from the union of broker contract
-    // capabilities. Each unit/value is verified with a real proposal before
-    // it enters the registry; no UI duration is hardcoded as supported.
     const units = ALL_DURATION_UNITS.filter(unit => capabilities.some(c => unitsForExpiryType(c.expiryType).includes(unit)));
     const ranges: DerivDurationRange[] = [];
     for (const unit of units) {
       const result = await discoverUnit(session, symbol, capabilities, unit);
       if (!result) continue;
-      ranges.push({ id: `${symbol}:${result.capability.type}:${unit}:${result.range.min}-${result.range.max}`, unit, min: result.range.min, max: result.range.max, tradeTypes: [result.capability.type], source: 'deriv-proposal-probe' });
+      ranges.push({ id: `${symbol}:${result.capability.type}:${unit}:${result.range.min}-${result.range.max}:${result.range.step}`, unit, min: result.range.min, max: result.range.max, step: result.range.step, tradeTypes: [result.capability.type], source: 'deriv-proposal-probe' });
     }
     if (!ranges.length) throw new Error(`Deriv proposal capability probing found no supported durations for ${symbol}.`);
     return { symbol, ranges, fetchedAt: new Date().toISOString(), source: 'deriv-proposal-probe' };
@@ -203,12 +215,20 @@ export function durationToSeconds(value: number, unit: DerivDurationUnit): numbe
 }
 export function durationLabel(value: number, unit: DerivDurationUnit): string { return `${value} ${{ t: 'ticks', s: 'seconds', m: 'minutes', h: 'hours', d: 'days' }[unit]}`; }
 export function durationRangeLabel(range: DerivDurationRange): string { return range.min === range.max ? durationLabel(range.min, range.unit) : `${durationLabel(range.min, range.unit)} – ${durationLabel(range.max, range.unit)}`; }
-export function expandTrainingDurations(ranges: DerivDurationRange[], maxExpandedPerRange = 128): Array<{ value: number; unit: DerivDurationUnit; rangeId: string }> {
+export function expandTrainingDurations(ranges: DerivDurationRange[], maxExpandedPerRange = 10000): Array<{ value: number; unit: DerivDurationUnit; rangeId: string }> {
   const result: Array<{ value: number; unit: DerivDurationUnit; rangeId: string }> = [];
   for (const range of ranges) {
-    const span = range.max - range.min;
-    if (span <= maxExpandedPerRange) for (let value = range.min; value <= range.max; value += 1) result.push({ value, unit: range.unit, rangeId: range.id });
-    else { result.push({ value: range.min, unit: range.unit, rangeId: range.id }); result.push({ value: range.max, unit: range.unit, rangeId: range.id }); }
+    const step = Number.isSafeInteger(range.step) && range.step > 0 ? range.step : 1;
+    const count = Math.floor((range.max - range.min) / step) + 1;
+    if (count <= maxExpandedPerRange) {
+      for (let value = range.min; value <= range.max; value += step) result.push({ value, unit: range.unit, rangeId: range.id });
+    } else {
+      // Do not fabricate unsupported intermediate values. For unusually large
+      // broker ranges, retain only broker-verified endpoints rather than
+      // silently treating every integer as supported.
+      result.push({ value: range.min, unit: range.unit, rangeId: range.id });
+      result.push({ value: range.max, unit: range.unit, rangeId: range.id });
+    }
   }
   const seen = new Set<string>();
   return result.filter(item => { const key = `${item.value}:${item.unit}`; if (seen.has(key)) return false; seen.add(key); return true; });
