@@ -10,7 +10,13 @@ function isAuthenticated(req: NextRequest): boolean {
 }
 function noStore() { return { 'Cache-Control': 'no-store, max-age=0' }; }
 function validUnit(value: unknown): value is 't' | 's' | 'm' | 'h' | 'd' { return value === 't' || value === 's' || value === 'm' || value === 'h' || value === 'd'; }
-function matchingRanges(discovery: Awaited<ReturnType<typeof getSupportedDurationDiscovery>>, value: number, unit: 't' | 's' | 'm' | 'h' | 'd') { return discovery.ranges.filter((range) => range.unit === unit && value >= range.min && value <= range.max); }
+function matchingRanges(discovery: Awaited<ReturnType<typeof getSupportedDurationDiscovery>>, value: number, unit: 't' | 's' | 'm' | 'h' | 'd') {
+  return discovery.ranges.filter((range) => {
+    if (range.unit !== unit || value < range.min || value > range.max) return false;
+    const step = Number.isSafeInteger(range.step) && range.step > 0 ? range.step : 1;
+    return (value - range.min) % step === 0;
+  });
+}
 
 export async function GET(req: NextRequest) {
   if (!isAuthenticated(req)) return NextResponse.json({ error: 'Unauthorized admin access.' }, { status: 401, headers: noStore() });
