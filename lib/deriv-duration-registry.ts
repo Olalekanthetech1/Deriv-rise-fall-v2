@@ -27,10 +27,7 @@ class DerivDiscoverySession {
   private sequence = 0;
   private lastProposalAt = 0;
 
-  async connect(timeoutMs = 10000): Promise<void> {
-    this.ws = await openDerivPublicWebSocket(timeoutMs);
-  }
-
+  async connect(timeoutMs = 10000): Promise<void> { this.ws = await openDerivPublicWebSocket(timeoutMs); }
   close(): void { try { this.ws?.close(); } catch {} this.ws = null; }
 
   async request(request: RecordLike, expected: string, timeoutMs = 10000): Promise<RecordLike> {
@@ -66,16 +63,7 @@ class DerivDiscoverySession {
     for (let attempt = 0; attempt <= MAX_RATE_LIMIT_RETRIES; attempt += 1) {
       this.lastProposalAt = Date.now();
       try {
-        await this.request({
-          proposal: 1,
-          amount: 1,
-          basis: 'stake',
-          contract_type: contractType,
-          currency: process.env.DERIV_DISCOVERY_CURRENCY?.trim().toUpperCase() || 'USD',
-          duration: value,
-          duration_unit: unit,
-          underlying_symbol: symbol,
-        }, 'proposal', 8000);
+        await this.request({ proposal: 1, amount: 1, basis: 'stake', contract_type: contractType, currency: process.env.DERIV_DISCOVERY_CURRENCY?.trim().toUpperCase() || 'USD', duration: value, duration_unit: unit, underlying_symbol: symbol }, 'proposal', 8000);
         return true;
       } catch (error) {
         if (!isRateLimited(error) || attempt === MAX_RATE_LIMIT_RETRIES) return false;
@@ -87,12 +75,20 @@ class DerivDiscoverySession {
 }
 
 function contractCapabilities(response: RecordLike): ContractCapability[] {
-  const available = asRecord(response.contracts_for)?.available;
+  const contractsFor = asRecord(response.contracts_for);
+  const available = contractsFor?.available;
   if (!Array.isArray(available)) return [];
-  return Array.from(new Map(available.map(asRecord).filter(Boolean).map(c => {
-    const type = String(c!.contract_type ?? c!.trade_type ?? '').trim().toUpperCase();
-    return [type, { type, expiryType: String(c!.expiry_type ?? '').trim().toLowerCase() } as ContractCapability];
-  }).filter(([type]) => isRiseFall(type)))).map(([, capability]) => capability);
+
+  const capabilitiesByType = new Map<string, ContractCapability>();
+  for (const item of available) {
+    const contract = asRecord(item);
+    if (!contract) continue;
+    const type = String(contract.contract_type ?? contract.trade_type ?? '').trim().toUpperCase();
+    if (!isRiseFall(type)) continue;
+    const expiryType = String(contract.expiry_type ?? '').trim().toLowerCase();
+    capabilitiesByType.set(type, { type, expiryType });
+  }
+  return Array.from(capabilitiesByType.values());
 }
 
 function unitsForExpiryType(expiryType: string): DerivDurationUnit[] {
@@ -140,9 +136,6 @@ async function discover(symbol: string): Promise<DerivDurationDiscovery> {
     const capabilities = contractCapabilities(contracts);
     if (!capabilities.length) throw new Error(`Deriv returned no Rise/Fall contract types for ${symbol}.`);
 
-    // Probe one concrete Rise/Fall contract only. The selected contract's expiry
-    // metadata determines which duration units are worth testing, avoiding the
-    // previous 50+ proposal storm that triggered HTTP/API 429 responses.
     const preferred = capabilities.find(c => c.type === 'CALL' || c.type === 'PUT') ?? capabilities[0];
     const ranges: DerivDurationRange[] = [];
     for (const unit of unitsForExpiryType(preferred.expiryType)) {
