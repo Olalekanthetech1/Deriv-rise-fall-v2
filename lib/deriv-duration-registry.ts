@@ -68,63 +68,77 @@ async function probeProposal(symbol: string, contractType: string, value: number
 
 async function discoverUnit(symbol: string, contractType: string, unit: DerivDurationUnit): Promise<{ min: number; max: number } | null> {
   const candidates = SEED_VALUES[unit].filter(v => v <= MAX_PROBE[unit]);
-  const valid: number[] = [];
-  for (const value of candidates) if (await probeProposal(symbol, contractType, value, unit)) valid.push(value);
-  if (!valid.length) return null;
+  const validSeeds: number[] = [];
+  for (const value of candidates) if (await probeProposal(symbol, contractType, value, unit)) validSeeds.push(value);
+  if (!validSeeds.length) return null;
 
-  const seed = Math.min(...valid);
+  const seed = Math.min(...validSeeds);
   let min = seed;
-  for (let v = Math.max(1, Math.floor(seed / 2)); v >= 1; v = Math.floor(v / 2)) {
-    if (await probeProposal(symbol, contractType, v, unit)) min = v;
-    if (v === 1) break;
+  if (seed > 1) {
+    if (await probeProposal(symbol, contractType, 1, unit)) min = 1;
+    else {
+      let left = 1;
+      let right = seed;
+      while (left + 1 < right) {
+        const mid = Math.floor((left + right) / 2);
+        if (await probeProposal(symbol, contractType, mid, unit)) right = mid;
+        else left = mid;
+      }
+      min = right;
+    }
   }
 
-  let low = Math.max(seed, min), high = low;
-  while (high < MAX_PROBE[unit]) {
-    const next = Math.min(MAX_PROBE[unit], high * 2);
-    if (next === high || !(await probeProposal(symbol, contractType, next, unit))) break;
-    high = next;
+  let validMax = seed;
+  let invalidUpper: number | null = null;
+  while (validMax < MAX_PROBE[unit]) {
+    const next = Math.min(MAX_PROBE[unit], validMax * 2);
+    if (next === validMax) break;
+    if (await probeProposal(symbol, contractType, next, unit)) validMax = next;
+    else { invalidUpper = next; break; }
   }
-  if (high > low) {
-    let lo = high, hi = Math.min(MAX_PROBE[unit], high * 2);
-    if (hi > high && await probeProposal(symbol, contractType, hi, unit)) { low = high; high = hi; }
-    let left = low, right = high;
+
+  if (invalidUpper !== null) {
+    let left = validMax;
+    let right = invalidUpper;
     while (left + 1 < right) {
       const mid = Math.floor((left + right) / 2);
-      if (await probeProposal(symbol, contractType, mid, unit)) left = mid; else right = mid;
+      if (await probeProposal(symbol, contractType, mid, unit)) left = mid;
+      else right = mid;
     }
-    high = left;
+    validMax = left;
   }
-  return { min, max: high };
+
+  return { min, max: validMax };
 }
 
 export async function getDerivDurationDiscovery(symbol: string): Promise<DerivDurationDiscovery> {
   const normalized = String(symbol ?? '').trim().toUpperCase();
   if (!normalized) throw new Error('A Deriv symbol is required for duration discovery.');
 
+  // Current Deriv contracts_for exposes which contract types are available,
+  // but its current response no longer contains duration boundaries. Duration
+  // capability is therefore discovered by live proposal validation instead of
+  // inventing ranges from removed/legacy response fields.
   const contracts = await requestDeriv(normalized, { contracts_for: normalized }, 'contracts_for');
   const types = contractTypes(contracts);
   if (!types.length) throw new Error(`Deriv returned no Rise/Fall contract types for ${normalized}.`);
 
-  const ranges: DerivDurationRange[] = [];
-  for (const contractType of types.slice(0, 2)) {
+  const preferred = types.find(t => t === 'CALL' || t === 'PUT') ?? types[0];
+  const orderedTypes = [preferred, ...types.filter(t => t !== preferred)].slice(0, 2);
+  let ranges: DerivDurationRange[] = [];
+
+  for (const contractType of orderedTypes) {
+    const discovered: DerivDurationRange[] = [];
     for (const unit of UNITS) {
-      const discovered = await discoverUnit(normalized, contractType, unit);
-      if (discovered) ranges.push({ id: `${normalized}:${contractType}:${unit}:${discovered.min}-${discovered.max}`, unit, min: discovered.min, max: discovered.max, tradeTypes: [contractType], source: 'deriv-proposal-probe' });
+      const range = await discoverUnit(normalized, contractType, unit);
+      if (range) discovered.push({ id: `${normalized}:${contractType}:${unit}:${range.min}-${range.max}`, unit, min: range.min, max: range.max, tradeTypes: [contractType], source: 'deriv-proposal-probe' });
     }
+    if (discovered.length) { ranges = discovered; break; }
   }
 
-  const merged = new Map<string, DerivDurationRange>();
-  for (const range of ranges) {
-    const key = `${range.unit}:${range.min}:${range.max}`;
-    const existing = merged.get(key);
-    if (existing) existing.tradeTypes = Array.from(new Set([...existing.tradeTypes, ...range.tradeTypes])).sort();
-    else merged.set(key, { ...range });
-  }
-  const ordered = Array.from(merged.values()).sort((a, b) => UNITS.indexOf(a.unit) - UNITS.indexOf(b.unit) || a.min - b.min || a.max - b.max);
-  if (!ordered.length) throw new Error(`Deriv proposal capability probing found no supported Rise/Fall durations for ${normalized}.`);
+  if (!ranges.length) throw new Error(`Deriv proposal capability probing found no supported Rise/Fall durations for ${normalized}.`);
 
-  return { symbol: normalized, ranges: ordered, fetchedAt: new Date().toISOString(), source: 'deriv-proposal-probe' };
+  return { symbol: normalized, ranges, fetchedAt: new Date().toISOString(), source: 'deriv-proposal-probe' };
 }
 
 export function durationToSeconds(value: number, unit: DerivDurationUnit): number | null { if (!Number.isSafeInteger(value) || value <= 0) return null; if (unit === 't') return null; return value * ({ s: 1, m: 60, h: 3600, d: 86400 } as Record<Exclude<DerivDurationUnit, 't'>, number>)[unit]; }
