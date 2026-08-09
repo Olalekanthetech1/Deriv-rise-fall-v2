@@ -1,7 +1,7 @@
 import crypto from 'crypto';
 import { NextRequest, NextResponse } from 'next/server';
 import { verifySessionToken } from '../auth/route';
-import { buildAllSupportedDurationDatasets, buildDurationTrainingDataset, getSupportedDurationDiscovery, listDurationTrainingDatasets } from '@/lib/training-dataset-builder-duration-v2';
+import { buildDurationTrainingDataset, getSupportedDurationDiscovery, listDurationTrainingDatasets } from '@/lib/training-dataset-builder-duration-v2';
 import { expandTrainingDurations, type DerivDurationRange, type DerivDurationUnit } from '@/lib/deriv-duration-registry';
 
 function isAuthenticated(req: NextRequest): boolean {
@@ -38,71 +38,32 @@ function expandTrainingHorizonLadder(ranges: DerivDurationRange[]): Array<{ valu
       if (value > range.max) break;
       result.push({ value, unit: range.unit, rangeId: range.id });
     }
-    if (!result.some((item) => item.rangeId === range.id && item.value === range.max)) {
-      result.push({ value: range.max, unit: range.unit, rangeId: range.id });
-    }
+    if (!result.some((item) => item.rangeId === range.id && item.value === range.max)) result.push({ value: range.max, unit: range.unit, rangeId: range.id });
   }
   const seen = new Set<string>();
-  return result.filter((item) => {
-    const key = `${item.value}:${item.unit}`;
-    if (seen.has(key)) return false;
-    seen.add(key);
-    return true;
-  });
+  return result.filter((item) => { const key = `${item.value}:${item.unit}`; if (seen.has(key)) return false; seen.add(key); return true; });
 }
 
-type AutoJob = {
-  id: string;
-  symbol: string;
-  status: 'running' | 'completed' | 'failed';
-  requestedCount: number;
-  completedCount: number;
-  failedCount: number;
-  failures: Array<{ value: number; unit: DerivDurationUnit; error: string }>;
-  startedAt: string;
-  finishedAt?: string;
-};
-
+type AutoJob = { id: string; symbol: string; status: 'running' | 'completed' | 'failed'; requestedCount: number; completedCount: number; failedCount: number; failures: Array<{ value: number; unit: DerivDurationUnit; error: string }>; startedAt: string; finishedAt?: string };
 const autoJobs = new Map<string, AutoJob>();
 const activeAutoJobs = new Map<string, string>();
 
 function startAutoBuild(symbol: string, discovery: Awaited<ReturnType<typeof getSupportedDurationDiscovery>>): AutoJob {
   const existingId = activeAutoJobs.get(symbol);
-  if (existingId) {
-    const existing = autoJobs.get(existingId);
-    if (existing?.status === 'running') return existing;
-    activeAutoJobs.delete(symbol);
-  }
-
+  if (existingId) { const existing = autoJobs.get(existingId); if (existing?.status === 'running') return existing; activeAutoJobs.delete(symbol); }
   const durations = expandTrainingHorizonLadder(discovery.ranges);
-  const job: AutoJob = {
-    id: crypto.randomUUID(), symbol, status: 'running', requestedCount: durations.length,
-    completedCount: 0, failedCount: 0, failures: [], startedAt: new Date().toISOString(),
-  };
-  autoJobs.set(job.id, job);
-  activeAutoJobs.set(symbol, job.id);
-
+  const job: AutoJob = { id: crypto.randomUUID(), symbol, status: 'running', requestedCount: durations.length, completedCount: 0, failedCount: 0, failures: [], startedAt: new Date().toISOString() };
+  autoJobs.set(job.id, job); activeAutoJobs.set(symbol, job.id);
   void (async () => {
     try {
       for (const duration of durations) {
-        try {
-          await buildDurationTrainingDataset({ symbol, durationValue: duration.value, durationUnit: duration.unit, durationRangeId: duration.rangeId });
-          job.completedCount += 1;
-        } catch (error) {
-          job.failedCount += 1;
-          job.failures.push({ value: duration.value, unit: duration.unit, error: error instanceof Error ? error.message : String(error) });
-        }
+        try { await buildDurationTrainingDataset({ symbol, durationValue: duration.value, durationUnit: duration.unit, durationRangeId: duration.rangeId }); job.completedCount += 1; }
+        catch (error) { job.failedCount += 1; job.failures.push({ value: duration.value, unit: duration.unit, error: error instanceof Error ? error.message : String(error) }); }
       }
       job.status = 'completed';
-    } catch (error) {
-      job.status = 'failed';
-      job.failures.push({ value: 0, unit: 't', error: error instanceof Error ? error.message : String(error) });
-    } finally {
-      job.finishedAt = new Date().toISOString();
-      activeAutoJobs.delete(symbol);
-    }
+    } catch (error) { job.status = 'failed'; job.failures.push({ value: 0, unit: 't', error: error instanceof Error ? error.message : String(error) }); }
+    finally { job.finishedAt = new Date().toISOString(); activeAutoJobs.delete(symbol); }
   })();
-
   return job;
 }
 
@@ -111,18 +72,12 @@ export async function GET(req: NextRequest) {
   try {
     const symbol = req.nextUrl.searchParams.get('symbol')?.trim().toUpperCase() || undefined;
     const autoJobId = req.nextUrl.searchParams.get('autoJobId')?.trim();
-    if (autoJobId) {
-      const job = autoJobs.get(autoJobId);
-      if (!job) return NextResponse.json({ success: false, error: 'AUTO dataset build job was not found on this application instance.' }, { status: 404, headers: noStore() });
-      return NextResponse.json({ success: true, job }, { headers: noStore() });
-    }
+    if (autoJobId) { const job = autoJobs.get(autoJobId); if (!job) return NextResponse.json({ success: false, error: 'AUTO dataset build job was not found on this application instance.' }, { status: 404, headers: noStore() }); return NextResponse.json({ success: true, job }, { headers: noStore() }); }
     const datasets = await listDurationTrainingDatasets(symbol);
     if (!symbol) return NextResponse.json({ success: true, datasets, durationSource: 'deriv-dynamic' }, { headers: noStore() });
     const discovery = await getSupportedDurationDiscovery(symbol);
     return NextResponse.json({ success: true, datasets, durationSource: discovery.source, durationDiscovery: discovery, trainingHorizons: expandTrainingHorizonLadder(discovery.ranges), brokerTrainingHorizons: expandTrainingDurations(discovery.ranges) }, { headers: noStore() });
-  } catch (error) {
-    return NextResponse.json({ success: false, error: error instanceof Error ? error.message : 'Unable to load training dataset operations.' }, { status: 503, headers: noStore() });
-  }
+  } catch (error) { return NextResponse.json({ success: false, error: error instanceof Error ? error.message : 'Unable to load training dataset operations.' }, { status: 503, headers: noStore() }); }
 }
 
 export async function POST(req: NextRequest) {
@@ -134,7 +89,8 @@ export async function POST(req: NextRequest) {
     const discovery = await getSupportedDurationDiscovery(symbol);
     if (body?.buildAllSupportedHorizons === true) {
       const job = startAutoBuild(symbol, discovery);
-      return NextResponse.json({ success: true, accepted: true, dataSource: 'deriv-real-ticks', durationSource: discovery.source, job, message: job.status === 'running' ? `AUTO dataset build started for ${job.requestedCount} dynamically discovered training horizons.` : `An AUTO dataset build is already running for ${symbol}.` }, { status: 202, headers: noStore() });
+      const result = { status: job.status, jobId: job.id, requestedCount: job.requestedCount, completedCount: job.completedCount, failedCount: job.failedCount };
+      return NextResponse.json({ success: true, accepted: true, dataSource: 'deriv-real-ticks', durationSource: discovery.source, result, job, message: `AUTO dataset build started for ${job.requestedCount} dynamically discovered training horizons.` }, { status: 202, headers: noStore() });
     }
     const legacyHorizon = body?.horizonTicks;
     const durationValue = legacyHorizon != null ? Number(legacyHorizon) : Number(body?.durationValue);
