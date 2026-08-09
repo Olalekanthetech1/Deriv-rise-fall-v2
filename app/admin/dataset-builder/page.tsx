@@ -29,12 +29,28 @@ export default function TrainingDatasetBuilderPage() {
   const [loading, setLoading] = useState(true);
   const [building, setBuilding] = useState(false);
   const [buildingAll, setBuildingAll] = useState(false);
+  const [selectedUnit, setSelectedUnit] = useState<DurationUnit>('t');
   const [selectedHorizon, setSelectedHorizon] = useState('');
   const [error, setError] = useState<string | null>(null);
   const [success, setSuccess] = useState<string | null>(null);
 
   const availableSymbols = useMemo(() => symbols.filter((item) => item.isAvailable), [symbols]);
   const selectedAsset = availableSymbols.find((item) => item.symbol === selectedSymbol);
+  const unitOptions: Array<{ unit: DurationUnit; label: string }> = [
+    { unit: 't', label: 'TICKS' },
+    { unit: 's', label: 'SEC' },
+    { unit: 'm', label: 'MIN' },
+    { unit: 'h', label: 'HOUR' },
+    { unit: 'd', label: 'DAY' },
+  ];
+  const horizonsForSelectedUnit = useMemo(
+    () => state.horizons.filter((horizon) => horizon.unit === selectedUnit),
+    [state.horizons, selectedUnit],
+  );
+  const selectedUnitRange = useMemo(
+    () => state.discovery?.ranges.filter((range) => range.unit === selectedUnit) ?? [],
+    [state.discovery, selectedUnit],
+  );
 
   async function loadSymbols() {
     const response = await fetch('/api/symbols', { cache: 'no-store' });
@@ -50,8 +66,12 @@ export default function TrainingDatasetBuilderPage() {
     const response = await fetch(`/api/admin/datasets?symbol=${encodeURIComponent(symbol)}`, { cache: 'no-store' });
     const data = await response.json();
     if (!response.ok) throw new Error(data?.error || 'Unable to load Deriv duration capabilities.');
-    setState({ datasets: Array.isArray(data?.datasets) ? data.datasets : [], discovery: data?.durationDiscovery ?? null, horizons: Array.isArray(data?.trainingHorizons) ? data.trainingHorizons : [] });
-    const first = data?.trainingHorizons?.[0];
+    const discoveredHorizons: TrainingHorizon[] = Array.isArray(data?.trainingHorizons) ? data.trainingHorizons : [];
+    const availableUnits: DurationUnit[] = ['t', 's', 'm', 'h', 'd'].filter((unit) => discoveredHorizons.some((horizon) => horizon.unit === unit)) as DurationUnit[];
+    const preferredUnit = availableUnits.includes(selectedUnit) ? selectedUnit : (availableUnits[0] ?? 't');
+    setState({ datasets: Array.isArray(data?.datasets) ? data.datasets : [], discovery: data?.durationDiscovery ?? null, horizons: discoveredHorizons });
+    setSelectedUnit(preferredUnit);
+    const first = discoveredHorizons.find((horizon) => horizon.unit === preferredUnit);
     setSelectedHorizon(first ? `${first.value}:${first.unit}` : '');
   }
 
@@ -118,7 +138,21 @@ export default function TrainingDatasetBuilderPage() {
           <div className="mb-5 flex items-center gap-2 text-sm font-bold text-cyan-300"><Sparkles className="h-4 w-4" />Build dataset</div>
           <label className="block"><span className="mb-2 block text-xs font-semibold uppercase tracking-wider text-slate-500">Deriv asset</span><select value={selectedSymbol} onChange={(event) => { setSelectedSymbol(event.target.value); setSelectedHorizon(''); }} disabled={loading || building || buildingAll} className="w-full rounded-xl border border-white/10 bg-black/30 px-4 py-3 text-sm outline-none focus:border-cyan-400/50"><option value="">Select a live Deriv asset</option>{availableSymbols.map((item) => <option key={item.symbol} value={item.symbol}>{item.displayName} — {item.symbol}</option>)}</select>{selectedAsset && <span className="mt-2 block text-xs text-slate-500">{selectedAsset.market} / {selectedAsset.submarket} · {selectedAsset.isOpen ? 'Open' : 'Available but closed'}</span>}</label>
 
-          <div className="mt-4"><span className="mb-2 block text-xs font-semibold uppercase tracking-wider text-slate-500">Supported prediction horizon</span><select value={selectedHorizon} onChange={(event) => setSelectedHorizon(event.target.value)} disabled={!state.horizons.length || building || buildingAll} className="w-full rounded-xl border border-white/10 bg-black/30 px-4 py-3 text-sm outline-none focus:border-cyan-400/50"><option value="">Select a Deriv-supported horizon</option>{state.horizons.map((item) => <option key={`${item.value}:${item.unit}`} value={`${item.value}:${item.unit}`}>{formatDuration(item.value, item.unit)}</option>)}</select><p className="mt-2 text-xs text-slate-500">The horizon is discovered from Deriv for the selected asset. There is no fixed tick-only input.</p></div>
+          <div className="mt-4">
+            <span className="mb-2 block text-xs font-semibold uppercase tracking-wider text-slate-500">Supported prediction horizon</span>
+            <div className="grid grid-cols-5 overflow-hidden rounded-xl border border-white/10 bg-black/30">
+              {unitOptions.map((option) => {
+                const available = state.horizons.some((horizon) => horizon.unit === option.unit);
+                const active = selectedUnit === option.unit;
+                return <button key={option.unit} type="button" onClick={() => { setSelectedUnit(option.unit); const first = state.horizons.find((horizon) => horizon.unit === option.unit); setSelectedHorizon(first ? `${first.value}:${first.unit}` : ''); }} disabled={!available || building || buildingAll} className={`px-2 py-3 text-xs font-bold transition sm:text-sm ${active ? 'bg-cyan-400 text-slate-950' : 'text-slate-300 hover:bg-white/5'} ${!available ? 'cursor-not-allowed opacity-30' : ''}`}>{option.label}</button>;
+              })}
+            </div>
+            <select value={selectedHorizon} onChange={(event) => setSelectedHorizon(event.target.value)} disabled={!horizonsForSelectedUnit.length || building || buildingAll} className="mt-3 w-full rounded-xl border border-white/10 bg-black/30 px-4 py-3 text-sm outline-none focus:border-cyan-400/50">
+              <option value="">Select a Deriv-supported {unitLabel[selectedUnit]} horizon</option>
+              {horizonsForSelectedUnit.map((item) => <option key={`${item.value}:${item.unit}`} value={`${item.value}:${item.unit}`}>{formatDuration(item.value, item.unit)}</option>)}
+            </select>
+            <p className="mt-2 text-xs text-slate-500">Only duration units advertised by Deriv for the selected asset are enabled. Tick targets use future tick positions; time targets use timestamps.</p>
+          </div>
 
           <div className="mt-5 rounded-2xl border border-cyan-400/10 bg-cyan-400/[0.03] p-4 text-xs leading-5 text-slate-400"><strong className="text-slate-200">Pipeline contract:</strong> real Deriv ticks → registry-driven features → broker duration target → leakage checks → train-only normalization → chronological split with embargo. Time horizons use timestamp-based future targets; tick horizons use future tick positions.</div>
           <div className="mt-5 grid gap-3 sm:grid-cols-2">
@@ -129,7 +163,7 @@ export default function TrainingDatasetBuilderPage() {
 
         <article className="rounded-3xl border border-white/10 bg-white/[0.025] p-5">
           <div className="mb-5 flex items-center gap-2 text-sm font-bold text-emerald-300"><ShieldCheck className="h-4 w-4" />Dynamic duration contract</div>
-          {!state.discovery ? <p className="text-sm text-slate-500">Select an asset to query Deriv duration metadata.</p> : <div className="space-y-3">{state.discovery.ranges.map((range) => <div key={range.id} className="rounded-2xl border border-white/10 bg-black/20 p-3"><div className="flex items-center justify-between gap-3"><span className="font-semibold text-slate-200">{formatDuration(range.min, range.unit)}{range.min !== range.max ? ` – ${formatDuration(range.max, range.unit)}` : ''}</span><span className="text-[10px] uppercase tracking-wider text-emerald-300">Deriv</span></div>{range.tradeTypes.length > 0 && <p className="mt-1 text-[11px] text-slate-500">Trade type: {range.tradeTypes.join(', ')}</p>}</div>)}</div>}
+          {!state.discovery ? <p className="text-sm text-slate-500">Select an asset to query Deriv duration metadata.</p> : selectedUnitRange.length === 0 ? <p className="text-sm text-slate-500">Deriv did not advertise a {unitLabel[selectedUnit]} duration for this asset.</p> : <div className="space-y-3">{selectedUnitRange.map((range) => <div key={range.id} className="rounded-2xl border border-white/10 bg-black/20 p-3"><div className="flex items-center justify-between gap-3"><span className="font-semibold text-slate-200">{formatDuration(range.min, range.unit)}{range.min !== range.max ? ` – ${formatDuration(range.max, range.unit)}` : ''}</span><span className="text-[10px] uppercase tracking-wider text-emerald-300">Deriv</span></div>{range.tradeTypes.length > 0 && <p className="mt-1 text-[11px] text-slate-500">Trade type: {range.tradeTypes.join(', ')}</p>}</div>)}</div>}
           <p className="mt-4 text-[11px] leading-5 text-slate-500">Source: {state.discovery?.source || 'waiting for Deriv'}. The registry is refreshed when the selected asset changes.</p>
         </article>
       </section>
