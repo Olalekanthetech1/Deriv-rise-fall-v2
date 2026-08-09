@@ -1,5 +1,6 @@
 import { NextRequest, NextResponse } from 'next/server';
 import { neon } from '@neondatabase/serverless';
+import { initDbSchema } from '@/lib/db';
 import { verifySessionToken } from '../auth/route';
 
 const EXPECTED_TABLES = [
@@ -49,11 +50,14 @@ export async function GET(req: NextRequest) {
 
   const started = performance.now();
   try {
+    const initialized = await initDbSchema();
+    if (!initialized) throw new Error('New database schema initialization failed.');
+
     const sql = neon(url);
     const [health, tableRows, migrationRows] = await Promise.all([
       sql`SELECT NOW() AS server_time, current_database() AS database_name, current_schema() AS schema_name, version() AS version`,
       sql`SELECT table_name FROM information_schema.tables WHERE table_schema = 'public' AND table_type = 'BASE TABLE' ORDER BY table_name`,
-      sql`SELECT version, applied_at FROM ops_schema_migrations ORDER BY version DESC LIMIT 20`.catch(() => []),
+      sql`SELECT version, applied_at FROM ops_schema_migrations ORDER BY version DESC LIMIT 20`,
     ]);
 
     const tables = tableRows.map((row: any) => String(row.table_name));
@@ -89,6 +93,7 @@ export async function GET(req: NextRequest) {
         connectionVerifiedByQuery: true,
         valuesDerivedFromLiveDatabase: true,
         schemaDerivedFromExpectedManifest: true,
+        newSchemaInitializationVerified: true,
       },
     }, { headers: { 'Cache-Control': 'no-store, max-age=0' } });
   } catch (error: any) {
