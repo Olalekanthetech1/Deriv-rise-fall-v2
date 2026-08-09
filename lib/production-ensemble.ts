@@ -1,4 +1,4 @@
-import { EngineeredTickFeatures, extract37TickFeatures, TickPoint } from './ml-feature-extractor';
+import { EngineeredTickFeatures, extract37TickFeatures, featureObjToArray, TickPoint } from './ml-feature-extractor';
 import { xgboostDaemon } from './xgboost-daemon';
 
 export type Signal = 'RISE' | 'FALL';
@@ -79,12 +79,13 @@ export async function evaluateProductionEnsemble(
     contractDurationSecs: Number(durationSecs),
     assetCategoryNum: assetCategory,
   });
+  const featureVector = featureObjToArray(features);
 
   const remote = await xgboostDaemon.sendCommand('predict_ensemble', {
     symbol,
     durationSecs: Number(durationSecs),
     assetCategory,
-    ticks: ticks.map(t => ({ price: t.price, timestamp: t.timestamp })),
+    featureVector,
   });
 
   if (!remote?.success || !remote.models) throw new Error('NATIVE_ML_ENSEMBLE_UNAVAILABLE');
@@ -149,34 +150,15 @@ export async function evaluateProductionEnsemble(
     };
   }
 
-  if (hmmAvailable) {
-    modelBreakdown.hmm = {
-      modelName: 'HMM Regime Model',
-      status: 'AVAILABLE',
-      primaryRegime: hmm.primaryRegime,
-      regimeState: hmm.regimeState,
-      regimeProbabilities: hmm.regimeProbabilities,
-      details: hmm.engine || 'Native trained GaussianHMM',
-    };
-  } else {
-    modelBreakdown.hmm = { modelName: 'HMM Regime Model', status: 'UNAVAILABLE', details: String(hmm?.error || 'MODEL_UNAVAILABLE') };
-  }
+  modelBreakdown.hmm = hmmAvailable
+    ? { modelName: 'HMM Regime Model', status: 'AVAILABLE', primaryRegime: hmm.primaryRegime, regimeState: hmm.regimeState, regimeProbabilities: hmm.regimeProbabilities, details: hmm.engine || 'Native trained GaussianHMM' }
+    : { modelName: 'HMM Regime Model', status: 'UNAVAILABLE', details: String(hmm?.error || 'MODEL_UNAVAILABLE') };
 
-  if (isoAvailable) {
-    modelBreakdown.isolation_forest = {
-      modelName: 'Isolation Forest',
-      status: 'AVAILABLE',
-      anomalyScore: iso.anomalyScore,
-      isAnomaly: Boolean(iso.isAnomaly),
-      details: iso.engine || 'Native trained IsolationForest',
-    };
-  } else {
-    modelBreakdown.isolation_forest = { modelName: 'Isolation Forest', status: 'UNAVAILABLE', details: String(iso?.error || 'MODEL_UNAVAILABLE') };
-  }
+  modelBreakdown.isolation_forest = isoAvailable
+    ? { modelName: 'Isolation Forest', status: 'AVAILABLE', anomalyScore: iso.anomalyScore, isAnomaly: Boolean(iso.isAnomaly), details: iso.engine || 'Native trained IsolationForest' }
+    : { modelName: 'Isolation Forest', status: 'UNAVAILABLE', details: String(iso?.error || 'MODEL_UNAVAILABLE') };
 
-  const normalizedWeights = Object.fromEntries(
-    available.map(e => [e.modelKey, Number((e.dynamicWeight / totalWeight).toFixed(6))])
-  );
+  const normalizedWeights = Object.fromEntries(available.map(e => [e.modelKey, Number((e.dynamicWeight / totalWeight).toFixed(6))]));
 
   return {
     symbol,
