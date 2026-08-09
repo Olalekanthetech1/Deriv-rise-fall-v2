@@ -1,0 +1,548 @@
+import crypto from 'crypto';
+import { neon } from '@neondatabase/serverless';
+import { extractTickFeatures, featureObjToArray } from './ml-feature-extractor';
+import {
+  buildDatasetFingerprint,
+  deriveFeatureSchemaVersion,
+  deriveNormalizationVersion,
+  getCanonicalWindowTicks,
+  getMlPipelineConfig,
+  getRequiredSplitGapTicks,
+} from './ml-pipeline-config';
+import { getDbConnectionString, initDbSchema } from './db';
+import {
+  durationToSeconds,
+  expandTrainingDurations,
+  getDerivDurationDiscovery,
+  type DerivDurationDiscovery,
+  type DerivDurationUnit,
+} from './deriv-duration-registry';
+import { ensureTrainingDurationSchema } from './training-duration-schema';
+
+type Sql = any;
+
+type RawTick = {
+  id: number;
+  price: number;
+  tick_epoch: number;
+  tick_time: string;
+  source_tick_id: string | null;
+};
+
+type DatasetSample = {
+  sampleIndex: number;
+  split: 'train' | 'validation' | 'test';
+  anchorEpoch: number;
+  anchorTime: string;
+  outcomeEpoch: number;
+  outcomeTime: string;
+  entryPrice: number;
+  outcomePrice: number;
+  label: 'RISE' | 'FALL';
+  featureVector: number[];
+  sourceWindowFromEpoch: number;
+  sourceWindowToEpoch: number;
+};
+
+export type DurationDatasetQualityReport = {
+  status: 'READY' | 'REVIEW';
+  totalTicks: number;
+  validTicks: number;
+  invalidTicks: number;
+  duplicateTicks: number;
+  candidateSamples: number;
+  generatedSamples: number;
+  excludedMissingWindows: number;
+  excludedAmbiguousTargets: number;
+  excludedSplitGap: number;
+  featureCount: number;
+  trainCount: number;
+  validationCount: number;
+  testCount: number;
+  splitGapTicks: number;
+  leakageCheckPassed: boolean;
+  temporalSplitValidated: boolean;
+  normalizationVersion: string;
+  featureSchemaVersion: string;
+  durationValue: number;
+  durationUnit: DerivDurationUnit;
+  durationSeconds: number | null;
+  effectiveHorizonTicks: number;
+};
+
+export type DurationDatasetBuildRequest = {
+  symbol: string;
+  durationValue: number;
+  durationUnit: DerivDurationUnit;
+  windowTicks?: number;
+  datasetName?: string;
+  contractType?: string;
+  durationRangeId?: string;
+};
+
+export type DurationDatasetBuildResult = {
+  datasetId: string;
+  name: string;
+  version: string;
+  symbol: string;
+  durationValue: number;
+  durationUnit: DerivDurationUnit;
+  durationSeconds: number | null;
+  horizonType: 'tick' | 'time';
+  effectiveHorizonTicks: number;
+  windowTicks: number;
+  sampleCount: number;
+  trainCount: number;
+  validationCount: number;
+  testCount: number;
+  sourceFrom: string;
+  sourceTo: string;
+  checksum: string;
+  leakageCheckPassed: boolean;
+  normalizationVersion: string;
+  datasetFingerprint: string;
+  qualityReport: DurationDatasetQualityReport;
+  status: 'completed';
+};
+
+function getSql(): Sql | null {
+  const dbUrl = getDbConnectionString();
+  return dbUrl ? neon(dbUrl) : null;
+}
+
+function normalizePositiveInteger(value: unknown, path: string): number {
+  const parsed = Number(value);
+  if (!Number.isSafeInteger(parsed) || parsed <= 0) throw new Error(`${path} must be a positive integer.`);
+  return parsed;
+}
+
+function median(values: number[]): number {
+  if (!values.length) return 0;
+  const sorted = [...values].sort((a, b) => a - b);
+  const mid = Math.floor(sorted.length / 2);
+  return sorted.length % 2 === 0 ? (sorted[mid - 1] + sorted[mid]) / 2 : sorted[mid];
+}
+
+function inferDeadZone(ticks: RawTick[]): number {
+  const moves: number[] = [];
+  for (let i = 1; i < ticks.length; i += 1) {
+    const move = Math.abs(ticks[i].price - ticks[i - 1].price);
+    if (Number.isFinite(move) && move > 0) moves.push(move);
+  }
+  return moves.length ? Math.max(median(moves) * 0.25, 1e-12) : 0;
+}
+
+function normalizeTickRows(rows: any[]): { ticks: RawTick[]; invalidTicks: number; duplicateTicks: number } {
+  const seen = new Set<string>();
+  let invalidTicks = 0;
+  let duplicateTicks = 0;
+  const ticks: RawTick[] = [];
+
+  for (const row of rows) {
+    const tick: RawTick = {
+      id: Number(row.id),
+      price: Number(row.price),
+      tick_epoch: Number(row.tick_epoch),
+      tick_time: new Date(row.tick_time).toISOString(),
+      source_tick_id: row.source_tick_id == null ? null : String(row.source_tick_id),
+    };
+    const valid = Number.isSafeInteger(tick.id) && tick.id > 0 && Number.isFinite(tick.price) && tick.price > 0 && Number.isSafeInteger(tick.tick_epoch) && tick.tick_epoch > 0;
+    if (!valid) {
+      invalidTicks += 1;
+      continue;
+    }
+    const key = tick.source_tick_id?.trim() || `${tick.tick_epoch}:${tick.price.toFixed(12)}`;
+    if (seen.has(key)) {
+      duplicateTicks += 1;
+      continue;
+    }
+    seen.add(key);
+    ticks.push(tick);
+  }
+  return { ticks, invalidTicks, duplicateTicks };
+}
+
+async function loadTicks(sql: Sql, symbol: string) {
+  const rows = await sql`
+    SELECT id, price, tick_epoch, tick_time, source_tick_id
+    FROM market_ticks
+    WHERE symbol = ${symbol} AND source = 'deriv'
+    ORDER BY tick_epoch ASC, id ASC
+  `;
+  const rowArray = Array.isArray(rows) ? rows : [];
+  const normalized = normalizeTickRows(rowArray);
+  return { ...normalized, totalTicks: rowArray.length };
+}
+
+async function resolveAssetContext(sql: Sql, symbol: string) {
+  const rows = await sql`
+    SELECT display_name, asset_class, market_type
+    FROM market_assets
+    WHERE symbol = ${symbol}
+    LIMIT 1
+  `;
+  const row = (rows as any[])[0] ?? null;
+  const classification = `${String(row?.asset_class ?? '')} ${String(row?.market_type ?? '')}`.toLowerCase();
+  return {
+    displayName: row?.display_name ? String(row.display_name) : symbol,
+    assetCategory: classification.includes('forex') ? 1 : classification.includes('metal') || classification.includes('commodity') ? 2 : 0,
+  };
+}
+
+function computeNormalizationStats(vectors: number[][], epsilon: number) {
+  if (!vectors.length) throw new Error('Cannot fit normalization without training samples.');
+  const count = vectors[0].length;
+  const means = new Array(count).fill(0);
+  const stds = new Array(count).fill(0);
+  for (const vector of vectors) vector.forEach((value, index) => { means[index] += value; });
+  for (let i = 0; i < count; i += 1) means[i] /= vectors.length;
+  for (const vector of vectors) vector.forEach((value, index) => { stds[index] += Math.pow(value - means[index], 2); });
+  for (let i = 0; i < count; i += 1) {
+    stds[i] = Math.sqrt(stds[i] / vectors.length);
+    if (!Number.isFinite(stds[i]) || stds[i] < epsilon) stds[i] = 1;
+  }
+  const fingerprint = crypto.createHash('sha256').update(JSON.stringify({ means, stds })).digest('hex').slice(0, 16);
+  return { means, stds, fingerprint };
+}
+
+function normalizeVector(vector: number[], means: number[], stds: number[]): number[] {
+  return vector.map((value, index) => (value - means[index]) / stds[index]);
+}
+
+function findFirstTickAtOrAfter(ticks: RawTick[], targetEpoch: number, startIndex: number): number {
+  let low = Math.max(0, startIndex);
+  let high = ticks.length - 1;
+  let answer = -1;
+  while (low <= high) {
+    const mid = Math.floor((low + high) / 2);
+    if (ticks[mid].tick_epoch >= targetEpoch) {
+      answer = mid;
+      high = mid - 1;
+    } else {
+      low = mid + 1;
+    }
+  }
+  return answer;
+}
+
+function estimateTickSeconds(featureWindow: RawTick[]): number {
+  const gaps: number[] = [];
+  for (let i = 1; i < featureWindow.length; i += 1) {
+    const gap = featureWindow[i].tick_epoch - featureWindow[i - 1].tick_epoch;
+    if (Number.isFinite(gap) && gap > 0) gaps.push(gap);
+  }
+  return median(gaps);
+}
+
+function compactIsoStamp(date: Date): string {
+  return date.toISOString().replace(/[-:.TZ]/g, '').slice(0, 14);
+}
+
+function durationSchemaVersion(value: number, unit: DerivDurationUnit, effectiveTicks: number, pipelineVersion: string): string {
+  const digest = crypto.createHash('sha256').update(`${pipelineVersion}|${value}|${unit}|${effectiveTicks}`).digest('hex').slice(0, 12);
+  return `duration-schema-${unit}-${value}-${digest}`;
+}
+
+function updateChecksum(hash: crypto.Hash, sample: DatasetSample) {
+  hash.update(JSON.stringify({ i: sample.sampleIndex, s: sample.split, a: sample.anchorEpoch, o: sample.outcomeEpoch, p: sample.entryPrice, q: sample.outcomePrice, l: sample.label, f: sample.featureVector }));
+}
+
+async function ensureDatasetSampleSchema(sql: Sql) {
+  await sql`
+    CREATE TABLE IF NOT EXISTS training_dataset_samples (
+      id BIGSERIAL PRIMARY KEY,
+      dataset_id UUID NOT NULL REFERENCES training_datasets(id) ON DELETE CASCADE,
+      sample_index INTEGER NOT NULL,
+      split VARCHAR(16) NOT NULL,
+      anchor_tick_epoch BIGINT NOT NULL,
+      anchor_tick_time TIMESTAMPTZ NOT NULL,
+      outcome_tick_epoch BIGINT NOT NULL,
+      outcome_tick_time TIMESTAMPTZ NOT NULL,
+      entry_price NUMERIC(30, 12) NOT NULL,
+      outcome_price NUMERIC(30, 12) NOT NULL,
+      label VARCHAR(16) NOT NULL,
+      feature_vector JSONB NOT NULL,
+      source_window_from_epoch BIGINT NOT NULL,
+      source_window_to_epoch BIGINT NOT NULL,
+      created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+      CONSTRAINT training_dataset_samples_unique UNIQUE (dataset_id, sample_index),
+      CONSTRAINT training_dataset_samples_label_check CHECK (label IN ('RISE', 'FALL'))
+    )
+  `;
+  await sql`CREATE INDEX IF NOT EXISTS idx_training_dataset_samples_dataset_split ON training_dataset_samples (dataset_id, split, sample_index)`;
+  await sql`CREATE INDEX IF NOT EXISTS idx_training_dataset_samples_anchor ON training_dataset_samples (dataset_id, anchor_tick_epoch)`;
+}
+
+async function insertSamples(sql: Sql, datasetId: string, samples: DatasetSample[]) {
+  const batchSize = 250;
+  for (let offset = 0; offset < samples.length; offset += batchSize) {
+    const batch = samples.slice(offset, offset + batchSize);
+    await sql`
+      INSERT INTO training_dataset_samples (
+        dataset_id, sample_index, split, anchor_tick_epoch, anchor_tick_time,
+        outcome_tick_epoch, outcome_tick_time, entry_price, outcome_price, label,
+        feature_vector, source_window_from_epoch, source_window_to_epoch
+      )
+      SELECT * FROM UNNEST(
+        ${batch.map(() => datasetId)}::uuid[],
+        ${batch.map((s) => s.sampleIndex)}::integer[],
+        ${batch.map((s) => s.split)}::text[],
+        ${batch.map((s) => s.anchorEpoch)}::bigint[],
+        ${batch.map((s) => s.anchorTime)}::timestamptz[],
+        ${batch.map((s) => s.outcomeEpoch)}::bigint[],
+        ${batch.map((s) => s.outcomeTime)}::timestamptz[],
+        ${batch.map((s) => s.entryPrice)}::numeric[],
+        ${batch.map((s) => s.outcomePrice)}::numeric[],
+        ${batch.map((s) => s.label)}::text[],
+        ${batch.map((s) => JSON.stringify(s.featureVector))}::jsonb[],
+        ${batch.map((s) => s.sourceWindowFromEpoch)}::bigint[],
+        ${batch.map((s) => s.sourceWindowToEpoch)}::bigint[]
+      )
+      ON CONFLICT (dataset_id, sample_index) DO NOTHING
+    `;
+  }
+}
+
+export async function getSupportedDurationDiscovery(symbol: string): Promise<DerivDurationDiscovery> {
+  return getDerivDurationDiscovery(symbol);
+}
+
+export async function buildDurationTrainingDataset(request: DurationDatasetBuildRequest): Promise<DurationDatasetBuildResult> {
+  const config = getMlPipelineConfig();
+  const symbol = String(request.symbol ?? '').trim().toUpperCase();
+  const durationValue = normalizePositiveInteger(request.durationValue, 'durationValue');
+  const durationUnit = request.durationUnit;
+  if (!['t', 's', 'm', 'h', 'd'].includes(durationUnit)) throw new Error('Unsupported Deriv duration unit.');
+
+  const windowTicks = request.windowTicks == null ? getCanonicalWindowTicks(config) : normalizePositiveInteger(request.windowTicks, 'windowTicks');
+  if (windowTicks !== getCanonicalWindowTicks(config)) throw new Error(`The configured feature window requires ${getCanonicalWindowTicks(config)} real ticks.`);
+
+  const sql = getSql();
+  if (!sql || !(await initDbSchema())) throw new Error('Database is unavailable or the Operations schema could not be initialized.');
+  await ensureTrainingDurationSchema(sql);
+  await ensureDatasetSampleSchema(sql);
+
+  const { ticks, invalidTicks, duplicateTicks, totalTicks } = await loadTicks(sql, symbol);
+  if (ticks.length <= windowTicks + 1) throw new Error(`Insufficient real Deriv ticks for ${symbol}. Need more than ${windowTicks} persisted ticks; found ${ticks.length}.`);
+
+  const { displayName, assetCategory } = await resolveAssetContext(sql, symbol);
+  const now = new Date();
+  const datasetId = crypto.randomUUID();
+  const firstUsableAnchor = windowTicks - 1;
+  const durationSeconds = durationToSeconds(durationValue, durationUnit);
+  const horizonType = durationUnit === 't' ? 'tick' : 'time';
+  const labelDeadZone = inferDeadZone(ticks.slice(0, Math.min(ticks.length, windowTicks + 512)));
+
+  const candidateRows: Array<{ anchorIndex: number; outcomeIndex: number }> = [];
+  for (let anchorIndex = firstUsableAnchor; anchorIndex < ticks.length - 1; anchorIndex += 1) {
+    const entry = ticks[anchorIndex];
+    const outcomeIndex = durationUnit === 't'
+      ? anchorIndex + durationValue
+      : findFirstTickAtOrAfter(ticks, entry.tick_epoch + (durationSeconds as number), anchorIndex + 1);
+    if (outcomeIndex < 0 || outcomeIndex >= ticks.length) continue;
+    candidateRows.push({ anchorIndex, outcomeIndex });
+  }
+
+  if (!candidateRows.length) throw new Error(`No persisted real ticks can satisfy ${durationValue}${durationUnit} for ${symbol}.`);
+
+  const effectiveHorizonTicks = Math.max(...candidateRows.map((row) => row.outcomeIndex - row.anchorIndex));
+  const splitGapTicks = getRequiredSplitGapTicks(effectiveHorizonTicks, config);
+  const totalCandidates = candidateRows.length;
+  const rawTrainEnd = Math.floor(totalCandidates * config.splitRatios.train);
+  const rawValidationEnd = Math.floor(totalCandidates * (config.splitRatios.train + config.splitRatios.validation));
+
+  const preSamples: Array<DatasetSample & { rawFeatureVector: number[] }> = [];
+  let excludedMissingWindows = 0;
+  let excludedAmbiguousTargets = 0;
+  let excludedSplitGap = 0;
+
+  for (let candidateIndex = 0; candidateIndex < candidateRows.length; candidateIndex += 1) {
+    const { anchorIndex, outcomeIndex } = candidateRows[candidateIndex];
+    const entry = ticks[anchorIndex];
+    const outcome = ticks[outcomeIndex];
+    const featureWindow = ticks.slice(anchorIndex - windowTicks + 1, anchorIndex + 1);
+    if (!entry || !outcome || featureWindow.length !== windowTicks) {
+      excludedMissingWindows += 1;
+      continue;
+    }
+
+    const inTrainGap = candidateIndex >= rawTrainEnd - splitGapTicks && candidateIndex < rawTrainEnd + splitGapTicks;
+    const inValidationGap = candidateIndex >= rawValidationEnd - splitGapTicks && candidateIndex < rawValidationEnd + splitGapTicks;
+    if (inTrainGap || inValidationGap) {
+      excludedSplitGap += 1;
+      continue;
+    }
+
+    const delta = outcome.price - entry.price;
+    if (Math.abs(delta) <= labelDeadZone) {
+      excludedAmbiguousTargets += 1;
+      continue;
+    }
+
+    const split: DatasetSample['split'] = candidateIndex < rawTrainEnd - splitGapTicks
+      ? 'train'
+      : candidateIndex < rawValidationEnd - splitGapTicks
+        ? 'validation'
+        : 'test';
+
+    const estimatedSeconds = durationUnit === 't' ? estimateTickSeconds(featureWindow) * durationValue : durationSeconds as number;
+    const tickPoints = featureWindow.map((tick) => ({ price: tick.price, timestamp: tick.tick_epoch * 1000 }));
+    const featureObject = extractTickFeatures(tickPoints, {
+      symbol,
+      assetCategoryNum: assetCategory,
+      contractDurationSecs: estimatedSeconds,
+      pipelineConfig: config,
+    });
+    const rawFeatureVector = featureObjToArray(featureObject, config.featureOrder);
+
+    preSamples.push({
+      sampleIndex: preSamples.length,
+      split,
+      anchorEpoch: entry.tick_epoch,
+      anchorTime: entry.tick_time,
+      outcomeEpoch: outcome.tick_epoch,
+      outcomeTime: outcome.tick_time,
+      entryPrice: entry.price,
+      outcomePrice: outcome.price,
+      label: delta > 0 ? 'RISE' : 'FALL',
+      featureVector: rawFeatureVector,
+      rawFeatureVector,
+      sourceWindowFromEpoch: featureWindow[0].tick_epoch,
+      sourceWindowToEpoch: featureWindow[featureWindow.length - 1].tick_epoch,
+    });
+  }
+
+  if (!preSamples.length) throw new Error(`No non-flat directional samples could be constructed for ${symbol} at ${durationValue}${durationUnit}.`);
+
+  const trainVectors = preSamples.filter((sample) => sample.split === 'train').map((sample) => sample.rawFeatureVector);
+  const normalizationStats = computeNormalizationStats(trainVectors, config.normalizationEpsilon);
+  const normalizationVersion = deriveNormalizationVersion(normalizationStats.fingerprint, config);
+  const samples: DatasetSample[] = preSamples.map((sample) => ({ ...sample, featureVector: normalizeVector(sample.rawFeatureVector, normalizationStats.means, normalizationStats.stds) }));
+
+  const trainCount = samples.filter((s) => s.split === 'train').length;
+  const validationCount = samples.filter((s) => s.split === 'validation').length;
+  const testCount = samples.filter((s) => s.split === 'test').length;
+  const leakageCheckPassed = samples.every((s) => s.outcomeEpoch > s.anchorEpoch && s.sourceWindowToEpoch === s.anchorEpoch);
+  const temporalSplitValidated = splitGapTicks >= 1 && trainCount > 0 && validationCount > 0 && testCount > 0;
+  if (!leakageCheckPassed) throw new Error('Dataset leakage validation failed. No dataset was persisted.');
+  if (!temporalSplitValidated) throw new Error('Temporal split validation failed. No dataset was persisted.');
+
+  const checksumHash = crypto.createHash('sha256');
+  samples.forEach((sample) => updateChecksum(checksumHash, sample));
+  const checksum = checksumHash.digest('hex');
+  const sourceFrom = ticks[0].tick_time;
+  const sourceTo = ticks[ticks.length - 1].tick_time;
+  const featureSchemaVersion = deriveFeatureSchemaVersion(config.featureOrder, config.pipelineVersion);
+  const labelSchemaVersion = durationSchemaVersion(durationValue, durationUnit, effectiveHorizonTicks, config.pipelineVersion);
+  const datasetFingerprint = buildDatasetFingerprint(
+    [symbol, durationValue, durationUnit, durationSeconds ?? 'tick', effectiveHorizonTicks, windowTicks, samples.length, sourceFrom, sourceTo, checksum, featureSchemaVersion, labelSchemaVersion, normalizationVersion],
+    config,
+  );
+  const version = `v${compactIsoStamp(now)}-${datasetFingerprint.slice(0, 8)}`;
+  const name = String(request.datasetName ?? `Deriv ${displayName} ${durationValue}${durationUnit} direction dataset`).trim().slice(0, 160);
+
+  const qualityReport: DurationDatasetQualityReport = {
+    status: 'READY', totalTicks, validTicks: ticks.length, invalidTicks, duplicateTicks,
+    candidateSamples: totalCandidates, generatedSamples: samples.length,
+    excludedMissingWindows, excludedAmbiguousTargets, excludedSplitGap,
+    featureCount: config.featureOrder.length, trainCount, validationCount, testCount,
+    splitGapTicks, leakageCheckPassed, temporalSplitValidated,
+    normalizationVersion, featureSchemaVersion, durationValue, durationUnit,
+    durationSeconds, effectiveHorizonTicks,
+  };
+
+  await sql`
+    INSERT INTO training_datasets (
+      id, name, version, asset_symbol, horizon_ticks, duration_value, duration_unit,
+      duration_seconds, horizon_type, contract_type, feature_schema_version,
+      label_schema_version, source_from, source_to, sample_count, train_count,
+      validation_count, test_count, status, checksum, leakage_check_passed, metadata
+    ) VALUES (
+      ${datasetId}, ${name}, ${version}, ${symbol}, ${effectiveHorizonTicks}, ${durationValue}, ${durationUnit},
+      ${durationSeconds}, ${horizonType}, ${request.contractType ?? null}, ${featureSchemaVersion}, ${labelSchemaVersion},
+      ${sourceFrom}, ${sourceTo}, ${samples.length}, ${trainCount}, ${validationCount}, ${testCount}, 'completed',
+      ${checksum}, ${leakageCheckPassed}, ${JSON.stringify({
+        source: 'deriv',
+        assetDisplayName: displayName,
+        contractType: request.contractType ?? null,
+        duration: { value: durationValue, unit: durationUnit, seconds: durationSeconds, horizonType, effectiveHorizonTicks, rangeId: request.durationRangeId ?? null },
+        windowTicks,
+        featureCount: config.featureOrder.length,
+        labelValues: ['RISE', 'FALL'],
+        splitStrategy: 'chronological-70-15-15',
+        splitGapTicks,
+        labelDeadZone,
+        normalization: { method: config.normalizationMethod, version: normalizationVersion, fitSplit: 'train', statsFingerprint: normalizationStats.fingerprint },
+        qualityReport,
+        pipelineConfig: { pipelineVersion: config.pipelineVersion, canonicalFeatureWindowTicks: config.canonicalFeatureWindowTicks, featureWindows: config.featureWindows, featureOrder: config.featureOrder },
+        generatedAt: now.toISOString(),
+      })}::jsonb
+    )
+  `;
+
+  await insertSamples(sql, datasetId, samples).catch(async (error) => {
+    await sql`DELETE FROM training_datasets WHERE id = ${datasetId}`;
+    throw error;
+  });
+
+  return {
+    datasetId, name, version, symbol, durationValue, durationUnit, durationSeconds,
+    horizonType, effectiveHorizonTicks, windowTicks, sampleCount: samples.length,
+    trainCount, validationCount, testCount, sourceFrom, sourceTo, checksum,
+    leakageCheckPassed, normalizationVersion, datasetFingerprint, qualityReport,
+    status: 'completed',
+  };
+}
+
+export async function buildAllSupportedDurationDatasets(symbol: string) {
+  const discovery = await getDerivDurationDiscovery(symbol);
+  const durations = expandTrainingDurations(discovery.ranges);
+  const results: DurationDatasetBuildResult[] = [];
+  const failures: Array<{ value: number; unit: DerivDurationUnit; error: string }> = [];
+
+  for (const duration of durations) {
+    try {
+      results.push(await buildDurationTrainingDataset({
+        symbol,
+        durationValue: duration.value,
+        durationUnit: duration.unit,
+        durationRangeId: duration.rangeId,
+      }));
+    } catch (error) {
+      failures.push({
+        value: duration.value,
+        unit: duration.unit,
+        error: error instanceof Error ? error.message : String(error),
+      });
+    }
+  }
+
+  if (!results.length && failures.length) {
+    throw new Error(`No supported duration datasets could be built for ${symbol}. First failure: ${failures[0].error}`);
+  }
+  return { discovery, requestedCount: durations.length, completedCount: results.length, failedCount: failures.length, results, failures };
+}
+
+export async function listDurationTrainingDatasets(symbol?: string) {
+  const sql = getSql();
+  if (!sql || !(await initDbSchema())) return [];
+  await ensureTrainingDurationSchema(sql);
+  await ensureDatasetSampleSchema(sql);
+  if (symbol) {
+    return sql`
+      SELECT id, name, version, asset_symbol, horizon_ticks, duration_value, duration_unit,
+        duration_seconds, horizon_type, contract_type, feature_schema_version, label_schema_version,
+        source_from, source_to, sample_count, train_count, validation_count, test_count,
+        status, checksum, leakage_check_passed, metadata, created_at
+      FROM training_datasets WHERE asset_symbol = ${symbol}
+      ORDER BY created_at DESC LIMIT 100
+    `;
+  }
+  return sql`
+    SELECT id, name, version, asset_symbol, horizon_ticks, duration_value, duration_unit,
+      duration_seconds, horizon_type, contract_type, feature_schema_version, label_schema_version,
+      source_from, source_to, sample_count, train_count, validation_count, test_count,
+      status, checksum, leakage_check_passed, metadata, created_at
+    FROM training_datasets ORDER BY created_at DESC LIMIT 100
+  `;
+}
