@@ -1,6 +1,6 @@
 type Sql = any;
 
-/** Idempotent compatibility migration for duration-aware datasets/models and Agenda 6 training audit records. */
+/** Idempotent compatibility migration for duration-aware datasets/models and ML training audit records. */
 export async function ensureTrainingDurationSchema(sql: Sql): Promise<void> {
   await sql`ALTER TABLE training_datasets ADD COLUMN IF NOT EXISTS duration_value INTEGER`;
   await sql`ALTER TABLE training_datasets ADD COLUMN IF NOT EXISTS duration_unit VARCHAR(8)`;
@@ -15,10 +15,14 @@ export async function ensureTrainingDurationSchema(sql: Sql): Promise<void> {
   await sql`ALTER TABLE ml_model_registry_v2 ADD COLUMN IF NOT EXISTS duration_seconds NUMERIC(20, 6)`;
   await sql`ALTER TABLE ml_model_registry_v2 ADD COLUMN IF NOT EXISTS horizon_type VARCHAR(16)`;
   await sql`ALTER TABLE ml_model_registry_v2 ADD COLUMN IF NOT EXISTS contract_type VARCHAR(64)`;
+  await sql`ALTER TABLE ml_model_registry_v2 ADD COLUMN IF NOT EXISTS strategy_key VARCHAR(160)`;
+  await sql`ALTER TABLE ml_model_registry_v2 ADD COLUMN IF NOT EXISTS strategy_version VARCHAR(32)`;
+  await sql`ALTER TABLE ml_model_registry_v2 ADD COLUMN IF NOT EXISTS strategy_metadata JSONB NOT NULL DEFAULT '{}'::jsonb`;
   await sql`UPDATE ml_model_registry_v2 SET duration_value = COALESCE(duration_value, horizon_ticks), duration_unit = COALESCE(duration_unit, 't'), horizon_type = COALESCE(horizon_type, 'tick') WHERE duration_value IS NULL OR duration_unit IS NULL OR horizon_type IS NULL`;
   await sql`DROP INDEX IF EXISTS uq_production_model_asset_horizon`;
   await sql`CREATE UNIQUE INDEX IF NOT EXISTS uq_production_model_asset_duration ON ml_model_registry_v2 (asset_symbol, duration_unit, duration_value) WHERE status = 'production' AND duration_value IS NOT NULL AND duration_unit IS NOT NULL`;
   await sql`CREATE INDEX IF NOT EXISTS idx_model_registry_asset_duration ON ml_model_registry_v2 (asset_symbol, duration_unit, duration_value, updated_at DESC)`;
+  await sql`CREATE INDEX IF NOT EXISTS idx_model_registry_strategy ON ml_model_registry_v2 (strategy_key, strategy_version, updated_at DESC)`;
 
   await sql`ALTER TABLE ml_backtest_runs ADD COLUMN IF NOT EXISTS duration_value INTEGER`;
   await sql`ALTER TABLE ml_backtest_runs ADD COLUMN IF NOT EXISTS duration_unit VARCHAR(8)`;
@@ -57,11 +61,18 @@ export async function ensureTrainingDurationSchema(sql: Sql): Promise<void> {
     completed_at TIMESTAMPTZ,
     error TEXT,
     metadata JSONB NOT NULL DEFAULT '{}'::jsonb,
+    strategy_key VARCHAR(160),
+    strategy_version VARCHAR(32),
+    strategy_metadata JSONB NOT NULL DEFAULT '{}'::jsonb,
     created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
     updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
   )`;
+  await sql`ALTER TABLE ml_training_runs ADD COLUMN IF NOT EXISTS strategy_key VARCHAR(160)`;
+  await sql`ALTER TABLE ml_training_runs ADD COLUMN IF NOT EXISTS strategy_version VARCHAR(32)`;
+  await sql`ALTER TABLE ml_training_runs ADD COLUMN IF NOT EXISTS strategy_metadata JSONB NOT NULL DEFAULT '{}'::jsonb`;
   await sql`CREATE INDEX IF NOT EXISTS idx_ml_training_runs_asset_created ON ml_training_runs (asset_symbol, created_at DESC)`;
   await sql`CREATE INDEX IF NOT EXISTS idx_ml_training_runs_dataset_created ON ml_training_runs (dataset_id, created_at DESC)`;
+  await sql`CREATE INDEX IF NOT EXISTS idx_ml_training_runs_strategy ON ml_training_runs (strategy_key, strategy_version, created_at DESC)`;
 
   await sql`CREATE TABLE IF NOT EXISTS ml_training_run_models (
     id BIGSERIAL PRIMARY KEY,
