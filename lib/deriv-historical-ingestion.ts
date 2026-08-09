@@ -3,6 +3,8 @@ import { neon } from '@neondatabase/serverless';
 import { getDbConnectionString, initDbSchema } from '@/lib/db';
 import { fetchDerivTickHistory, type TickPoint } from '@/lib/ticks-helper';
 
+type Sql = any;
+
 export type HistoricalTick = TickPoint & {
   epochMs: number;
   sourceTickId: string;
@@ -67,13 +69,13 @@ function normalizeTicks(symbol: string, ticks: TickPoint[]): HistoricalTick[] {
   return [...deduped.values()].sort((a, b) => a.epochMs - b.epochMs);
 }
 
-async function getAssetId<TSql extends ReturnType<typeof neon>>(sql: TSql, symbol: string): Promise<number> {
+async function getAssetId(sql: Sql, symbol: string): Promise<number> {
   const rows = (await sql`
     INSERT INTO market_assets (symbol, display_name, asset_class, market_type, source, is_active)
     VALUES (${symbol}, ${symbol}, 'unknown', 'unknown', 'deriv', TRUE)
     ON CONFLICT (symbol) DO UPDATE SET updated_at = NOW()
     RETURNING id
-  `) as unknown as Array<{ id?: number | string | null }>;
+  `) as Array<{ id?: number | string | null }>;
 
   const id = Number(rows[0]?.id);
   if (!Number.isSafeInteger(id) || id <= 0) {
@@ -82,7 +84,7 @@ async function getAssetId<TSql extends ReturnType<typeof neon>>(sql: TSql, symbo
   return id;
 }
 
-async function createRunRecord<TSql extends ReturnType<typeof neon>>(sql: TSql, run: HistoricalIngestionRun): Promise<void> {
+async function createRunRecord(sql: Sql, run: HistoricalIngestionRun): Promise<void> {
   await sql`
     INSERT INTO data_ingestion_runs (
       id, source, asset_symbol, requested_from, requested_to, started_at, completed_at, status,
@@ -95,7 +97,7 @@ async function createRunRecord<TSql extends ReturnType<typeof neon>>(sql: TSql, 
   `;
 }
 
-async function updateRunRecord<TSql extends ReturnType<typeof neon>>(sql: TSql, run: HistoricalIngestionRun): Promise<void> {
+async function updateRunRecord(sql: Sql, run: HistoricalIngestionRun): Promise<void> {
   await sql`
     UPDATE data_ingestion_runs
     SET completed_at = ${run.completedAt},
@@ -111,7 +113,7 @@ async function updateRunRecord<TSql extends ReturnType<typeof neon>>(sql: TSql, 
   `;
 }
 
-async function upsertCheckpoint<TSql extends ReturnType<typeof neon>>(sql: TSql, symbol: string, lastTickEpoch: number, lastTickTime: string): Promise<void> {
+async function upsertCheckpoint(sql: Sql, symbol: string, lastTickEpoch: number, lastTickTime: string): Promise<void> {
   await sql`
     INSERT INTO data_ingestion_checkpoints (source, asset_symbol, last_tick_epoch, last_tick_time, updated_at)
     VALUES ('deriv', ${symbol}, ${lastTickEpoch}, ${lastTickTime}, NOW())
@@ -122,36 +124,22 @@ async function upsertCheckpoint<TSql extends ReturnType<typeof neon>>(sql: TSql,
   `;
 }
 
-async function insertTickBatch<TSql extends ReturnType<typeof neon>>(
-  sql: TSql,
-  symbol: string,
-  assetId: number,
-  runId: string,
-  ticks: HistoricalTick[],
-): Promise<number> {
+async function insertTickBatch(sql: Sql, symbol: string, assetId: number, runId: string, ticks: HistoricalTick[]): Promise<number> {
   if (!ticks.length) return 0;
-
-  const symbols = ticks.map(() => symbol);
-  const assetIds = ticks.map(() => assetId);
-  const prices = ticks.map((tick) => tick.price);
-  const epochs = ticks.map((tick) => Math.floor(tick.epochMs / 1000));
-  const times = ticks.map((tick) => new Date(tick.epochMs).toISOString());
-  const sourceIds = ticks.map((tick) => tick.sourceTickId);
-  const runIds = ticks.map(() => runId);
 
   const insertedRows = await sql`
     INSERT INTO market_ticks (
       asset_id, symbol, price, tick_epoch, tick_time, source, source_tick_id, ingest_run_id
     )
     SELECT * FROM UNNEST(
-      ${assetIds}::bigint[],
-      ${symbols}::text[],
-      ${prices}::numeric[],
-      ${epochs}::bigint[],
-      ${times}::timestamptz[],
+      ${ticks.map(() => assetId)}::bigint[],
+      ${ticks.map(() => symbol)}::text[],
+      ${ticks.map((tick) => tick.price)}::numeric[],
+      ${ticks.map((tick) => Math.floor(tick.epochMs / 1000))}::bigint[],
+      ${ticks.map((tick) => new Date(tick.epochMs).toISOString())}::timestamptz[],
       ARRAY_FILL('deriv'::text, ARRAY[${ticks.length}]),
-      ${sourceIds}::text[],
-      ${runIds}::uuid[]
+      ${ticks.map((tick) => tick.sourceTickId)}::text[],
+      ${ticks.map(() => runId)}::uuid[]
     )
     ON CONFLICT (source, source_tick_id) DO NOTHING
     RETURNING id
@@ -176,7 +164,7 @@ export async function ingestDerivHistoricalTicks(input: {
 
   const requestedCount = Math.min(50_000, Math.max(50, Math.floor(input.count)));
   await initDbSchema();
-  const sql = neon(dbUrl);
+  const sql: Sql = neon(dbUrl) as any;
   const runId = crypto.randomUUID();
   const startedAt = new Date().toISOString();
   const metadata: Record<string, unknown> = {
@@ -206,13 +194,15 @@ export async function ingestDerivHistoricalTicks(input: {
 
   try {
     let cursor: number | 'latest' = typeof input.endEpoch === 'number' && Number.isFinite(input.endEpoch) ? input.endEpoch : 'latest';
+
     if (input.resumeFromCheckpoint) {
       const checkpointRows = (await sql`
         SELECT last_tick_epoch
         FROM data_ingestion_checkpoints
         WHERE source = 'deriv' AND asset_symbol = ${normalizedSymbol}
         LIMIT 1
-      `) as unknown as Array<{ last_tick_epoch?: number | string | null }>;
+      `) as Array<{ last_tick_epoch?: number | string | null }>;
+
       const checkpointEpoch = Number(checkpointRows[0]?.last_tick_epoch);
       if (Number.isFinite(checkpointEpoch) && checkpointEpoch > 0) {
         cursor = Math.max(1, Math.floor(checkpointEpoch) - 1);
@@ -224,6 +214,7 @@ export async function ingestDerivHistoricalTicks(input: {
     let chunks = 0;
     let earliestEpoch = Number.POSITIVE_INFINITY;
     let latestEpoch = 0;
+    const assetId = await getAssetId(sql, normalizedSymbol);
 
     while (remaining > 0) {
       const batchSize = Math.min(5000, remaining);
@@ -235,10 +226,9 @@ export async function ingestDerivHistoricalTicks(input: {
 
       const cleanedTicks = normalizeTicks(normalizedSymbol, rawTicks);
       run.recordsRejected += rawTicks.length - cleanedTicks.length;
-
       if (!cleanedTicks.length) break;
 
-      const inserted = await insertTickBatch(sql, normalizedSymbol, await getAssetId(sql, normalizedSymbol), runId, cleanedTicks);
+      const inserted = await insertTickBatch(sql, normalizedSymbol, assetId, runId, cleanedTicks);
       run.recordsInserted += inserted;
 
       const oldest = cleanedTicks[0];
@@ -246,12 +236,7 @@ export async function ingestDerivHistoricalTicks(input: {
       earliestEpoch = Math.min(earliestEpoch, oldest.epochMs);
       latestEpoch = Math.max(latestEpoch, newest.epochMs);
 
-      await upsertCheckpoint(
-        sql,
-        normalizedSymbol,
-        Math.floor(oldest.epochMs / 1000),
-        new Date(oldest.epochMs).toISOString(),
-      );
+      await upsertCheckpoint(sql, normalizedSymbol, Math.floor(oldest.epochMs / 1000), new Date(oldest.epochMs).toISOString());
 
       cursor = Math.max(1, Math.floor(oldest.epochMs / 1000) - 1);
       remaining = requestedCount - run.recordsReceived;
@@ -292,8 +277,9 @@ export async function ingestDerivHistoricalTicks(input: {
 export async function listHistoricalIngestionRuns(limit = 10): Promise<HistoricalIngestionRun[]> {
   const dbUrl = getDbConnectionString();
   if (!dbUrl) return [];
+
   await initDbSchema();
-  const sql = neon(dbUrl);
+  const sql: Sql = neon(dbUrl) as any;
   const rows = await sql`
     SELECT
       id AS "runId",
@@ -317,7 +303,7 @@ export async function listHistoricalIngestionRuns(limit = 10): Promise<Historica
     LIMIT ${Math.max(1, Math.min(50, limit))}
   `;
 
-  return rows.map((row: any) => ({
+  return (rows as any[]).map((row: any) => ({
     runId: String(row.runId),
     symbol: String(row.symbol),
     requestedCount: Number(row.requestedCount || 0),
@@ -339,9 +325,9 @@ export async function listHistoricalIngestionRuns(limit = 10): Promise<Historica
 export async function getHistoricalIngestionCheckpoint(symbol?: string): Promise<HistoricalCheckpoint | null> {
   const dbUrl = getDbConnectionString();
   if (!dbUrl) return null;
-  await initDbSchema();
-  const sql = neon(dbUrl);
 
+  await initDbSchema();
+  const sql: Sql = neon(dbUrl) as any;
   const rows = symbol
     ? await sql`
         SELECT source, asset_symbol, last_tick_epoch, last_tick_time, updated_at
@@ -357,8 +343,8 @@ export async function getHistoricalIngestionCheckpoint(symbol?: string): Promise
         LIMIT 1
       `;
 
-  if (!rows.length) return null;
-  const row: any = rows[0];
+  if (!(rows as any[]).length) return null;
+  const row: any = (rows as any[])[0];
   return {
     source: String(row.source),
     symbol: String(row.asset_symbol),
