@@ -5,17 +5,16 @@ import { ensureMinTicks } from '@/lib/ticks-helper';
 import { initializeMlPipelineConfig } from '@/lib/ml-pipeline-config';
 import { getMlRuntimeSchemaContract } from '@/lib/ml-runtime-schema';
 import { buildSequenceFeatureDataset, buildTabularFeatureDataset } from '@/lib/ml-feature-dataset';
+import { getMlModelKeys, getSequenceModelKeys } from '@/lib/ml-model-registry';
 import { verifySessionToken } from '../../admin/auth/route';
 
 const CATEGORY_MAP: Record<string, string[]> = {
-  synthetic: ['R_100','1HZ100V','R_75','1HZ75V','R_50','1HZ50V','R_25','1HZ25V','R_10','1HZ10V'],
-  jump: ['JD10','JD25','JD50','JD75','JD100'],
-  forex: ['FRXEURUSD','FRXGBPUSD','FRXUSDJPY','FRXAUDUSD','FRXUSDCAD'],
+  synthetic: ['R_100', '1HZ100V', 'R_75', '1HZ75V', 'R_50', '1HZ50V', 'R_25', '1HZ25V', 'R_10', '1HZ10V'],
+  jump: ['JD10', 'JD25', 'JD50', 'JD75', 'JD100'],
+  forex: ['FRXEURUSD', 'FRXGBPUSD', 'FRXUSDJPY', 'FRXAUDUSD', 'FRXUSDCAD'],
   commodities: ['CWMXAUUSD'],
 };
 CATEGORY_MAP.ALL = Object.values(CATEGORY_MAP).flat();
-const MODEL_TYPES = ['xgboost','lightgbm','catboost','tcn','lstm','transformer','hmm','isolation_forest'];
-const SEQUENCE_MODELS = new Set(['tcn', 'lstm', 'transformer']);
 
 function isAdmin(req: NextRequest): boolean {
   const cookieToken = req.cookies.get('admin_session_token')?.value;
@@ -36,7 +35,8 @@ export async function POST(req: NextRequest) {
     const requiredContextTicks = Math.max(schema.canonicalFeatureWindowTicks, schema.sequenceLength);
     const minimumTrainingTicks = requiredContextTicks + Math.max(1, durationSecs);
     const symbols = category && CATEGORY_MAP[category] ? CATEGORY_MAP[category] : (retrainAll || symbol === 'ALL') ? CATEGORY_MAP.ALL : [symbol];
-    const models = modelType === 'all' || retrainAll ? MODEL_TYPES : [modelType];
+    const models = modelType === 'all' || retrainAll ? getMlModelKeys() : [modelType];
+    const sequenceModels = new Set(getSequenceModelKeys());
     const daemon = (await import('@/lib/xgboost-daemon')).xgboostDaemon;
     const sql = getDb();
     const results: any[] = [];
@@ -54,7 +54,7 @@ export async function POST(req: NextRequest) {
       let sequenceDataset: Awaited<ReturnType<typeof buildSequenceFeatureDataset>> | null = null;
 
       for (const model of models) {
-        if (SEQUENCE_MODELS.has(model)) {
+        if (sequenceModels.has(model)) {
           sequenceDataset ??= await buildSequenceFeatureDataset(ticks, context);
         } else {
           tabularDataset ??= await buildTabularFeatureDataset(ticks, context);
@@ -85,7 +85,7 @@ export async function POST(req: NextRequest) {
               version: result.modelVersion || result.schemaVersion || 'native-runtime',
               symbol: sym,
               horizonSecs: durationSecs,
-              format: result.format || (SEQUENCE_MODELS.has(model) ? 'PT_STATE' : 'PKL'),
+              format: result.format || (sequenceModels.has(model) ? 'PT_STATE' : 'PKL'),
               status: 'production',
               accuracy: Number.isFinite(Number(result.accuracy)) ? Number(result.accuracy) : undefined,
               backtestWinRate: undefined,
@@ -106,7 +106,7 @@ export async function POST(req: NextRequest) {
       }
     }
 
-    const successes = results.filter(r => r.success).length;
+    const successes = results.filter((result) => result.success).length;
     return NextResponse.json({
       success: successes > 0,
       symbol: symbols.length === 1 ? symbols[0] : `GROUP (${symbols.length})`,
