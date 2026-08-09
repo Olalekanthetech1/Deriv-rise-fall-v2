@@ -1,13 +1,19 @@
 import { neon } from '@neondatabase/serverless';
 
 /**
- * Centralized helper to safely retrieve the database connection string.
- * Returns null and logs a warning if DATABASE_URL is not set.
+ * Database boundary for the new Operations Center architecture.
+ *
+ * Important:
+ * - Uses only the new schema defined below.
+ * - Never creates or alters legacy tables.
+ * - Runtime schema initialization is idempotent and versioned.
+ * - No mock, seeded, synthetic, or fabricated market/ML records are created.
  */
+
 export function getDbConnectionString(): string | null {
-  const dbUrl = process.env.DATABASE_URL;
+  const dbUrl = process.env.DATABASE_URL?.trim();
   if (!dbUrl) {
-    console.warn('[DB] DATABASE_URL environment variable is missing or empty.');
+    console.warn('[DB] DATABASE_URL is missing.');
     return null;
   }
   return dbUrl;
@@ -15,271 +21,389 @@ export function getDbConnectionString(): string | null {
 
 export function getDb() {
   const dbUrl = getDbConnectionString();
-  if (!dbUrl) {
-    return null;
-  }
-  return neon(dbUrl);
+  return dbUrl ? neon(dbUrl) : null;
 }
 
 export function getDbOrThrow() {
-  const dbUrl = process.env.DATABASE_URL;
-  if (!dbUrl) {
-    throw new Error('[DB Configuration Error] DATABASE_URL environment variable is strictly required for this operation.');
-  }
+  const dbUrl = getDbConnectionString();
+  if (!dbUrl) throw new Error('[DB Configuration Error] DATABASE_URL is required.');
   return neon(dbUrl);
 }
 
-let isSchemaInitialized = false;
+const SCHEMA_VERSION = 1;
+let initialized = false;
 
-/**
- * Idempotent Auto-Schema setup for Neon PostgreSQL Database.
- * Runs IF NOT EXISTS statements on DB endpoints lazily with zero-ops overhead.
- */
 export async function initDbSchema(): Promise<boolean> {
+  if (initialized) return true;
   const dbUrl = getDbConnectionString();
-  if (!dbUrl) {
-    return false;
-  }
-
-  if (isSchemaInitialized) {
-    return true;
-  }
+  if (!dbUrl) return false;
 
   try {
     const sql = neon(dbUrl);
 
-    // 1. Ticks table
     await sql`
-      CREATE TABLE IF NOT EXISTS ticks (
+      CREATE TABLE IF NOT EXISTS ops_schema_migrations (
+        version INTEGER PRIMARY KEY,
+        applied_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+      )
+    `;
+
+    await sql`
+      CREATE TABLE IF NOT EXISTS market_assets (
         id BIGSERIAL PRIMARY KEY,
-        symbol VARCHAR(50) NOT NULL,
-        price NUMERIC(18, 6) NOT NULL,
-        tick_timestamp TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+        symbol VARCHAR(64) NOT NULL UNIQUE,
+        display_name VARCHAR(160),
+        asset_class VARCHAR(32) NOT NULL,
+        market_type VARCHAR(32) NOT NULL,
+        source VARCHAR(32) NOT NULL DEFAULT 'deriv',
+        quote_currency VARCHAR(16),
+        is_active BOOLEAN NOT NULL DEFAULT TRUE,
+        metadata JSONB NOT NULL DEFAULT '{}'::jsonb,
+        created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+        updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+      )
+    `;
+
+    await sql`
+      CREATE TABLE IF NOT EXISTS market_ticks (
+        id BIGSERIAL PRIMARY KEY,
+        asset_id BIGINT NOT NULL REFERENCES market_assets(id) ON DELETE CASCADE,
+        symbol VARCHAR(64) NOT NULL,
+        price NUMERIC(30, 12) NOT NULL,
+        tick_epoch BIGINT NOT NULL,
+        tick_time TIMESTAMPTZ NOT NULL,
+        source VARCHAR(32) NOT NULL DEFAULT 'deriv',
+        source_tick_id VARCHAR(128),
+        ingest_run_id UUID,
+        created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+        CONSTRAINT market_ticks_price_positive CHECK (price > 0)
+      )
+    `;
+
+    await sql`
+      CREATE UNIQUE INDEX IF NOT EXISTS uq_market_ticks_source_tick
+      ON market_ticks (source, source_tick_id)
+      WHERE source_tick_id IS NOT NULL
+    `;
+
+    await sql`
+      CREATE INDEX IF NOT EXISTS idx_market_ticks_asset_time
+      ON market_ticks (asset_id, tick_time DESC)
+    `;
+
+    await sql`
+      CREATE INDEX IF NOT EXISTS idx_market_ticks_symbol_epoch
+      ON market_ticks (symbol, tick_epoch DESC)
+    `;
+
+    await sql`
+      CREATE TABLE IF NOT EXISTS data_ingestion_runs (
+        id UUID PRIMARY KEY,
+        source VARCHAR(32) NOT NULL,
+        asset_symbol VARCHAR(64) NOT NULL,
+        requested_from TIMESTAMPTZ,
+        requested_to TIMESTAMPTZ,
+        started_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+        completed_at TIMESTAMPTZ,
+        status VARCHAR(24) NOT NULL,
+        records_received BIGINT NOT NULL DEFAULT 0,
+        records_inserted BIGINT NOT NULL DEFAULT 0,
+        records_rejected BIGINT NOT NULL DEFAULT 0,
+        first_tick_time TIMESTAMPTZ,
+        last_tick_time TIMESTAMPTZ,
+        error_message TEXT,
+        metadata JSONB NOT NULL DEFAULT '{}'::jsonb
+      )
+    `;
+
+    await sql`
+      CREATE INDEX IF NOT EXISTS idx_ingestion_runs_asset_started
+      ON data_ingestion_runs (asset_symbol, started_at DESC)
+    `;
+
+    await sql`
+      CREATE TABLE IF NOT EXISTS data_ingestion_checkpoints (
+        source VARCHAR(32) NOT NULL,
+        asset_symbol VARCHAR(64) NOT NULL,
+        last_tick_epoch BIGINT,
+        last_tick_time TIMESTAMPTZ,
+        updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+        PRIMARY KEY (source, asset_symbol)
+      )
+    `;
+
+    await sql`
+      CREATE TABLE IF NOT EXISTS training_datasets (
+        id UUID PRIMARY KEY,
+        name VARCHAR(160) NOT NULL,
+        version VARCHAR(64) NOT NULL,
+        asset_symbol VARCHAR(64) NOT NULL,
+        horizon_ticks INTEGER NOT NULL,
+        feature_schema_version VARCHAR(64) NOT NULL,
+        label_schema_version VARCHAR(64) NOT NULL,
+        source_from TIMESTAMPTZ NOT NULL,
+        source_to TIMESTAMPTZ NOT NULL,
+        sample_count BIGINT NOT NULL DEFAULT 0,
+        train_count BIGINT NOT NULL DEFAULT 0,
+        validation_count BIGINT NOT NULL DEFAULT 0,
+        test_count BIGINT NOT NULL DEFAULT 0,
+        status VARCHAR(24) NOT NULL,
+        artifact_uri TEXT,
+        checksum VARCHAR(128),
+        leakage_check_passed BOOLEAN,
+        metadata JSONB NOT NULL DEFAULT '{}'::jsonb,
+        created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+        UNIQUE (name, version)
+      )
+    `;
+
+    await sql`
+      CREATE TABLE IF NOT EXISTS ml_model_registry_v2 (
+        id BIGSERIAL PRIMARY KEY,
+        model_id VARCHAR(160) NOT NULL UNIQUE,
+        model_family VARCHAR(64) NOT NULL,
+        version VARCHAR(64) NOT NULL,
+        asset_symbol VARCHAR(64) NOT NULL,
+        asset_class VARCHAR(32) NOT NULL,
+        horizon_ticks INTEGER NOT NULL,
+        dataset_id UUID REFERENCES training_datasets(id) ON DELETE SET NULL,
+        format VARCHAR(32) NOT NULL,
+        status VARCHAR(24) NOT NULL,
+        feature_schema_version VARCHAR(64) NOT NULL,
+        framework VARCHAR(64),
+        training_run_id UUID,
+        metrics JSONB NOT NULL DEFAULT '{}'::jsonb,
+        hyperparameters JSONB NOT NULL DEFAULT '{}'::jsonb,
+        created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+        updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+      )
+    `;
+
+    await sql`
+      CREATE INDEX IF NOT EXISTS idx_model_registry_asset_horizon
+      ON ml_model_registry_v2 (asset_symbol, horizon_ticks, updated_at DESC)
+    `;
+
+    await sql`
+      CREATE TABLE IF NOT EXISTS ml_model_metrics (
+        id BIGSERIAL PRIMARY KEY,
+        model_id VARCHAR(160) NOT NULL REFERENCES ml_model_registry_v2(model_id) ON DELETE CASCADE,
+        split VARCHAR(24) NOT NULL,
+        metric_name VARCHAR(96) NOT NULL,
+        metric_value NUMERIC,
+        sample_count BIGINT,
+        metadata JSONB NOT NULL DEFAULT '{}'::jsonb,
         created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
-      );
+      )
     `;
 
     await sql`
-      CREATE INDEX IF NOT EXISTS idx_ticks_symbol_timestamp 
-      ON ticks (symbol, tick_timestamp DESC);
-    `;
-
-    // 2. ML Models Table
-    await sql`
-      CREATE TABLE IF NOT EXISTS ml_models (
-        id SERIAL PRIMARY KEY,
-        model_name VARCHAR(100) NOT NULL,
-        version VARCHAR(50) NOT NULL,
-        symbol VARCHAR(50) NOT NULL,
-        asset_class VARCHAR(50) DEFAULT 'synthetic',
-        accuracy NUMERIC(5,2),
-        feature_count INT DEFAULT 37,
-        hyperparameters JSONB,
-        weights_data JSONB,
-        is_active BOOLEAN DEFAULT TRUE,
-        trained_at TIMESTAMPTZ DEFAULT NOW(),
-        created_at TIMESTAMPTZ DEFAULT NOW()
-      );
-    `;
-
-    // 3. ML Training Logs
-    await sql`
-      CREATE TABLE IF NOT EXISTS ml_training_logs (
-        id SERIAL PRIMARY KEY,
-        symbol VARCHAR(50) NOT NULL,
-        samples_count INT NOT NULL,
-        train_accuracy NUMERIC(5,2),
-        val_accuracy NUMERIC(5,2),
-        log_message TEXT,
-        created_at TIMESTAMPTZ DEFAULT NOW()
-      );
-    `;
-
-    // 4. Trades Execution Log Table
-    await sql`
-      CREATE TABLE IF NOT EXISTS trades (
-        id SERIAL PRIMARY KEY,
-        symbol VARCHAR(50) NOT NULL,
-        contract_type VARCHAR(20) NOT NULL,
-        stake NUMERIC(12, 2) NOT NULL,
-        payout NUMERIC(12, 2),
-        buy_price NUMERIC(18, 6),
-        sell_price NUMERIC(18, 6),
-        status VARCHAR(20) NOT NULL,
-        prediction_confidence NUMERIC(5, 2),
-        strategy VARCHAR(50),
-        executed_at TIMESTAMPTZ DEFAULT NOW()
-      );
-    `;
-
-    // 5. ML Model Registry Table (ONNX / XGBoost Production Deployment Registry)
-    await sql`
-      CREATE TABLE IF NOT EXISTS ml_model_registry (
-        id SERIAL PRIMARY KEY,
-        model_id VARCHAR(100) UNIQUE NOT NULL,
-        model_name VARCHAR(150) NOT NULL,
-        version VARCHAR(50) NOT NULL,
-        symbol VARCHAR(50) NOT NULL,
-        horizon_secs INT DEFAULT 5,
-        format VARCHAR(20) DEFAULT 'ONNX',
-        status VARCHAR(20) DEFAULT 'staging',
-        accuracy NUMERIC(5,2) DEFAULT 0.0,
-        backtest_win_rate NUMERIC(5,2) DEFAULT 0.0,
-        backtest_profit_factor NUMERIC(5,2) DEFAULT 1.0,
-        feature_count INT DEFAULT 37,
-        file_path TEXT,
-        hyperparameters JSONB,
-        metrics JSONB,
-        created_at TIMESTAMPTZ DEFAULT NOW(),
-        updated_at TIMESTAMPTZ DEFAULT NOW()
-      );
-    `;
-
-    // 6. ML Backtest Results
-    await sql`
-      CREATE TABLE IF NOT EXISTS ml_backtest_results (
-        id SERIAL PRIMARY KEY,
-        model_id VARCHAR(100) REFERENCES ml_model_registry(model_id) ON DELETE CASCADE,
-        symbol VARCHAR(50) NOT NULL,
-        duration_sec INT NOT NULL,
-        total_trades INT NOT NULL,
-        winning_trades INT NOT NULL,
-        profit_factor NUMERIC(6, 2),
-        max_drawdown NUMERIC(5, 2),
-        sharpe_ratio NUMERIC(5, 2),
-        tested_at TIMESTAMPTZ DEFAULT NOW()
-      );
-    `;
-
-    // 7. ML Performance Audit (Live Drift Tracker)
-    await sql`
-      CREATE TABLE IF NOT EXISTS ml_performance_audit (
+      CREATE TABLE IF NOT EXISTS ml_model_artifacts (
         id BIGSERIAL PRIMARY KEY,
-        symbol VARCHAR(50) NOT NULL,
-        model_id VARCHAR(100),
-        predicted_signal VARCHAR(10) NOT NULL,
-        confidence NUMERIC(5, 2) NOT NULL,
-        entry_price NUMERIC(18, 6) NOT NULL,
-        exit_price NUMERIC(18, 6),
-        outcome VARCHAR(10),
-        created_at TIMESTAMPTZ DEFAULT NOW()
-      );
-    `;
-
-    // Schema column migrations/guards
-    await sql`
-      ALTER TABLE ml_models 
-      ADD COLUMN IF NOT EXISTS asset_class VARCHAR(50) DEFAULT 'synthetic';
+        model_id VARCHAR(160) NOT NULL REFERENCES ml_model_registry_v2(model_id) ON DELETE CASCADE,
+        artifact_type VARCHAR(32) NOT NULL,
+        uri TEXT NOT NULL,
+        checksum VARCHAR(128),
+        size_bytes BIGINT,
+        created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+      )
     `;
 
     await sql`
-      ALTER TABLE trades 
-      ADD COLUMN IF NOT EXISTS prediction_confidence NUMERIC(5, 2);
+      CREATE TABLE IF NOT EXISTS ml_backtest_runs (
+        id UUID PRIMARY KEY,
+        model_id VARCHAR(160) REFERENCES ml_model_registry_v2(model_id) ON DELETE SET NULL,
+        asset_symbol VARCHAR(64) NOT NULL,
+        horizon_ticks INTEGER NOT NULL,
+        dataset_id UUID REFERENCES training_datasets(id) ON DELETE SET NULL,
+        total_samples BIGINT NOT NULL,
+        winning_samples BIGINT NOT NULL,
+        profit_factor NUMERIC(12, 6),
+        max_drawdown NUMERIC(12, 6),
+        sharpe_ratio NUMERIC(12, 6),
+        started_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+        completed_at TIMESTAMPTZ,
+        status VARCHAR(24) NOT NULL,
+        metrics JSONB NOT NULL DEFAULT '{}'::jsonb
+      )
     `;
 
-    isSchemaInitialized = true;
+    await sql`
+      CREATE TABLE IF NOT EXISTS ml_performance_events (
+        id BIGSERIAL PRIMARY KEY,
+        asset_symbol VARCHAR(64) NOT NULL,
+        model_id VARCHAR(160) REFERENCES ml_model_registry_v2(model_id) ON DELETE SET NULL,
+        horizon_ticks INTEGER NOT NULL,
+        predicted_signal VARCHAR(32) NOT NULL,
+        confidence NUMERIC(8, 6) NOT NULL,
+        entry_price NUMERIC(30, 12) NOT NULL,
+        outcome VARCHAR(32),
+        exit_price NUMERIC(30, 12),
+        prediction_time TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+        outcome_time TIMESTAMPTZ,
+        metadata JSONB NOT NULL DEFAULT '{}'::jsonb
+      )
+    `;
+
+    await sql`
+      CREATE TABLE IF NOT EXISTS execution_trades (
+        id UUID PRIMARY KEY,
+        asset_symbol VARCHAR(64) NOT NULL,
+        contract_type VARCHAR(32) NOT NULL,
+        stake NUMERIC(20, 8) NOT NULL,
+        payout NUMERIC(20, 8),
+        buy_price NUMERIC(30, 12),
+        sell_price NUMERIC(30, 12),
+        status VARCHAR(32) NOT NULL,
+        model_id VARCHAR(160) REFERENCES ml_model_registry_v2(model_id) ON DELETE SET NULL,
+        prediction_event_id BIGINT REFERENCES ml_performance_events(id) ON DELETE SET NULL,
+        executed_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+        settled_at TIMESTAMPTZ,
+        metadata JSONB NOT NULL DEFAULT '{}'::jsonb
+      )
+    `;
+
+    await sql`
+      CREATE TABLE IF NOT EXISTS ops_model_selection_events (
+        id BIGSERIAL PRIMARY KEY,
+        asset_symbol VARCHAR(64) NOT NULL,
+        asset_class VARCHAR(32) NOT NULL,
+        horizon_ticks INTEGER NOT NULL,
+        selected_model_id VARCHAR(160) REFERENCES ml_model_registry_v2(model_id) ON DELETE SET NULL,
+        selection_reason VARCHAR(64) NOT NULL,
+        candidate_count INTEGER NOT NULL DEFAULT 0,
+        created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+        metadata JSONB NOT NULL DEFAULT '{}'::jsonb
+      )
+    `;
+
+    await sql`
+      CREATE TABLE IF NOT EXISTS ops_audit_events (
+        id BIGSERIAL PRIMARY KEY,
+        category VARCHAR(48) NOT NULL,
+        severity VARCHAR(24) NOT NULL,
+        actor VARCHAR(160),
+        action VARCHAR(160) NOT NULL,
+        request_id VARCHAR(128),
+        resource_type VARCHAR(96),
+        resource_id VARCHAR(160),
+        metadata JSONB NOT NULL DEFAULT '{}'::jsonb,
+        created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+      )
+    `;
+
+    await sql`
+      CREATE TABLE IF NOT EXISTS ops_health_events (
+        id BIGSERIAL PRIMARY KEY,
+        service VARCHAR(96) NOT NULL,
+        status VARCHAR(24) NOT NULL,
+        latency_ms NUMERIC(12, 3),
+        message TEXT,
+        metadata JSONB NOT NULL DEFAULT '{}'::jsonb,
+        checked_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+      )
+    `;
+
+    await sql`
+      INSERT INTO ops_schema_migrations (version)
+      VALUES (${SCHEMA_VERSION})
+      ON CONFLICT (version) DO NOTHING
+    `;
+
+    initialized = true;
     return true;
-  } catch (err) {
-    console.error('[DB Schema Init Error]:', err);
+  } catch (error) {
+    console.error('[DB Schema Init Error]:', error);
     return false;
   }
 }
 
-export async function saveTicksBatch(symbol: string, ticks: Array<{ price: number; timestamp?: number }>) {
-  const dbUrl = getDbConnectionString();
-  if (!dbUrl || !ticks.length) return false;
+async function getAssetId(sql: ReturnType<typeof neon>, symbol: string): Promise<number> {
+  const rows = await sql`
+    INSERT INTO market_assets (symbol, asset_class, market_type, source)
+    VALUES (${symbol}, 'unknown', 'unknown', 'deriv')
+    ON CONFLICT (symbol) DO UPDATE SET updated_at = NOW()
+    RETURNING id
+  `;
+  return Number(rows[0].id);
+}
 
-  await initDbSchema();
+export async function saveTicksBatch(symbol: string, ticks: Array<{ price: number; timestamp?: number; epoch?: number; sourceTickId?: string }>) {
+  if (!ticks.length) return false;
+  const dbUrl = getDbConnectionString();
+  if (!dbUrl || !(await initDbSchema())) return false;
+
   try {
     const sql = neon(dbUrl);
-    const CHUNK_SIZE = 200;
-    for (let i = 0; i < ticks.length; i += CHUNK_SIZE) {
-      const chunk = ticks.slice(i, i + CHUNK_SIZE);
-      const symbols: string[] = [];
-      const prices: number[] = [];
-      const timestamps: string[] = [];
+    const assetId = await getAssetId(sql, symbol);
+    const symbols = ticks.map(() => symbol);
+    const assetIds = ticks.map(() => assetId);
+    const prices = ticks.map((tick) => tick.price);
+    const epochs = ticks.map((tick) => tick.epoch ?? Math.floor((tick.timestamp ?? Date.now()) / 1000));
+    const times = ticks.map((tick) => new Date((tick.timestamp ?? Date.now())).toISOString());
+    const sourceIds = ticks.map((tick) => tick.sourceTickId ?? null);
 
-      for (const tick of chunk) {
-        symbols.push(symbol);
-        prices.push(tick.price);
-        timestamps.push((tick.timestamp ? new Date(tick.timestamp) : new Date()).toISOString());
-      }
-
-      await sql`
-        INSERT INTO ticks (symbol, price, tick_timestamp)
-        SELECT * FROM UNNEST(
-          ${symbols}::text[],
-          ${prices}::numeric[],
-          ${timestamps}::timestamptz[]
-        )
-      `;
-    }
+    await sql`
+      INSERT INTO market_ticks (asset_id, symbol, price, tick_epoch, tick_time, source, source_tick_id)
+      SELECT * FROM UNNEST(
+        ${assetIds}::bigint[],
+        ${symbols}::text[],
+        ${prices}::numeric[],
+        ${epochs}::bigint[],
+        ${times}::timestamptz[],
+        ARRAY_FILL('deriv'::text, ARRAY[${ticks.length}]),
+        ${sourceIds}::text[]
+      )
+      ON CONFLICT (source, source_tick_id) DO NOTHING
+    `;
     return true;
-  } catch (err) {
-    console.error('[saveTicksBatch Error]:', err);
+  } catch (error) {
+    console.error('[saveTicksBatch Error]:', error);
     return false;
   }
 }
 
-export async function getTicksHistory(symbol: string, limit: number = 300) {
+export async function getTicksHistory(symbol: string, limit = 300) {
   const dbUrl = getDbConnectionString();
-  if (!dbUrl) return [];
+  if (!dbUrl || !(await initDbSchema())) return [];
 
-  await initDbSchema();
   try {
     const sql = neon(dbUrl);
     const rows = await sql`
-      SELECT price, tick_timestamp 
-      FROM ticks 
+      SELECT price, tick_epoch, tick_time
+      FROM market_ticks
       WHERE symbol = ${symbol}
-      ORDER BY tick_timestamp DESC 
+      ORDER BY tick_time DESC
       LIMIT ${limit}
     `;
-    return rows.reverse().map((r: any) => ({
-      price: parseFloat(r.price),
-      timestamp: new Date(r.tick_timestamp).getTime(),
+    return rows.reverse().map((row: any) => ({
+      price: Number(row.price),
+      timestamp: Number(row.tick_epoch) * 1000 || new Date(row.tick_time).getTime(),
     }));
-  } catch (err) {
-    console.error('[getTicksHistory Error]:', err);
+  } catch (error) {
+    console.error('[getTicksHistory Error]:', error);
     return [];
   }
 }
 
 export async function getRegisteredModels(symbol?: string, status?: string) {
   const dbUrl = getDbConnectionString();
-  if (!dbUrl) return [];
+  if (!dbUrl || !(await initDbSchema())) return [];
 
-  await initDbSchema();
   try {
     const sql = neon(dbUrl);
-    let rows;
     if (symbol && status) {
-      rows = await sql`
-        SELECT * FROM ml_model_registry
-        WHERE symbol = ${symbol} AND status = ${status}
-        ORDER BY updated_at DESC
-      `;
-    } else if (symbol) {
-      rows = await sql`
-        SELECT * FROM ml_model_registry
-        WHERE symbol = ${symbol}
-        ORDER BY updated_at DESC
-      `;
-    } else if (status) {
-      rows = await sql`
-        SELECT * FROM ml_model_registry
-        WHERE status = ${status}
-        ORDER BY updated_at DESC
-      `;
-    } else {
-      rows = await sql`
-        SELECT * FROM ml_model_registry
-        ORDER BY updated_at DESC
-      `;
+      return await sql`SELECT * FROM ml_model_registry_v2 WHERE asset_symbol = ${symbol} AND status = ${status} ORDER BY updated_at DESC`;
     }
-    return rows;
-  } catch (err) {
-    console.error('[getRegisteredModels Error]:', err);
+    if (symbol) {
+      return await sql`SELECT * FROM ml_model_registry_v2 WHERE asset_symbol = ${symbol} ORDER BY updated_at DESC`;
+    }
+    if (status) {
+      return await sql`SELECT * FROM ml_model_registry_v2 WHERE status = ${status} ORDER BY updated_at DESC`;
+    }
+    return await sql`SELECT * FROM ml_model_registry_v2 ORDER BY updated_at DESC`;
+  } catch (error) {
+    console.error('[getRegisteredModels Error]:', error);
     return [];
   }
 }
@@ -296,77 +420,73 @@ export async function registerModelInDb(data: {
   backtestWinRate?: number;
   backtestProfitFactor?: number;
   filePath?: string;
-  hyperparameters?: any;
-  metrics?: any;
+  hyperparameters?: unknown;
+  metrics?: unknown;
+  modelFamily?: string;
+  assetClass?: string;
+  featureSchemaVersion?: string;
+  framework?: string;
+  datasetId?: string;
+  trainingRunId?: string;
 }) {
   const dbUrl = getDbConnectionString();
-  if (!dbUrl) return false;
+  if (!dbUrl || !(await initDbSchema())) return false;
 
-  await initDbSchema();
   try {
     const sql = neon(dbUrl);
-    const horizon = data.horizonSecs || 5;
-    const fmt = data.format || 'ONNX';
-    const st = data.status || 'staging';
-    const acc = data.accuracy || 0.0;
-    const winRate = data.backtestWinRate || 0.0;
-    const pf = data.backtestProfitFactor || 1.0;
-    const hp = data.hyperparameters ? JSON.stringify(data.hyperparameters) : '{}';
-    const met = data.metrics ? JSON.stringify(data.metrics) : '{}';
-
     await sql`
-      INSERT INTO ml_model_registry (
-        model_id, model_name, version, symbol, horizon_secs, format, status,
-        accuracy, backtest_win_rate, backtest_profit_factor, file_path, hyperparameters, metrics, updated_at
-      )
-      VALUES (
-        ${data.modelId}, ${data.modelName}, ${data.version}, ${data.symbol}, ${horizon}, ${fmt}, ${st},
-        ${acc}, ${winRate}, ${pf}, ${data.filePath || ''}, ${hp}::jsonb, ${met}::jsonb, NOW()
+      INSERT INTO ml_model_registry_v2 (
+        model_id, model_family, version, asset_symbol, asset_class, horizon_ticks,
+        dataset_id, format, status, feature_schema_version, framework, training_run_id,
+        metrics, hyperparameters, updated_at
+      ) VALUES (
+        ${data.modelId}, ${data.modelFamily || data.modelName}, ${data.version}, ${data.symbol},
+        ${data.assetClass || 'unknown'}, ${data.horizonSecs || 5}, ${data.datasetId || null},
+        ${data.format || 'onnx'}, ${data.status || 'candidate'}, ${data.featureSchemaVersion || 'v1'},
+        ${data.framework || null}, ${data.trainingRunId || null},
+        ${JSON.stringify({ accuracy: data.accuracy, backtestWinRate: data.backtestWinRate, backtestProfitFactor: data.backtestProfitFactor, ...(data.metrics as Record<string, unknown> || {}) })}::jsonb,
+        ${JSON.stringify(data.hyperparameters || {})}::jsonb, NOW()
       )
       ON CONFLICT (model_id) DO UPDATE SET
-        model_name = EXCLUDED.model_name,
+        model_family = EXCLUDED.model_family,
         version = EXCLUDED.version,
-        horizon_secs = EXCLUDED.horizon_secs,
+        asset_symbol = EXCLUDED.asset_symbol,
+        asset_class = EXCLUDED.asset_class,
+        horizon_ticks = EXCLUDED.horizon_ticks,
+        dataset_id = EXCLUDED.dataset_id,
         format = EXCLUDED.format,
         status = EXCLUDED.status,
-        accuracy = EXCLUDED.accuracy,
-        backtest_win_rate = EXCLUDED.backtest_win_rate,
-        backtest_profit_factor = EXCLUDED.backtest_profit_factor,
-        file_path = EXCLUDED.file_path,
-        hyperparameters = EXCLUDED.hyperparameters,
+        feature_schema_version = EXCLUDED.feature_schema_version,
+        framework = EXCLUDED.framework,
+        training_run_id = EXCLUDED.training_run_id,
         metrics = EXCLUDED.metrics,
+        hyperparameters = EXCLUDED.hyperparameters,
         updated_at = NOW()
     `;
     return true;
-  } catch (err) {
-    console.error('[registerModelInDb Error]:', err);
+  } catch (error) {
+    console.error('[registerModelInDb Error]:', error);
     return false;
   }
 }
 
 export async function promoteModelInRegistry(modelId: string, symbol: string, horizonSecs: number) {
   const dbUrl = getDbConnectionString();
-  if (!dbUrl) return false;
+  if (!dbUrl || !(await initDbSchema())) return false;
 
-  await initDbSchema();
   try {
     const sql = neon(dbUrl);
-    // Demote any current production model for same symbol & horizon to staging
-    await sql`
-      UPDATE ml_model_registry
-      SET status = 'staging', updated_at = NOW()
-      WHERE symbol = ${symbol} AND horizon_secs = ${horizonSecs} AND status = 'production'
+    const result = await sql`
+      UPDATE ml_model_registry_v2
+      SET status = CASE WHEN model_id = ${modelId} THEN 'production' ELSE 'staging' END,
+          updated_at = NOW()
+      WHERE asset_symbol = ${symbol}
+        AND horizon_ticks = ${horizonSecs}
+        AND (model_id = ${modelId} OR status = 'production')
     `;
-
-    // Promote target model to production
-    await sql`
-      UPDATE ml_model_registry
-      SET status = 'production', updated_at = NOW()
-      WHERE model_id = ${modelId}
-    `;
-    return true;
-  } catch (err) {
-    console.error('[promoteModelInRegistry Error]:', err);
+    return Number(result.count ?? 0) > 0;
+  } catch (error) {
+    console.error('[promoteModelInRegistry Error]:', error);
     return false;
   }
 }
@@ -380,21 +500,22 @@ export async function saveBacktestResults(data: {
   profitFactor: number;
 }) {
   const dbUrl = getDbConnectionString();
-  if (!dbUrl) return false;
+  if (!dbUrl || !(await initDbSchema())) return false;
 
-  await initDbSchema();
   try {
     const sql = neon(dbUrl);
     await sql`
-      INSERT INTO ml_backtest_results (
-        model_id, symbol, duration_sec, total_trades, winning_trades, profit_factor
+      INSERT INTO ml_backtest_runs (
+        id, model_id, asset_symbol, horizon_ticks, total_samples, winning_samples,
+        profit_factor, completed_at, status
       ) VALUES (
-        ${data.modelId || null}, ${data.symbol}, ${data.durationSec}, ${data.totalTrades}, ${data.winningTrades}, ${data.profitFactor}
+        gen_random_uuid(), ${data.modelId || null}, ${data.symbol}, ${data.durationSec},
+        ${data.totalTrades}, ${data.winningTrades}, ${data.profitFactor}, NOW(), 'completed'
       )
     `;
     return true;
-  } catch (err) {
-    console.error('[saveBacktestResults Error]:', err);
+  } catch (error) {
+    console.error('[saveBacktestResults Error]:', error);
     return false;
   }
 }
@@ -409,21 +530,23 @@ export async function savePerformanceAudit(data: {
   outcome?: string;
 }) {
   const dbUrl = getDbConnectionString();
-  if (!dbUrl) return false;
+  if (!dbUrl || !(await initDbSchema())) return false;
 
-  await initDbSchema();
   try {
     const sql = neon(dbUrl);
     await sql`
-      INSERT INTO ml_performance_audit (
-        symbol, model_id, predicted_signal, confidence, entry_price, exit_price, outcome
+      INSERT INTO ml_performance_events (
+        asset_symbol, model_id, horizon_ticks, predicted_signal, confidence,
+        entry_price, exit_price, outcome, outcome_time
       ) VALUES (
-        ${data.symbol}, ${data.modelId || null}, ${data.predictedSignal}, ${data.confidence}, ${data.entryPrice}, ${data.exitPrice || null}, ${data.outcome || null}
+        ${data.symbol}, ${data.modelId || null}, 1, ${data.predictedSignal}, ${data.confidence},
+        ${data.entryPrice}, ${data.exitPrice ?? null}, ${data.outcome ?? null},
+        CASE WHEN ${data.outcome ?? null} IS NULL THEN NULL ELSE NOW() END
       )
     `;
     return true;
-  } catch (err) {
-    console.error('[savePerformanceAudit Error]:', err);
+  } catch (error) {
+    console.error('[savePerformanceAudit Error]:', error);
     return false;
   }
 }
