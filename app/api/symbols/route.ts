@@ -11,6 +11,22 @@ export interface ActiveSymbolItem {
   isOpen: boolean;
 }
 
+type DerivActiveSymbol = {
+  symbol?: string;
+  underlying_symbol?: string;
+  display_name?: string;
+  underlying_symbol_name?: string;
+  market?: string;
+  submarket?: string;
+  submarket_display_name?: string;
+  exchange_is_open?: number | string | boolean;
+  is_trading_suspended?: number | string | boolean;
+};
+
+function asBoolean(value: unknown): boolean {
+  return value === true || value === 1 || value === '1' || value === 'true';
+}
+
 async function fetchLiveSymbols(): Promise<ActiveSymbolItem[]> {
   const appId = process.env.NEXT_PUBLIC_DERIV_APP_ID?.trim();
   if (!appId) throw new Error('NEXT_PUBLIC_DERIV_APP_ID is not configured.');
@@ -37,7 +53,10 @@ async function fetchLiveSymbols(): Promise<ActiveSymbolItem[]> {
     };
 
     ws.on('open', () => {
-      ws.send(JSON.stringify({ active_symbols: 'brief', product_type: 'basic' }));
+      // Keep this request compatible with the current Deriv active_symbols API.
+      // Filtering is performed locally because product_type was removed from
+      // the current endpoint contract.
+      ws.send(JSON.stringify({ active_symbols: 'brief' }));
     });
 
     ws.on('message', (data: WebSocket.Data) => {
@@ -50,19 +69,25 @@ async function fetchLiveSymbols(): Promise<ActiveSymbolItem[]> {
 
         if (!Array.isArray(response.active_symbols) || response.active_symbols.length === 0) return;
 
-        const formatted = response.active_symbols
-          .map((item: any): ActiveSymbolItem | null => {
-            const symbol = String(item.symbol || item.underlying_symbol || '').trim();
+        const formatted = (response.active_symbols as DerivActiveSymbol[])
+          .map((item): ActiveSymbolItem | null => {
+            // Support both the current API field names and the legacy names so
+            // the application remains resilient during Deriv API transitions.
+            const symbol = String(item.underlying_symbol || item.symbol || '').trim();
             if (!symbol) return null;
+
+            const exchangeOpen = asBoolean(item.exchange_is_open);
+            const tradingSuspended = asBoolean(item.is_trading_suspended);
+
             return {
               symbol,
-              displayName: String(item.display_name || symbol),
+              displayName: String(item.underlying_symbol_name || item.display_name || symbol),
               market: String(item.market || ''),
-              submarket: String(item.submarket_display_name || item.submarket || ''),
-              isOpen: item.exchange_is_open === 1,
+              submarket: String(item.submarket || item.submarket_display_name || ''),
+              isOpen: exchangeOpen && !tradingSuspended,
             };
           })
-          .filter((item: ActiveSymbolItem | null): item is ActiveSymbolItem => item !== null);
+          .filter((item): item is ActiveSymbolItem => item !== null);
 
         if (!formatted.length) {
           fail(new Error('Deriv returned no usable active symbols.'));
@@ -98,7 +123,11 @@ derivCircuitBreaker.on('close', () => logger.info('Deriv WS Circuit Breaker CLOS
 export async function GET() {
   try {
     const symbols = await derivCircuitBreaker.fire();
-    return NextResponse.json({ success: true, dataSource: 'deriv-live', symbols }, { headers: { 'Cache-Control': 'no-store' } });
+    return NextResponse.json({
+      success: true,
+      dataSource: 'deriv-live',
+      symbols,
+    }, { headers: { 'Cache-Control': 'no-store' } });
   } catch (err: any) {
     logger.error(`Error in /api/symbols: ${err?.message || err}`);
     return NextResponse.json({
