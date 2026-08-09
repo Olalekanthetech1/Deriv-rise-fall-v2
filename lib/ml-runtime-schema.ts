@@ -19,6 +19,10 @@ export type MlRuntimeSchemaContract = {
   canonicalFeatureWindowTicks: number;
   sequenceLength: number;
   defaultHorizonTicks: number;
+  regimeThreshold: number;
+  digitPrecision: number;
+  syntheticSymbolPrefixes: string[];
+  splitRatios: FeaturePipelineConfig['splitRatios'];
   normalizationMethod: FeaturePipelineConfig['normalizationMethod'];
   normalizationEpsilon: number;
 };
@@ -29,12 +33,8 @@ export function buildMlRuntimeSchemaContract(config: FeaturePipelineConfig): MlR
   const featureCount = getFeatureCount();
   const sequenceLength = config.featureWindows.short;
 
-  if (featureOrder.length !== featureCount) {
-    throw new Error('[ML Schema] Registry feature count/order mismatch.');
-  }
-  if (sequenceLength <= 0) {
-    throw new Error('[ML Schema] Sequence length must be positive.');
-  }
+  if (featureOrder.length !== featureCount) throw new Error('[ML Schema] Registry feature count/order mismatch.');
+  if (sequenceLength <= 0) throw new Error('[ML Schema] Sequence length must be positive.');
 
   const fingerprintPayload = {
     pipelineVersion: config.pipelineVersion,
@@ -43,13 +43,15 @@ export function buildMlRuntimeSchemaContract(config: FeaturePipelineConfig): MlR
     featureWindows: config.featureWindows,
     canonicalFeatureWindowTicks: config.canonicalFeatureWindowTicks,
     sequenceLength,
+    defaultHorizonTicks: config.defaultHorizonTicks,
+    regimeThreshold: config.regimeThreshold,
+    digitPrecision: config.digitPrecision,
+    syntheticSymbolPrefixes: config.syntheticSymbolPrefixes,
+    splitRatios: config.splitRatios,
     normalizationMethod: config.normalizationMethod,
     normalizationEpsilon: config.normalizationEpsilon,
   };
-  const schemaFingerprint = crypto
-    .createHash('sha256')
-    .update(JSON.stringify(fingerprintPayload))
-    .digest('hex');
+  const schemaFingerprint = crypto.createHash('sha256').update(JSON.stringify(fingerprintPayload)).digest('hex');
 
   return {
     contractVersion: 'runtime-schema-contract-v1',
@@ -63,6 +65,10 @@ export function buildMlRuntimeSchemaContract(config: FeaturePipelineConfig): MlR
     canonicalFeatureWindowTicks: config.canonicalFeatureWindowTicks,
     sequenceLength,
     defaultHorizonTicks: config.defaultHorizonTicks,
+    regimeThreshold: config.regimeThreshold,
+    digitPrecision: config.digitPrecision,
+    syntheticSymbolPrefixes: [...config.syntheticSymbolPrefixes],
+    splitRatios: { ...config.splitRatios },
     normalizationMethod: config.normalizationMethod,
     normalizationEpsilon: config.normalizationEpsilon,
   };
