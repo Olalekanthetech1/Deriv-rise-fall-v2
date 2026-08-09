@@ -89,11 +89,15 @@ function contractCapabilities(response: RecordLike): ContractCapability[] {
 }
 
 function unitsForExpiryType(expiryType: string): DerivDurationUnit[] {
+  // expiry_type is only a hint. The proposal endpoint is authoritative for
+  // the actual duration unit/value accepted for a contract. In particular,
+  // intraday contracts can expose tick-duration proposals, so TICKS must be
+  // probed independently rather than being disabled from the expiry label.
   switch (expiryType) {
     case 'tick': case 'ticks': return ['t'];
-    case 'intraday': return ['s', 'm', 'h'];
-    case 'daily': return ['h', 'd'];
-    case 'endtime': return ['s', 'm', 'h', 'd'];
+    case 'intraday': return ['t', 's', 'm', 'h'];
+    case 'daily': return ['t', 'h', 'd'];
+    case 'endtime': return ['t', 's', 'm', 'h', 'd'];
     default: return ['t', 's', 'm', 'h', 'd'];
   }
 }
@@ -134,8 +138,8 @@ async function discover(symbol: string): Promise<DerivDurationDiscovery> {
     if (!capabilities.length) throw new Error(`Deriv returned no duration-probeable contracts for ${symbol}.`);
 
     // Build the duration registry from the UNION of broker contract capabilities.
-    // A tick-only CALL/PUT contract must not hide time-based MULTUP/MULTDOWN
-    // capabilities on the same asset.
+    // Duration units are candidates only; each candidate is verified by a
+    // real proposal request before it enters the registry.
     const units = Array.from(new Set(capabilities.flatMap(c => unitsForExpiryType(c.expiryType))));
     const unitOrder: DerivDurationUnit[] = ['t', 's', 'm', 'h', 'd'];
     units.sort((a, b) => unitOrder.indexOf(a) - unitOrder.indexOf(b));
@@ -164,7 +168,7 @@ export function durationToSeconds(value: number, unit: DerivDurationUnit): numbe
   return value * ({ s: 1, m: 60, h: 3600, d: 86400 } as Record<Exclude<DerivDurationUnit, 't'>, number>)[unit];
 }
 export function durationLabel(value: number, unit: DerivDurationUnit): string { return `${value} ${{ t: 'ticks', s: 'seconds', m: 'minutes', h: 'hours', d: 'days' }[unit]}`; }
-export function durationRangeLabel(range: DerivDurationRange): string { return range.min === range.max ? durationLabel(range.min, range.unit) : `${durationLabel(range.min, range.unit)} – ${durationLabel(range.max, range.unit)}`; }
+export function durationRangeLabel(range: DerivDurationRange): string { return range.min === range.max ? durationLabel(range.min, range.unit) : `${durationLabel(range.min, range.unit)} – ${durationLabel(range.min, range.unit)}`.replace(durationLabel(range.min, range.unit), `${durationLabel(range.min, range.unit)} – ${durationLabel(range.max, range.unit)}`); }
 export function expandTrainingDurations(ranges: DerivDurationRange[], maxExpandedPerRange = 128): Array<{ value: number; unit: DerivDurationUnit; rangeId: string }> {
   const result: Array<{ value: number; unit: DerivDurationUnit; rangeId: string }> = [];
   for (const range of ranges) {
