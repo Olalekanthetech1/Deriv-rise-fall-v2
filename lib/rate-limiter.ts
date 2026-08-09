@@ -1,7 +1,8 @@
 import { Ratelimit } from '@upstash/ratelimit';
 import { Redis } from '@upstash/redis';
 
-// Simple in-memory rate limiter fallback
+// In-memory fallback is intentionally best-effort. Production deployments should provide Upstash Redis
+// so rate limits are shared across instances.
 const memoryStore = new Map<string, { count: number; resetAt: number }>();
 export let inMemoryBlocks = 0;
 
@@ -40,7 +41,7 @@ export async function incrementRedisBlock() {
   }
 }
 
-// Generous, high-throughput rate limits for ML operations, live WebSocket ticks, and general APIs
+// ML operations: high throughput because model endpoints can legitimately be called frequently.
 const mlRatelimit = redisClient
   ? new Ratelimit({
       redis: redisClient,
@@ -49,7 +50,7 @@ const mlRatelimit = redisClient
     })
   : null;
 
-// 600 req/min for General API
+// General API traffic.
 const apiRatelimit = redisClient
   ? new Ratelimit({
       redis: redisClient,
@@ -58,7 +59,16 @@ const apiRatelimit = redisClient
     })
   : null;
 
-// 3000 req/min for WS feed / Ticks (High volume)
+// Authentication endpoints require a materially stricter limit to slow credential attacks.
+const authRatelimit = redisClient
+  ? new Ratelimit({
+      redis: redisClient,
+      limiter: Ratelimit.slidingWindow(10, '1 m'),
+      ephemeralCache: new Map(),
+    })
+  : null;
+
+// Tick/feed traffic is high volume by design.
 const wsRatelimit = redisClient
   ? new Ratelimit({
       redis: redisClient,
@@ -67,33 +77,27 @@ const wsRatelimit = redisClient
     })
   : null;
 
-export async function checkRateLimit(key: string, type: 'ml' | 'api' | 'ws' = 'api') {
+export async function checkRateLimit(key: string, type: 'ml' | 'api' | 'auth' | 'ws' = 'api') {
   let result;
-  
+
   if (type === 'ml') {
-    if (mlRatelimit) {
-      result = await mlRatelimit.limit(key);
-    } else {
-      result = getInMemoryRateLimit(key, 300, 60000);
-    }
+    result = mlRatelimit
+      ? await mlRatelimit.limit(key)
+      : getInMemoryRateLimit(key, 300, 60000);
+  } else if (type === 'auth') {
+    result = authRatelimit
+      ? await authRatelimit.limit(key)
+      : getInMemoryRateLimit(key, 10, 60000);
   } else if (type === 'ws') {
-    if (wsRatelimit) {
-      result = await wsRatelimit.limit(key);
-    } else {
-      result = getInMemoryRateLimit(key, 3000, 60000);
-    }
+    result = wsRatelimit
+      ? await wsRatelimit.limit(key)
+      : getInMemoryRateLimit(key, 3000, 60000);
   } else {
-    if (apiRatelimit) {
-      result = await apiRatelimit.limit(key);
-    } else {
-      result = getInMemoryRateLimit(key, 600, 60000);
-    }
+    result = apiRatelimit
+      ? await apiRatelimit.limit(key)
+      : getInMemoryRateLimit(key, 600, 60000);
   }
 
-  if (!result.success) {
-    if (redisClient) await incrementRedisBlock();
-  }
-  
+  if (!result.success && redisClient) await incrementRedisBlock();
   return result;
 }
-
