@@ -1,3 +1,4 @@
+import path from 'path';
 import { spawn, ChildProcess } from 'child_process';
 import { getMlRuntimeSchemaContract } from './ml-runtime-schema';
 
@@ -25,7 +26,10 @@ class XGBoostDaemonManager {
   private ensureDaemonRunning() {
     if (this.child) return;
 
-    const pythonScript = process.env.PYTHON_ML_SCRIPT_PATH?.trim() || 'scripts/ml_runtime_entry.py';
+    const configuredScript = process.env.PYTHON_ML_SCRIPT_PATH?.trim();
+    const pythonScript = configuredScript && path.basename(configuredScript) !== 'xgboost_engine.py'
+      ? configuredScript
+      : 'scripts/ml_runtime_entry.py';
 
     try {
       this.child = spawn(process.env.PYTHON_BIN || 'python3', [pythonScript], {
