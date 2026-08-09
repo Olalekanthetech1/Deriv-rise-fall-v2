@@ -73,6 +73,14 @@ COPY packages ./packages
 RUN npm install --ignore-scripts
 
 # ------------------------------------------------------------
+# Security gate: production builds must not proceed while npm
+# reports known high/critical dependency vulnerabilities.
+# This is intentionally separate from `npm install`; it makes
+# dependency security a deterministic deployment requirement.
+# ------------------------------------------------------------
+RUN npm audit --audit-level=high
+
+# ------------------------------------------------------------
 # Run the project's postinstall explicitly.
 # ------------------------------------------------------------
 RUN npm run postinstall
@@ -218,10 +226,3 @@ COPY --from=builder /app/scripts ./scripts
 # Ensure runtime user owns application files
 # ------------------------------------------------------------
 RUN chown -R nextjs:nodejs /app
-
-USER nextjs
-
-# ------------------------------------------------------------
-# Start Next.js
-# ------------------------------------------------------------
-CMD ["npm", "start"]

@@ -20,9 +20,12 @@ class XGBoostDaemonManager {
   private restartTimer: NodeJS.Timeout | null = null;
   private restartDelay = 1000;
 
-  constructor() {
-    this.ensureDaemonRunning();
-  }
+  /**
+   * Start the native runtime lazily. Importing this module must remain side-effect free
+   * so Next.js/Turbopack can trace server routes without attempting to materialize the
+   * Python runtime during the build.
+   */
+  constructor() {}
 
   private getRuntimeScript(): string {
     const configuredScript = process.env.PYTHON_ML_SCRIPT_PATH?.trim();
@@ -41,8 +44,9 @@ class XGBoostDaemonManager {
 
     try {
       const pythonScript = this.getRuntimeScript();
+      // Intentionally inherit the Node process working directory instead of computing
+      // one dynamically. This keeps the ML bridge filesystem-independent at bundle time.
       this.child = spawn(process.env.PYTHON_BIN || 'python3', [pythonScript], {
-        cwd: process.cwd(),
         stdio: ['pipe', 'pipe', 'inherit'],
         env: { ...process.env, PYTHONUNBUFFERED: '1' },
       });
@@ -158,6 +162,7 @@ class XGBoostDaemonManager {
   }
 
   public isAvailable() {
+    this.ensureDaemonRunning();
     return this.child !== null && this.isReady;
   }
 }

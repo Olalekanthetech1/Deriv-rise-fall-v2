@@ -9,13 +9,13 @@ import type { DerivWS } from '@deriv/core';
  * and fetches historical ticks on symbol load.
  */
 export function useTickRecorder(
-  symbol: string | undefined, 
+  symbol: string | undefined,
   currentTick: { price: number; timestamp?: number } | null,
   ws?: DerivWS | null
 ) {
   const bufferRef = useRef<Array<{ price: number; timestamp: number }>>([]);
   const lastProcessedTimeRef = useRef<number>(0);
-  const symbolRef = useRef<string | undefined>();
+  const symbolRef = useRef<string | undefined>(undefined);
 
   useEffect(() => {
     if (!symbol || !ws || symbol === symbolRef.current) return;
@@ -34,7 +34,7 @@ export function useTickRecorder(
           price,
           timestamp: times[i] * 1000 // Convert to ms
         }));
-        
+
         fetch('/api/db/ticks', {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
