@@ -1,5 +1,6 @@
 import { NextRequest, NextResponse } from 'next/server';
 import { getHistoricalIngestionCheckpoint, ingestDerivHistoricalTicks, listHistoricalIngestionRuns } from '@/lib/deriv-historical-ingestion';
+import { ingestDerivHistoricalBackfill } from '@/lib/historical-backfill-controller';
 import { verifySessionToken } from '../auth/route';
 
 function isAuthenticated(req: NextRequest): boolean {
@@ -57,13 +58,30 @@ export async function POST(req: NextRequest) {
       return NextResponse.json({ success: false, error: 'Count must be between 50 and 50000.' }, { status: 400, headers: jsonHeaders() });
     }
 
-    const checkpoint = resumeFromCheckpoint ? await getHistoricalIngestionCheckpoint(symbol) : null;
+    if (resumeFromCheckpoint) {
+      const result = await ingestDerivHistoricalBackfill({
+        symbol,
+        targetCount: count,
+      });
+
+      return NextResponse.json(
+        {
+          success: true,
+          ...result,
+          realDataOnly: true,
+          syntheticDataDisabled: true,
+        },
+        { headers: jsonHeaders() },
+      );
+    }
+
+    const checkpoint = await getHistoricalIngestionCheckpoint(symbol);
     const endEpoch = checkpoint?.lastTickEpoch ? Math.max(1, Math.floor(checkpoint.lastTickEpoch) - 1) : undefined;
 
     const result = await ingestDerivHistoricalTicks({
       symbol,
       count,
-      resumeFromCheckpoint,
+      resumeFromCheckpoint: false,
       endEpoch,
     });
 
