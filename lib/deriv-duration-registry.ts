@@ -8,10 +8,21 @@ type RecordLike = Record<string, unknown>;
 type ContractCapability = { type: string; expiryType: string; probe: Record<string, unknown> };
 
 const MAX_PROBE: Record<DerivDurationUnit, number> = { t: 1000, s: 86400, m: 1440, h: 168, d: 365 };
+const PROBE_SEEDS: Record<DerivDurationUnit, number[]> = {
+  // Do not assume that 1 is a valid broker duration. Many contracts have a
+  // minimum duration greater than one, so discovery must find a valid seed
+  // before attempting to bracket the supported range.
+  t: [1, 2, 3, 5, 10, 15, 20, 30, 60, 100, 200, 500, 1000],
+  s: [1, 2, 5, 10, 15, 20, 30, 60, 120, 300, 600, 900, 1800, 3600, 7200, 14400, 28800, 43200, 86400],
+  m: [1, 2, 5, 10, 15, 30, 60, 120, 240, 480, 720, 1440],
+  h: [1, 2, 4, 6, 12, 24, 48, 72, 120, 168],
+  d: [1, 2, 3, 5, 7, 14, 30, 60, 90, 180, 365],
+};
 const DISCOVERY_TTL_MS = 10 * 60 * 1000;
 const PROBE_INTERVAL_MS = 1000;
 const MAX_RATE_LIMIT_RETRIES = 2;
 const PROBEABLE_TYPES = new Set(['CALL', 'PUT', 'CALLE', 'PUTE', 'UPORDOWN', 'MULTUP', 'MULTDOWN', 'TICKHIGH', 'TICKLOW', 'RESETCALL', 'RESETPUT']);
+const ALL_DURATION_UNITS: DerivDurationUnit[] = ['t', 's', 'm', 'h', 'd'];
 const cache = new Map<string, { value: DerivDurationDiscovery; expiresAt: number }>();
 const inFlight = new Map<string, Promise<DerivDurationDiscovery>>();
 
@@ -89,17 +100,11 @@ function contractCapabilities(response: RecordLike): ContractCapability[] {
 }
 
 function unitsForExpiryType(expiryType: string): DerivDurationUnit[] {
-  // expiry_type is only a hint. The proposal endpoint is authoritative for
-  // the actual duration unit/value accepted for a contract. In particular,
-  // intraday contracts can expose tick-duration proposals, so TICKS must be
-  // probed independently rather than being disabled from the expiry label.
-  switch (expiryType) {
-    case 'tick': case 'ticks': return ['t'];
-    case 'intraday': return ['t', 's', 'm', 'h'];
-    case 'daily': return ['t', 'h', 'd'];
-    case 'endtime': return ['t', 's', 'm', 'h', 'd'];
-    default: return ['t', 's', 'm', 'h', 'd'];
-  }
+  // expiry_type is advisory metadata only. The proposal endpoint is the
+  // authority for the actual duration unit/value. We therefore keep the
+  // hint for documentation but probe every supported Deriv duration unit.
+  void expiryType;
+  return ALL_DURATION_UNITS;
 }
 
 function capabilityPriority(capability: ContractCapability): number {
@@ -108,23 +113,54 @@ function capabilityPriority(capability: ContractCapability): number {
   return 2;
 }
 
+async function findValidSeed(session: DerivDiscoverySession, symbol: string, capability: ContractCapability, unit: DerivDurationUnit): Promise<number | null> {
+  for (const seed of PROBE_SEEDS[unit]) {
+    if (seed > MAX_PROBE[unit]) continue;
+    if (await session.proposal(symbol, capability, seed, unit)) return seed;
+  }
+  return null;
+}
+
 async function discoverUnit(session: DerivDiscoverySession, symbol: string, capabilities: ContractCapability[], unit: DerivDurationUnit): Promise<{ range: { min: number; max: number }; capability: ContractCapability } | null> {
   const ordered = [...capabilities].sort((a, b) => capabilityPriority(a) - capabilityPriority(b));
   for (const capability of ordered) {
     if (!unitsForExpiryType(capability.expiryType).includes(unit)) continue;
+    const seed = await findValidSeed(session, symbol, capability, unit);
+    if (seed === null) continue;
+
+    // Once a valid seed is found, locate the lowest supported duration.
+    // We cannot assume that duration=1 is valid, so search the values below
+    // the seed directly. The broker remains the source of truth.
+    let validMin = seed;
+    for (let value = seed - 1; value >= 1; value -= 1) {
+      if (await session.proposal(symbol, capability, value, unit)) validMin = value;
+      else break;
+    }
+
     const max = MAX_PROBE[unit];
-    if (!(await session.proposal(symbol, capability, 1, unit))) continue;
-    let validMax = 1; let invalidUpper: number | null = null;
-    while (validMax < max) {
-      const next = Math.min(max, validMax * 2); if (next === validMax) break;
-      if (await session.proposal(symbol, capability, next, unit)) validMax = next; else { invalidUpper = next; break; }
+    let validMax = seed;
+    let invalidUpper: number | null = null;
+    let next = Math.max(seed + 1, seed * 2);
+    while (next <= max) {
+      if (await session.proposal(symbol, capability, next, unit)) {
+        validMax = next;
+        next = Math.max(next + 1, next * 2);
+      } else {
+        invalidUpper = next;
+        break;
+      }
     }
     if (invalidUpper !== null) {
       let left = validMax; let right = invalidUpper;
-      while (left + 1 < right) { const mid = Math.floor((left + right) / 2); if (await session.proposal(symbol, capability, mid, unit)) left = mid; else right = mid; }
+      while (left + 1 < right) {
+        const mid = Math.floor((left + right) / 2);
+        if (await session.proposal(symbol, capability, mid, unit)) left = mid; else right = mid;
+      }
       validMax = left;
+    } else {
+      validMax = Math.min(validMax, max);
     }
-    return { range: { min: 1, max: validMax }, capability };
+    return { range: { min: validMin, max: validMax }, capability };
   }
   return null;
 }
@@ -137,12 +173,10 @@ async function discover(symbol: string): Promise<DerivDurationDiscovery> {
     const capabilities = contractCapabilities(contracts);
     if (!capabilities.length) throw new Error(`Deriv returned no duration-probeable contracts for ${symbol}.`);
 
-    // Build the duration registry from the UNION of broker contract capabilities.
-    // Duration units are candidates only; each candidate is verified by a
-    // real proposal request before it enters the registry.
-    const units = Array.from(new Set(capabilities.flatMap(c => unitsForExpiryType(c.expiryType))));
-    const unitOrder: DerivDurationUnit[] = ['t', 's', 'm', 'h', 'd'];
-    units.sort((a, b) => unitOrder.indexOf(a) - unitOrder.indexOf(b));
+    // Build the duration registry from the union of broker contract
+    // capabilities. Each unit/value is verified with a real proposal before
+    // it enters the registry; no UI duration is hardcoded as supported.
+    const units = ALL_DURATION_UNITS.filter(unit => capabilities.some(c => unitsForExpiryType(c.expiryType).includes(unit)));
     const ranges: DerivDurationRange[] = [];
     for (const unit of units) {
       const result = await discoverUnit(session, symbol, capabilities, unit);
