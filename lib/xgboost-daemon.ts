@@ -1,4 +1,5 @@
 import { spawn, ChildProcess } from 'child_process';
+import { getMlRuntimeSchemaContract } from './ml-runtime-schema';
 
 interface PendingRequest {
   resolve: (data: any) => void;
@@ -24,10 +25,6 @@ class XGBoostDaemonManager {
   private ensureDaemonRunning() {
     if (this.child) return;
 
-    // Keep the runtime script location deployment-aware without filesystem
-    // resolution in the module graph. The Docker runner copies scripts/ into
-    // the application root, while PYTHON_ML_SCRIPT_PATH can override it when
-    // a deployment uses a different runtime layout.
     const pythonScript = process.env.PYTHON_ML_SCRIPT_PATH?.trim() || 'scripts/xgboost_engine.py';
 
     try {
@@ -96,16 +93,30 @@ class XGBoostDaemonManager {
     }, delay);
   }
 
-  private static readonly ALLOWED_ACTIONS = new Set<DaemonAction>(['predict', 'predict_ensemble', 'train', 'list_models', 'ping', 'backtest']);
+  private static readonly ALLOWED_ACTIONS = new Set<DaemonAction>([
+    'predict',
+    'predict_ensemble',
+    'train',
+    'list_models',
+    'ping',
+    'backtest',
+  ]);
 
   public async sendCommand(action: DaemonAction, payload: Record<string, any> = {}): Promise<any> {
-    if (!XGBoostDaemonManager.ALLOWED_ACTIONS.has(action)) throw new Error(`Unauthorized daemon action: ${action}`);
+    if (!XGBoostDaemonManager.ALLOWED_ACTIONS.has(action)) {
+      throw new Error(`Unauthorized daemon action: ${action}`);
+    }
     this.ensureDaemonRunning();
     if (!this.child?.stdin?.writable) throw new Error('Python ML daemon unavailable');
 
-    const sanitized = { ...payload };
-    if (typeof sanitized.symbol === 'string') sanitized.symbol = sanitized.symbol.replace(/[^A-Za-z0-9_]/g, '');
-    if (sanitized.ticks !== undefined && !Array.isArray(sanitized.ticks)) throw new Error('ticks must be an array');
+    const schemaContract = await getMlRuntimeSchemaContract();
+    const sanitized = { ...payload, schemaContract };
+    if (typeof sanitized.symbol === 'string') {
+      sanitized.symbol = sanitized.symbol.replace(/[^A-Za-z0-9_]/g, '');
+    }
+    if (sanitized.ticks !== undefined && !Array.isArray(sanitized.ticks)) {
+      throw new Error('ticks must be an array');
+    }
 
     const id = `req_${Date.now()}_${++this.reqIdCounter}`;
     const packet = JSON.stringify({ action, id, ...sanitized }) + '\n';
