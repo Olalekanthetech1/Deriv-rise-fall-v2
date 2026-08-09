@@ -60,13 +60,13 @@ export const adminRoadmap: RoadmapSection[] = [
     id: 'market-data-ingestion',
     title: 'Market Data Ingestion',
     description: 'Historical ticks, live streams and validation before they enter the training pipeline.',
-    status: 'next',
+    status: 'complete',
   },
   {
     id: 'dataset-builder',
     title: 'Training Dataset Builder',
-    description: 'Feature windows, labels and leakage-safe dataset construction.',
-    status: 'planned',
+    description: 'Real-tick feature windows, future-direction labels, chronological splits and leakage validation.',
+    status: 'next',
   },
   {
     id: 'training-pipeline',
