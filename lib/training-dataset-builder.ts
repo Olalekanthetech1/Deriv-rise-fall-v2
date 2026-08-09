@@ -10,8 +10,6 @@ import {
   getFeatureSchemaVersion,
   getRequiredWindowTicks,
   getWindowProfile,
-  type FeatureDefinition,
-  type HorizonDefinition,
 } from './dataset-schema-registry';
 
 const LABEL_SCHEMA_VERSION = 'direction-v1';
@@ -127,24 +125,12 @@ async function loadTicks(sql: ReturnType<typeof neon>, symbol: string): Promise<
     ORDER BY tick_epoch ASC, id ASC
   `;
 
-  const ticks = rows.map((row: any) => ({
+  return rows.map((row: any) => ({
     price: Number(row.price),
     tick_epoch: Number(row.tick_epoch),
     tick_time: new Date(row.tick_time).toISOString(),
     source_tick_id: row.source_tick_id == null ? null : String(row.source_tick_id),
   })).filter((tick) => Number.isFinite(tick.price) && tick.price > 0 && Number.isSafeInteger(tick.tick_epoch));
-
-  if (ticks.length < 2) return ticks;
-
-  const ordered: RawTick[] = [];
-  let previousEpoch = -Infinity;
-  for (const tick of ticks) {
-    if (tick.tick_epoch < previousEpoch) continue;
-    if (tick.tick_epoch === previousEpoch && ordered.length) continue;
-    ordered.push(tick);
-    previousEpoch = tick.tick_epoch;
-  }
-  return ordered;
 }
 
 async function resolveAssetContext(sql: ReturnType<typeof neon>, symbol: string) {
