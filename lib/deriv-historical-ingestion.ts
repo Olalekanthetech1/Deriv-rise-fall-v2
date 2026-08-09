@@ -141,7 +141,7 @@ async function insertTickBatch(sql: Sql, symbol: string, assetId: number, runId:
       ${ticks.map((tick) => tick.sourceTickId)}::text[],
       ${ticks.map(() => runId)}::uuid[]
     )
-    ON CONFLICT (source, source_tick_id) DO NOTHING
+    ON CONFLICT (source, source_tick_id) WHERE source_tick_id IS NOT NULL DO NOTHING
     RETURNING id
   `;
 
