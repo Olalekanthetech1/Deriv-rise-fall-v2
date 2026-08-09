@@ -1,6 +1,5 @@
 import { NextResponse } from 'next/server';
 import WebSocket from 'ws';
-import CircuitBreaker from 'opossum';
 import { logger } from '@/lib/logger';
 import { openDerivPublicWebSocket } from '@/lib/deriv-public-websocket';
 
@@ -27,8 +26,6 @@ function asBoolean(value: unknown): boolean {
 }
 
 async function fetchLiveSymbols(): Promise<ActiveSymbolItem[]> {
-  // active_symbols is a public market-data operation. Do not attach an
-  // application ID or account credential to this connection.
   const ws = await openDerivPublicWebSocket(10_000);
 
   return new Promise<ActiveSymbolItem[]>((resolve, reject) => {
@@ -62,7 +59,6 @@ async function fetchLiveSymbols(): Promise<ActiveSymbolItem[]> {
         }
 
         if (response.msg_type !== 'active_symbols') return;
-
         if (!Array.isArray(response.active_symbols)) {
           fail(new Error('Deriv returned an invalid active_symbols response.'));
           return;
@@ -108,19 +104,34 @@ async function fetchLiveSymbols(): Promise<ActiveSymbolItem[]> {
   });
 }
 
-const derivCircuitBreaker = new CircuitBreaker(fetchLiveSymbols, {
-  timeout: 12_000,
-  errorThresholdPercentage: 50,
-  resetTimeout: 10_000,
-});
+/**
+ * Symbol discovery is a short-lived public market-data request. A process-wide
+ * circuit breaker is not used here because it can hide a recovered connection
+ * behind a stale "Breaker is open" state. Each request gets bounded fresh
+ * connection retries and preserves the real upstream error when unavailable.
+ */
+async function fetchLiveSymbolsWithRetry(): Promise<ActiveSymbolItem[]> {
+  const maxAttempts = 2;
+  let lastError: Error | null = null;
 
-derivCircuitBreaker.on('open', () => logger.warn('Deriv WS Circuit Breaker OPENED (API Degraded)'));
-derivCircuitBreaker.on('halfOpen', () => logger.info('Deriv WS Circuit Breaker HALF-OPEN (Testing recovery)'));
-derivCircuitBreaker.on('close', () => logger.info('Deriv WS Circuit Breaker CLOSED (Recovered)'));
+  for (let attempt = 1; attempt <= maxAttempts; attempt += 1) {
+    try {
+      return await fetchLiveSymbols();
+    } catch (error) {
+      lastError = error instanceof Error ? error : new Error(String(error));
+      if (attempt < maxAttempts) {
+        await new Promise((resolve) => setTimeout(resolve, 500 * attempt));
+      }
+    }
+  }
+
+  throw lastError || new Error('Unable to load live Deriv symbols.');
+}
 
 export async function GET() {
   try {
-    const symbols = await derivCircuitBreaker.fire();
+    const symbols = await fetchLiveSymbolsWithRetry();
+
     return NextResponse.json({
       success: true,
       dataSource: 'deriv-live',
