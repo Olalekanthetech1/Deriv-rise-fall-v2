@@ -10,6 +10,8 @@ interface PendingRequest {
 
 type DaemonAction = 'predict' | 'predict_ensemble' | 'train' | 'list_models' | 'ping' | 'backtest';
 
+const CANONICAL_RUNTIME_ENTRYPOINT = 'ml_runtime_entry.py';
+
 class XGBoostDaemonManager {
   private child: ChildProcess | null = null;
   private pending = new Map<string, PendingRequest>();
@@ -23,15 +25,22 @@ class XGBoostDaemonManager {
     this.ensureDaemonRunning();
   }
 
+  private getRuntimeScript(): string {
+    const configuredScript = process.env.PYTHON_ML_SCRIPT_PATH?.trim();
+    const pythonScript = configuredScript || path.resolve(process.cwd(), 'scripts', CANONICAL_RUNTIME_ENTRYPOINT);
+
+    if (path.basename(pythonScript) !== CANONICAL_RUNTIME_ENTRYPOINT) {
+      throw new Error(`PYTHON_ML_SCRIPT_PATH must target the canonical ${CANONICAL_RUNTIME_ENTRYPOINT} entrypoint`);
+    }
+
+    return pythonScript;
+  }
+
   private ensureDaemonRunning() {
     if (this.child) return;
 
-    const configuredScript = process.env.PYTHON_ML_SCRIPT_PATH?.trim();
-    const pythonScript = configuredScript && path.basename(configuredScript) !== 'xgboost_engine.py'
-      ? configuredScript
-      : 'scripts/ml_runtime_entry.py';
-
     try {
+      const pythonScript = this.getRuntimeScript();
       this.child = spawn(process.env.PYTHON_BIN || 'python3', [pythonScript], {
         cwd: process.cwd(),
         stdio: ['pipe', 'pipe', 'inherit'],
