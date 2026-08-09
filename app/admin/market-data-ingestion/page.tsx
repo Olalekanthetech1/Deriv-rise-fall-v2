@@ -95,6 +95,12 @@ export default function MarketDataIngestionPage() {
   const availableSymbols = useMemo(() => symbols.filter((symbol) => symbol.isAvailable), [symbols]);
   const displayRuns = useMemo(() => aggregatePartialRuns(recentRuns), [recentRuns]);
 
+  const getHumanReadableAssetName = (symbolCode: string | null | undefined) => {
+    if (!symbolCode) return 'Unavailable';
+    const match = symbols.find((symbol) => symbol.symbol === symbolCode);
+    return match?.displayName || symbolCode;
+  };
+
   async function loadSymbols() {
     const response = await fetch('/api/symbols', { cache: 'no-store' });
     const data = await response.json();
@@ -216,7 +222,7 @@ export default function MarketDataIngestionPage() {
           <div className="mb-4 flex items-center gap-2 text-sm font-semibold text-emerald-300"><Server className="h-4 w-4" />Checkpoint</div>
           <div className="space-y-3 text-sm text-slate-400">
             <div><span className="block text-xs uppercase tracking-wider text-slate-500">Source</span><span className="mt-1 block text-slate-200">{checkpoint?.source ?? 'Unavailable'}</span></div>
-            <div><span className="block text-xs uppercase tracking-wider text-slate-500">Symbol</span><span className="mt-1 block text-slate-200">{checkpoint?.symbol ?? 'Unavailable'}</span></div>
+            <div><span className="block text-xs uppercase tracking-wider text-slate-500">Asset</span><span className="mt-1 block text-slate-200">{getHumanReadableAssetName(checkpoint?.symbol)}{checkpoint?.symbol && getHumanReadableAssetName(checkpoint.symbol) !== checkpoint.symbol ? <span className="ml-2 text-xs text-slate-500">({checkpoint.symbol})</span> : null}</span></div>
             <div><span className="block text-xs uppercase tracking-wider text-slate-500">Last tick</span><span className="mt-1 block text-slate-200">{checkpoint?.lastTickTime ?? 'Unavailable'}</span></div>
             <div><span className="block text-xs uppercase tracking-wider text-slate-500">Updated</span><span className="mt-1 block text-slate-200">{checkpoint?.updatedAt ?? 'Unavailable'}</span></div>
           </div>
@@ -229,8 +235,9 @@ export default function MarketDataIngestionPage() {
           const progress = Math.min(100, (run.recordsInserted / Math.max(1, run.requestedCount)) * 100);
           const rawBatches = run.metadata?.batches;
           const batchCount = Number(run.metadata?.aggregatedBatches || (Array.isArray(rawBatches) ? rawBatches.length : 0));
+          const humanReadableAssetName = getHumanReadableAssetName(run.symbol);
           return <article key={run.runId} className="rounded-xl border border-white/10 bg-black/20 p-4 text-sm">
-            <div className="flex items-start justify-between gap-3"><div><div className="font-bold text-slate-100">{run.symbol}</div><div className="mt-1 text-xs text-slate-500">{run.startedAt}</div></div><span className={`rounded-full border px-2.5 py-1 text-[10px] font-semibold tracking-wider ${run.status === 'completed' ? 'border-emerald-400/20 bg-emerald-400/10 text-emerald-300' : run.status === 'partial' ? 'border-amber-400/20 bg-amber-400/10 text-amber-200' : run.status === 'failed' ? 'border-red-400/20 bg-red-400/5 text-red-200' : 'border-cyan-400/20 bg-cyan-400/10 text-cyan-200'}`}>{run.status === 'partial' ? 'IN PROGRESS' : run.status.toUpperCase()}</span></div>
+            <div className="flex items-start justify-between gap-3"><div><div className="font-bold text-slate-100">{humanReadableAssetName}</div><div className="mt-1 text-xs text-slate-500">{run.symbol} • {run.startedAt}</div></div><span className={`rounded-full border px-2.5 py-1 text-[10px] font-semibold tracking-wider ${run.status === 'completed' ? 'border-emerald-400/20 bg-emerald-400/10 text-emerald-300' : run.status === 'partial' ? 'border-amber-400/20 bg-amber-400/10 text-amber-200' : run.status === 'failed' ? 'border-red-400/20 bg-red-400/5 text-red-200' : 'border-cyan-400/20 bg-cyan-400/10 text-cyan-200'}`}>{run.status === 'partial' ? 'IN PROGRESS' : run.status.toUpperCase()}</span></div>
             <div className="mt-3 h-2 overflow-hidden rounded-full bg-white/10"><div className="h-full rounded-full bg-cyan-400 transition-all" style={{ width: `${progress}%` }} /></div>
             <div className="mt-2 flex items-center justify-between text-xs"><span className="font-semibold text-slate-200">{run.recordsInserted.toLocaleString()} / {run.requestedCount.toLocaleString()}</span><span className="text-slate-500">{progress.toFixed(0)}%</span></div>
             <div className="mt-3 grid grid-cols-2 gap-3 text-xs text-slate-400"><div><span className="block text-slate-500">Requested</span>{run.requestedCount.toLocaleString()}</div><div><span className="block text-slate-500">Stored</span>{run.recordsInserted.toLocaleString()}</div><div><span className="block text-slate-500">Received</span>{run.recordsReceived.toLocaleString()}</div><div><span className="block text-slate-500">Rejected</span>{run.recordsRejected.toLocaleString()}</div></div>
