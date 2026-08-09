@@ -25,15 +25,10 @@ class XGBoostDaemonManager {
   private ensureDaemonRunning() {
     if (this.child) return;
 
-    // Resolve the script from the runtime working directory so the production
-    // daemon remains dynamically deployable without exposing the project tree
-    // to Turbopack's file tracer.
-    const pythonScript = path.join(
-      /* turbopackIgnore: true */
-      process.cwd(),
-      'scripts',
-      'xgboost_engine.py',
-    );
+    // Resolve the script at runtime from the deployed application root.
+    // The Turbopack directive prevents dynamic runtime resolution from causing
+    // the tracer to walk the entire project filesystem during the build.
+    const pythonScript = path.join(/*turbopackIgnore: true*/ process.cwd(), 'scripts', 'xgboost_engine.py');
 
     try {
       this.child = spawn(process.env.PYTHON_BIN || 'python3', [pythonScript], {
