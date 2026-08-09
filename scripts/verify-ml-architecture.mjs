@@ -2,6 +2,7 @@ import fs from 'node:fs';
 import path from 'node:path';
 
 const root = process.cwd();
+const guardFile = path.resolve(process.argv[1] || '');
 const bannedPaths = [
   'lib/xgboost-engine.ts',
   'lib/lightgbm-engine.ts',
@@ -47,6 +48,7 @@ function walk(directory) {
 const violations = [];
 for (const relativeRoot of sourceRoots) {
   for (const file of walk(path.join(root, relativeRoot))) {
+    if (path.resolve(file) === guardFile) continue;
     const content = fs.readFileSync(file, 'utf8');
     for (const token of bannedTokens) {
       if (content.includes(token)) violations.push(`${path.relative(root, file)} -> ${token}`);
