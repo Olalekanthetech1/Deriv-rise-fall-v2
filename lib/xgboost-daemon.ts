@@ -1,5 +1,4 @@
 import { spawn, ChildProcess } from 'child_process';
-import path from 'path';
 
 interface PendingRequest {
   resolve: (data: any) => void;
@@ -18,46 +17,80 @@ class XGBoostDaemonManager {
   private restartTimer: NodeJS.Timeout | null = null;
   private restartDelay = 1000;
 
-  constructor() { this.ensureDaemonRunning(); }
+  constructor() {
+    this.ensureDaemonRunning();
+  }
 
   private ensureDaemonRunning() {
     if (this.child) return;
-    const pythonScript = path.join(/*turbopackIgnore: true*/ process.cwd(), 'scripts', 'xgboost_engine.py');
+
+    // Use a static relative path so Turbopack does not trace the entire repository.
+    // The process cwd is still the app root in Render/Next runtime.
+    const pythonScript = 'scripts/xgboost_engine.py';
+
     try {
       this.child = spawn(process.env.PYTHON_BIN || 'python3', [pythonScript], {
         stdio: ['pipe', 'pipe', 'inherit'],
         env: { ...process.env, PYTHONUNBUFFERED: '1' },
       });
+
       this.child.stdout?.on('data', (chunk: Buffer) => {
         this.buffer += chunk.toString('utf8');
         const lines = this.buffer.split('\n');
         this.buffer = lines.pop() || '';
+
         for (const line of lines) {
-          const trimmed = line.trim(); if (!trimmed) continue;
+          const trimmed = line.trim();
+          if (!trimmed) continue;
+
           try {
             const data = JSON.parse(trimmed);
-            if (data.type === 'ready') { this.isReady = true; this.restartDelay = 1000; continue; }
-            if (data.id && this.pending.has(data.id)) {
-              const req = this.pending.get(data.id)!; clearTimeout(req.timer); this.pending.delete(data.id); req.resolve(data);
+            if (data.type === 'ready') {
+              this.isReady = true;
+              this.restartDelay = 1000;
+              continue;
             }
-          } catch { /* stdout remains JSON-line tolerant */ }
+
+            if (data.id && this.pending.has(data.id)) {
+              const req = this.pending.get(data.id)!;
+              clearTimeout(req.timer);
+              this.pending.delete(data.id);
+              req.resolve(data);
+            }
+          } catch {
+            // stdout remains JSON-line tolerant
+          }
         }
       });
+
       const onExit = () => {
-        this.child = null; this.isReady = false;
-        for (const req of this.pending.values()) { clearTimeout(req.timer); req.reject(new Error('Python ML daemon exited unexpectedly')); }
-        this.pending.clear(); this.scheduleRestart();
+        this.child = null;
+        this.isReady = false;
+        for (const req of this.pending.values()) {
+          clearTimeout(req.timer);
+          req.reject(new Error('Python ML daemon exited unexpectedly'));
+        }
+        this.pending.clear();
+        this.scheduleRestart();
       };
+
       this.child.on('exit', onExit);
       this.child.on('error', onExit);
-    } catch { this.child = null; this.isReady = false; this.scheduleRestart(); }
+    } catch {
+      this.child = null;
+      this.isReady = false;
+      this.scheduleRestart();
+    }
   }
 
   private scheduleRestart() {
     if (this.restartTimer) return;
     const delay = this.restartDelay;
     this.restartDelay = Math.min(30000, this.restartDelay * 2);
-    this.restartTimer = setTimeout(() => { this.restartTimer = null; this.ensureDaemonRunning(); }, delay);
+    this.restartTimer = setTimeout(() => {
+      this.restartTimer = null;
+      this.ensureDaemonRunning();
+    }, delay);
   }
 
   private static readonly ALLOWED_ACTIONS = new Set<DaemonAction>(['predict', 'predict_ensemble', 'train', 'list_models', 'ping', 'backtest']);
@@ -66,22 +99,36 @@ class XGBoostDaemonManager {
     if (!XGBoostDaemonManager.ALLOWED_ACTIONS.has(action)) throw new Error(`Unauthorized daemon action: ${action}`);
     this.ensureDaemonRunning();
     if (!this.child?.stdin?.writable) throw new Error('Python ML daemon unavailable');
+
     const sanitized = { ...payload };
     if (typeof sanitized.symbol === 'string') sanitized.symbol = sanitized.symbol.replace(/[^A-Za-z0-9_]/g, '');
     if (sanitized.ticks !== undefined && !Array.isArray(sanitized.ticks)) throw new Error('ticks must be an array');
+
     const id = `req_${Date.now()}_${++this.reqIdCounter}`;
     const packet = JSON.stringify({ action, id, ...sanitized }) + '\n';
+
     return new Promise((resolve, reject) => {
       const timer = setTimeout(() => {
-        if (this.pending.has(id)) { this.pending.delete(id); reject(new Error(`Daemon request ${action} timed out`)); }
+        if (this.pending.has(id)) {
+          this.pending.delete(id);
+          reject(new Error(`Daemon request ${action} timed out`));
+        }
       }, action === 'train' ? 30000 : action === 'backtest' ? 60000 : 5000);
+
       this.pending.set(id, { resolve, reject, timer });
-      try { this.child!.stdin!.write(packet); }
-      catch (err) { clearTimeout(timer); this.pending.delete(id); reject(err); }
+      try {
+        this.child!.stdin!.write(packet);
+      } catch (err) {
+        clearTimeout(timer);
+        this.pending.delete(id);
+        reject(err);
+      }
     });
   }
 
-  public isAvailable() { return this.child !== null && this.isReady; }
+  public isAvailable() {
+    return this.child !== null && this.isReady;
+  }
 }
 
 export const xgboostDaemon = new XGBoostDaemonManager();
