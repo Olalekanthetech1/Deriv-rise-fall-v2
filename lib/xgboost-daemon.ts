@@ -1,3 +1,4 @@
+import path from 'path';
 import { spawn, ChildProcess } from 'child_process';
 import { getMlRuntimeSchemaContract } from './ml-runtime-schema';
 
@@ -25,7 +26,10 @@ class XGBoostDaemonManager {
   private ensureDaemonRunning() {
     if (this.child) return;
 
-    const pythonScript = process.env.PYTHON_ML_SCRIPT_PATH?.trim() || 'scripts/xgboost_engine.py';
+    const configuredScript = process.env.PYTHON_ML_SCRIPT_PATH?.trim();
+    const pythonScript = configuredScript && path.basename(configuredScript) !== 'xgboost_engine.py'
+      ? configuredScript
+      : 'scripts/ml_runtime_entry.py';
 
     try {
       this.child = spawn(process.env.PYTHON_BIN || 'python3', [pythonScript], {
@@ -110,11 +114,15 @@ class XGBoostDaemonManager {
     if (!this.child?.stdin?.writable) throw new Error('Python ML daemon unavailable');
 
     const schemaContract = await getMlRuntimeSchemaContract();
-    const sanitized = { ...payload, schemaContract };
-    if (typeof sanitized.symbol === 'string') {
-      sanitized.symbol = sanitized.symbol.replace(/[^A-Za-z0-9_]/g, '');
+    const sanitized: Record<string, unknown> = { ...payload, schemaContract };
+
+    const symbol = sanitized.symbol;
+    if (typeof symbol === 'string') {
+      sanitized.symbol = symbol.replace(/[^A-Za-z0-9_]/g, '');
     }
-    if (sanitized.ticks !== undefined && !Array.isArray(sanitized.ticks)) {
+
+    const ticks = sanitized.ticks;
+    if (ticks !== undefined && !Array.isArray(ticks)) {
       throw new Error('ticks must be an array');
     }
 
