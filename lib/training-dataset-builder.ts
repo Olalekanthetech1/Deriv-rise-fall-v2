@@ -451,7 +451,7 @@ export async function buildTrainingDataset(request: DatasetBuildRequest): Promis
 
     const labelConfidence = roundNumber(Math.min(1, Math.abs(outcomeDelta) / Math.max(labelDeadZone * 4, entry.price * 1e-8)), 8);
     rawSamples.push({
-      sampleIndex: rawSamples.length,
+      sampleIndex: anchorIndex,
       split,
       anchorEpoch: entry.tick_epoch,
       anchorTime: entry.tick_time,
