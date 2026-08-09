@@ -355,6 +355,7 @@ export async function saveTicksBatch(symbol: string, ticks: Array<{ price: numbe
     const epochs = validTicks.map((tick) => tick.epoch ?? Math.floor((tick.timestamp as number) / 1000));
     const times = epochs.map((epoch) => new Date(epoch * 1000).toISOString());
     const sourceIds = validTicks.map((tick) => tick.sourceTickId ?? null);
+    const sources = validTicks.map(() => 'deriv');
 
     await sql`
       INSERT INTO market_ticks (asset_id, symbol, price, tick_epoch, tick_time, source, source_tick_id)
@@ -364,10 +365,12 @@ export async function saveTicksBatch(symbol: string, ticks: Array<{ price: numbe
         ${prices}::numeric[],
         ${epochs}::bigint[],
         ${times}::timestamptz[],
-        ARRAY_FILL('deriv'::text, ARRAY[${validTicks.length}]),
+        ${sources}::text[],
         ${sourceIds}::text[]
       )
-      ON CONFLICT (source, source_tick_id) DO NOTHING
+      ON CONFLICT (source, source_tick_id)
+      WHERE source_tick_id IS NOT NULL
+      DO NOTHING
     `;
     return true;
   } catch (error) {
