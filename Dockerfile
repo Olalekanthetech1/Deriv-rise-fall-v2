@@ -75,8 +75,8 @@ RUN npm install --ignore-scripts
 # ------------------------------------------------------------
 # Security gate: production builds must not proceed while npm
 # reports known high/critical dependency vulnerabilities.
-# This is intentionally separate from `npm install`; it makes
-# dependency security a deterministic deployment requirement.
+# The package manifest pins supported remediation overrides for
+# vulnerable transitive dependencies before this audit runs.
 # ------------------------------------------------------------
 RUN npm audit --audit-level=high
 
@@ -111,11 +111,10 @@ COPY --from=deps /app/scripts ./scripts
 
 # ------------------------------------------------------------
 # Source revision cache-buster.
-# Changing this value intentionally invalidates the source COPY
-# layer so a stale Render/Docker source layer cannot survive a
-# source-boundary fix.
+# This value intentionally changes with security/build-boundary
+# changes so Render cannot reuse an obsolete source COPY layer.
 # ------------------------------------------------------------
-ARG APP_SOURCE_REV=23b73c4
+ARG APP_SOURCE_REV=20260809-security-audit
 RUN echo "Building application source revision: ${APP_SOURCE_REV}"
 
 # ------------------------------------------------------------
