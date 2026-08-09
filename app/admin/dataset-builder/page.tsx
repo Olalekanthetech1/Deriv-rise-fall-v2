@@ -56,7 +56,9 @@ type Dataset = {
   created_at: string;
   metadata?: {
     qualityReport?: DatasetQualityReport;
-    normalization?: { version?: string };
+    normalization?: { version?: string; method?: string };
+    pipelineConfig?: { canonicalFeatureWindowTicks?: number; defaultHorizonTicks?: number; featureOrder?: string[] };
+    assetDisplayName?: string;
   } | null;
 };
 
@@ -73,11 +75,22 @@ type BuildResult = {
   datasetFingerprint: string;
 };
 
+type PipelineConfig = {
+  canonicalFeatureWindowTicks: number;
+  defaultHorizonTicks: number;
+  maxHorizonTicks: number;
+  featureWindows: { micro: number; short: number; medium: number; macro: number };
+  featureOrder: string[];
+  pipelineVersion: string;
+  normalizationMethod: string;
+};
+
 export default function TrainingDatasetBuilderPage() {
   const [symbols, setSymbols] = useState<SymbolItem[]>([]);
   const [selectedSymbol, setSelectedSymbol] = useState('');
-  const [horizonTicks, setHorizonTicks] = useState(5);
+  const [horizonTicks, setHorizonTicks] = useState<number>(5);
   const [datasets, setDatasets] = useState<Dataset[]>([]);
+  const [pipelineConfig, setPipelineConfig] = useState<PipelineConfig | null>(null);
   const [loading, setLoading] = useState(true);
   const [building, setBuilding] = useState(false);
   const [error, setError] = useState<string | null>(null);
@@ -85,6 +98,9 @@ export default function TrainingDatasetBuilderPage() {
 
   const availableSymbols = useMemo(() => symbols.filter((item) => item.isAvailable), [symbols]);
   const selectedAsset = availableSymbols.find((item) => item.symbol === selectedSymbol);
+  const canonicalWindowTicks = pipelineConfig?.canonicalFeatureWindowTicks ?? 300;
+  const defaultHorizonTicks = pipelineConfig?.defaultHorizonTicks ?? 5;
+  const featureCount = pipelineConfig?.featureOrder?.length ?? 37;
 
   async function load() {
     setLoading(true);
@@ -100,6 +116,8 @@ export default function TrainingDatasetBuilderPage() {
       const liveSymbols = Array.isArray(symbolData?.symbols) ? symbolData.symbols : [];
       setSymbols(liveSymbols);
       setDatasets(Array.isArray(datasetData?.datasets) ? datasetData.datasets : []);
+      setPipelineConfig(datasetData?.pipelineConfig ?? null);
+      setHorizonTicks((current) => (Number.isFinite(current) && current > 0 ? current : Number(datasetData?.defaults?.horizonTicks ?? defaultHorizonTicks)));
       setSelectedSymbol((current) => current || liveSymbols.find((item: SymbolItem) => item.isAvailable)?.symbol || '');
       if (!symbolResponse.ok) setError(symbolData?.error || 'Live Deriv symbols are currently unavailable.');
     } catch (err) {
@@ -120,11 +138,12 @@ export default function TrainingDatasetBuilderPage() {
       const response = await fetch('/api/admin/datasets', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ symbol: selectedSymbol, horizonTicks, windowTicks: 300 }),
+        body: JSON.stringify({ symbol: selectedSymbol, horizonTicks, windowTicks: canonicalWindowTicks }),
       });
       const data = await response.json();
       if (!response.ok || !data?.success) throw new Error(data?.error || 'Dataset construction failed.');
       setSuccess(data.dataset);
+      setPipelineConfig(data.pipelineConfig ?? pipelineConfig);
       await load();
     } catch (err) {
       setError(err instanceof Error ? err.message : 'Dataset construction failed.');
@@ -161,10 +180,10 @@ export default function TrainingDatasetBuilderPage() {
           <div className="mb-5 flex items-center gap-2 text-sm font-bold text-cyan-300"><Sparkles className="h-4 w-4" />Build dataset</div>
           <div className="grid gap-4 sm:grid-cols-2">
             <label className="sm:col-span-2"><span className="mb-2 block text-xs font-semibold uppercase tracking-wider text-slate-500">Deriv asset</span><select value={selectedSymbol} onChange={(event) => setSelectedSymbol(event.target.value)} className="w-full rounded-xl border border-white/10 bg-black/30 px-4 py-3 text-sm outline-none focus:border-cyan-400/50"><option value="">Select a live Deriv asset</option>{availableSymbols.map((item) => <option key={item.symbol} value={item.symbol}>{item.displayName} — {item.symbol}</option>)}</select>{selectedAsset && <span className="mt-2 block text-xs text-slate-500">{selectedAsset.market} / {selectedAsset.submarket} · {selectedAsset.isOpen ? 'Open' : 'Available but closed'}</span>}</label>
-            <label><span className="mb-2 block text-xs font-semibold uppercase tracking-wider text-slate-500">Prediction horizon (ticks)</span><input type="number" min={1} max={5000} value={horizonTicks} onChange={(event) => setHorizonTicks(Number(event.target.value))} className="w-full rounded-xl border border-white/10 bg-black/30 px-4 py-3 text-sm outline-none focus:border-cyan-400/50" /></label>
-            <div><span className="mb-2 block text-xs font-semibold uppercase tracking-wider text-slate-500">Feature window</span><div className="rounded-xl border border-white/10 bg-black/20 px-4 py-3 text-sm text-slate-300">300 ticks · canonical 37 features</div></div>
+            <label><span className="mb-2 block text-xs font-semibold uppercase tracking-wider text-slate-500">Prediction horizon (ticks)</span><input type="number" min={1} max={pipelineConfig?.maxHorizonTicks ?? 5000} value={horizonTicks} onChange={(event) => setHorizonTicks(Number(event.target.value))} className="w-full rounded-xl border border-white/10 bg-black/30 px-4 py-3 text-sm outline-none focus:border-cyan-400/50" /></label>
+            <div><span className="mb-2 block text-xs font-semibold uppercase tracking-wider text-slate-500">Feature window</span><div className="rounded-xl border border-white/10 bg-black/20 px-4 py-3 text-sm text-slate-300">{canonicalWindowTicks} ticks · {featureCount} features</div></div>
           </div>
-          <div className="mt-5 rounded-2xl border border-cyan-400/10 bg-cyan-400/[0.03] p-4 text-xs leading-5 text-slate-400"><strong className="text-slate-200">Pipeline contract:</strong> raw Deriv ticks → leakage checks → dynamic normalization → future direction label → chronological split with embargo. Flat outcomes are excluded. No synthetic fallback is permitted.</div>
+          <div className="mt-5 rounded-2xl border border-cyan-400/10 bg-cyan-400/[0.03] p-4 text-xs leading-5 text-slate-400"><strong className="text-slate-200">Pipeline contract:</strong> raw Deriv ticks → registry-driven features → leakage checks → z-score normalization fit on train split only → future direction label → chronological split with embargo. Flat outcomes are excluded. No synthetic fallback is permitted.</div>
           <button onClick={() => void buildDataset()} disabled={!selectedSymbol || building || loading} className="mt-5 inline-flex w-full items-center justify-center gap-2 rounded-xl bg-cyan-400 px-4 py-3 text-sm font-black text-slate-950 transition hover:bg-cyan-300 disabled:cursor-not-allowed disabled:opacity-50">{building ? <RefreshCw className="h-4 w-4 animate-spin" /> : <Database className="h-4 w-4" />}{building ? 'Building leakage-safe dataset…' : 'Build Training Dataset'}</button>
         </article>
 
@@ -172,10 +191,11 @@ export default function TrainingDatasetBuilderPage() {
           <div className="mb-5 flex items-center gap-2 text-sm font-bold text-emerald-300"><ShieldCheck className="h-4 w-4" />Dataset integrity</div>
           <div className="space-y-4 text-sm">
             <div><p className="text-xs uppercase tracking-wider text-slate-500">Source policy</p><p className="mt-1 text-slate-200">Deriv real ticks only</p></div>
-            <div><p className="text-xs uppercase tracking-wider text-slate-500">Feature schema</p><p className="mt-1 text-slate-200">37-dimensional canonical tick feature set</p></div>
-            <div><p className="text-xs uppercase tracking-wider text-slate-500">Split</p><p className="mt-1 text-slate-200">Chronological 70% / 15% / 15%</p></div>
+            <div><p className="text-xs uppercase tracking-wider text-slate-500">Feature schema</p><p className="mt-1 text-slate-200">Registry-driven · {featureCount} active features</p></div>
+            <div><p className="text-xs uppercase tracking-wider text-slate-500">Split</p><p className="mt-1 text-slate-200">Chronological with embargo</p></div>
             <div><p className="text-xs uppercase tracking-wider text-slate-500">Leakage control</p><p className="mt-1 text-emerald-300">Future outcome excluded from feature window</p></div>
             <div><p className="text-xs uppercase tracking-wider text-slate-500">Normalization</p><p className="mt-1 text-slate-200">z-score fit on train split only</p></div>
+            <div><p className="text-xs uppercase tracking-wider text-slate-500">Pipeline version</p><p className="mt-1 text-slate-200 break-all">{pipelineConfig?.pipelineVersion ?? 'Loading…'}</p></div>
           </div>
         </article>
       </section>
@@ -184,7 +204,7 @@ export default function TrainingDatasetBuilderPage() {
         <div className="mb-4 flex items-end justify-between gap-3"><div><h2 className="text-lg font-bold">Built datasets</h2><p className="mt-1 text-xs text-slate-500">Persisted dataset manifests and lineage metadata. Samples remain linked to raw market ticks.</p></div><span className="text-xs text-slate-500">{datasets.length} shown</span></div>
         {datasets.length === 0 ? <div className="rounded-2xl border border-dashed border-white/10 p-8 text-center text-sm text-slate-500">No training datasets have been built yet.</div> : <div className="grid gap-3 lg:grid-cols-2">{datasets.map((dataset) => {
           const quality = dataset.metadata?.qualityReport;
-          return <article key={dataset.id} className="rounded-2xl border border-white/10 bg-black/20 p-4"><div className="flex items-start justify-between gap-3"><div><h3 className="font-bold text-slate-100">{dataset.name}</h3><p className="mt-1 text-xs text-slate-500">{dataset.asset_symbol} · {dataset.version}</p></div><span className={`rounded-full border px-2.5 py-1 text-[10px] font-semibold tracking-wider ${dataset.status === 'completed' ? 'border-emerald-400/20 bg-emerald-400/10 text-emerald-300' : 'border-amber-400/20 bg-amber-400/10 text-amber-200'}`}>{dataset.status.toUpperCase()}</span></div><div className="mt-4 grid grid-cols-2 gap-3 text-xs text-slate-400 sm:grid-cols-4"><div><span className="block text-slate-600">Samples</span>{Number(dataset.sample_count).toLocaleString()}</div><div><span className="block text-slate-600">Train</span>{Number(dataset.train_count).toLocaleString()}</div><div><span className="block text-slate-600">Validation</span>{Number(dataset.validation_count).toLocaleString()}</div><div><span className="block text-slate-600">Test</span>{Number(dataset.test_count).toLocaleString()}</div></div><div className="mt-4 flex flex-wrap gap-2 text-[11px] text-slate-500"><span>Horizon: {dataset.horizon_ticks} ticks</span><span>•</span><span>{dataset.feature_schema_version}</span><span>•</span><span className={dataset.leakage_check_passed ? 'text-emerald-300' : 'text-red-300'}>{dataset.leakage_check_passed ? 'Leakage check passed' : 'Leakage check failed'}</span>{quality ? <><span>•</span><span className={quality.status === 'READY' ? 'text-emerald-300' : 'text-amber-300'}>{quality.status}</span><span>•</span><span>{quality.normalizationVersion}</span></> : null}</div></article>;
+          return <article key={dataset.id} className="rounded-2xl border border-white/10 bg-black/20 p-4"><div className="flex items-start justify-between gap-3"><div><h3 className="font-bold text-slate-100">{dataset.name}</h3><p className="mt-1 text-xs text-slate-500">{dataset.metadata?.assetDisplayName || dataset.asset_symbol} · {dataset.version}</p></div><span className={`rounded-full border px-2.5 py-1 text-[10px] font-semibold tracking-wider ${dataset.status === 'completed' ? 'border-emerald-400/20 bg-emerald-400/10 text-emerald-300' : 'border-amber-400/20 bg-amber-400/10 text-amber-200'}`}>{dataset.status.toUpperCase()}</span></div><div className="mt-4 grid grid-cols-2 gap-3 text-xs text-slate-400 sm:grid-cols-4"><div><span className="block text-slate-600">Samples</span>{Number(dataset.sample_count).toLocaleString()}</div><div><span className="block text-slate-600">Train</span>{Number(dataset.train_count).toLocaleString()}</div><div><span className="block text-slate-600">Validation</span>{Number(dataset.validation_count).toLocaleString()}</div><div><span className="block text-slate-600">Test</span>{Number(dataset.test_count).toLocaleString()}</div></div><div className="mt-4 flex flex-wrap gap-2 text-[11px] text-slate-500"><span>Horizon: {dataset.horizon_ticks} ticks</span><span>•</span><span>{dataset.feature_schema_version}</span><span>•</span><span className={dataset.leakage_check_passed ? 'text-emerald-300' : 'text-red-300'}>{dataset.leakage_check_passed ? 'Leakage check passed' : 'Leakage check failed'}</span>{quality ? <><span>•</span><span className={quality.status === 'READY' ? 'text-emerald-300' : 'text-amber-300'}>{quality.status}</span><span>•</span><span>{quality.normalizationVersion}</span></> : null}</div></article>;
         })}</div>}
       </section>
     </div>
