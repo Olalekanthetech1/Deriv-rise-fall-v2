@@ -1,5 +1,11 @@
 import crypto from 'crypto';
 import { assertFeatureOrder, getFeatureOrder, type FeatureKey } from './ml-feature-registry';
+import { buildBootstrapMlPipelineConfig } from './ml-pipeline-registry';
+import {
+  ensureBootstrapMlPipelineConfig,
+  getActiveMlPipelineConfig,
+  type StoredMlPipelineConfig,
+} from './ml-pipeline-config-store';
 
 export type FeatureWindowConfig = {
   micro: number;
@@ -34,25 +40,18 @@ export type FeatureVectorSnapshot = {
   schemaVersion: string;
 };
 
+export type MlPipelineConfigRuntime = {
+  config: FeaturePipelineConfig;
+  source: 'persistent-active' | 'bootstrap';
+  version: number | null;
+  configHash: string;
+  featureSchemaVersion: string;
+};
+
 type UnknownRecord = Record<string, unknown>;
 
-const CONFIG_ENV_NAME = 'ML_PIPELINE_CONFIG_JSON';
-const REQUIRED_CONFIG_KEYS = [
-  'pipelineVersion',
-  'canonicalFeatureWindowTicks',
-  'defaultHorizonTicks',
-  'maxHorizonTicks',
-  'featureWindows',
-  'regimeThreshold',
-  'digitPrecision',
-  'syntheticSymbolPrefixes',
-  'splitRatios',
-  'splitGapMultiplier',
-  'normalizationMethod',
-  'normalizationEpsilon',
-] as const;
-
-let cachedConfig: FeaturePipelineConfig | null = null;
+let cachedRuntime: MlPipelineConfigRuntime | null = null;
+let initializationPromise: Promise<MlPipelineConfigRuntime> | null = null;
 
 function asRecord(value: unknown, path: string): UnknownRecord {
   if (!value || typeof value !== 'object' || Array.isArray(value)) {
@@ -62,31 +61,23 @@ function asRecord(value: unknown, path: string): UnknownRecord {
 }
 
 function requiredString(value: unknown, path: string): string {
-  if (typeof value !== 'string' || !value.trim()) {
-    throw new Error(`[ML Config] ${path} must be a non-empty string.`);
-  }
+  if (typeof value !== 'string' || !value.trim()) throw new Error(`[ML Config] ${path} must be a non-empty string.`);
   return value.trim();
 }
 
 function requiredPositiveInteger(value: unknown, path: string): number {
-  if (!Number.isSafeInteger(value) || Number(value) <= 0) {
-    throw new Error(`[ML Config] ${path} must be a positive safe integer.`);
-  }
+  if (!Number.isSafeInteger(value) || Number(value) <= 0) throw new Error(`[ML Config] ${path} must be a positive safe integer.`);
   return Number(value);
 }
 
 function requiredNonNegativeInteger(value: unknown, path: string): number {
-  if (!Number.isSafeInteger(value) || Number(value) < 0) {
-    throw new Error(`[ML Config] ${path} must be a non-negative safe integer.`);
-  }
+  if (!Number.isSafeInteger(value) || Number(value) < 0) throw new Error(`[ML Config] ${path} must be a non-negative safe integer.`);
   return Number(value);
 }
 
 function requiredFiniteNumber(value: unknown, path: string): number {
   const parsed = Number(value);
-  if (!Number.isFinite(parsed)) {
-    throw new Error(`[ML Config] ${path} must be a finite number.`);
-  }
+  if (!Number.isFinite(parsed)) throw new Error(`[ML Config] ${path} must be a finite number.`);
   return parsed;
 }
 
@@ -103,37 +94,17 @@ function requiredRatio(value: unknown, path: string): number {
 }
 
 function requiredStringArray(value: unknown, path: string): string[] {
-  if (!Array.isArray(value) || value.length === 0) {
-    throw new Error(`[ML Config] ${path} must be a non-empty array.`);
-  }
+  if (!Array.isArray(value) || value.length === 0) throw new Error(`[ML Config] ${path} must be a non-empty array.`);
   const result = value.map((item, index) => requiredString(item, `${path}[${index}]`));
-  if (new Set(result).size !== result.length) {
-    throw new Error(`[ML Config] ${path} must not contain duplicate values.`);
-  }
+  if (new Set(result).size !== result.length) throw new Error(`[ML Config] ${path} must not contain duplicate values.`);
   return result;
 }
 
-function parseExternalConfig(): FeaturePipelineConfig {
-  const raw = process.env[CONFIG_ENV_NAME];
-  if (!raw?.trim()) {
-    throw new Error(`[ML Config] ${CONFIG_ENV_NAME} is required. Configure the complete ML pipeline contract in the deployment environment.`);
-  }
+function canonicalizeConfig(source: UnknownRecord): FeaturePipelineConfig {
+  const bootstrap = buildBootstrapMlPipelineConfig();
+  const featureWindowsSource = asRecord(source.featureWindows ?? bootstrap.featureWindows, 'featureWindows');
+  const splitSource = asRecord(source.splitRatios ?? bootstrap.splitRatios, 'splitRatios');
 
-  let parsed: unknown;
-  try {
-    parsed = JSON.parse(raw);
-  } catch {
-    throw new Error(`[ML Config] ${CONFIG_ENV_NAME} contains invalid JSON.`);
-  }
-
-  const source = asRecord(parsed, CONFIG_ENV_NAME);
-  const missing = REQUIRED_CONFIG_KEYS.filter((key) => !(key in source));
-  if (missing.length) {
-    throw new Error(`[ML Config] ${CONFIG_ENV_NAME} is missing required keys: ${missing.join(', ')}.`);
-  }
-
-  const featureWindowsSource = asRecord(source.featureWindows, 'featureWindows');
-  const splitSource = asRecord(source.splitRatios, 'splitRatios');
   const featureWindows: FeatureWindowConfig = {
     micro: requiredPositiveInteger(featureWindowsSource.micro, 'featureWindows.micro'),
     short: requiredPositiveInteger(featureWindowsSource.short, 'featureWindows.short'),
@@ -141,16 +112,24 @@ function parseExternalConfig(): FeaturePipelineConfig {
     macro: requiredPositiveInteger(featureWindowsSource.macro, 'featureWindows.macro'),
   };
 
-  const canonicalFeatureWindowTicks = requiredPositiveInteger(source.canonicalFeatureWindowTicks, 'canonicalFeatureWindowTicks');
-  const defaultHorizonTicks = requiredPositiveInteger(source.defaultHorizonTicks, 'defaultHorizonTicks');
-  const maxHorizonTicks = requiredPositiveInteger(source.maxHorizonTicks, 'maxHorizonTicks');
-  const maxConfiguredWindow = Math.max(...Object.values(featureWindows));
-  if (canonicalFeatureWindowTicks < maxConfiguredWindow) {
-    throw new Error('[ML Config] canonicalFeatureWindowTicks must be at least the largest configured feature window.');
+  // These values define the feature schema topology and therefore cannot be
+  // changed through configuration. The registry owns the 5 → 25 → 100 → 300
+  // hierarchy and the canonical 300-tick training window.
+  if (JSON.stringify(featureWindows) !== JSON.stringify(bootstrap.featureWindows)) {
+    throw new Error('[ML Config] featureWindows must match the canonical feature registry topology.');
   }
-  if (defaultHorizonTicks > maxHorizonTicks) {
-    throw new Error('[ML Config] defaultHorizonTicks cannot exceed maxHorizonTicks.');
+
+  const canonicalFeatureWindowTicks = requiredPositiveInteger(
+    source.canonicalFeatureWindowTicks ?? bootstrap.canonicalFeatureWindowTicks,
+    'canonicalFeatureWindowTicks',
+  );
+  if (canonicalFeatureWindowTicks !== bootstrap.canonicalFeatureWindowTicks) {
+    throw new Error('[ML Config] canonicalFeatureWindowTicks must match the canonical 300-tick feature window.');
   }
+
+  const defaultHorizonTicks = requiredPositiveInteger(source.defaultHorizonTicks ?? bootstrap.defaultHorizonTicks, 'defaultHorizonTicks');
+  const maxHorizonTicks = requiredPositiveInteger(source.maxHorizonTicks ?? bootstrap.maxHorizonTicks, 'maxHorizonTicks');
+  if (defaultHorizonTicks > maxHorizonTicks) throw new Error('[ML Config] defaultHorizonTicks cannot exceed maxHorizonTicks.');
 
   const splitRatios = {
     train: requiredRatio(splitSource.train, 'splitRatios.train'),
@@ -158,47 +137,95 @@ function parseExternalConfig(): FeaturePipelineConfig {
     test: requiredRatio(splitSource.test, 'splitRatios.test'),
   };
   const splitSum = splitRatios.train + splitRatios.validation + splitRatios.test;
-  if (Math.abs(splitSum - 1) > Number.EPSILON * 100) {
-    throw new Error('[ML Config] splitRatios must sum to 1.');
-  }
+  if (Math.abs(splitSum - 1) > 1e-9) throw new Error('[ML Config] splitRatios must sum to 1.');
 
-  const normalizationMethod = requiredString(source.normalizationMethod, 'normalizationMethod');
-  if (normalizationMethod !== 'zscore') {
-    throw new Error(`[ML Config] Unsupported normalizationMethod: ${normalizationMethod}.`);
-  }
+  const normalizationMethod = requiredString(source.normalizationMethod ?? bootstrap.normalizationMethod, 'normalizationMethod');
+  if (normalizationMethod !== 'zscore') throw new Error(`[ML Config] Unsupported normalizationMethod: ${normalizationMethod}.`);
 
-  // featureOrder is now registry-owned. An older deployment may still send it
-  // in ML_PIPELINE_CONFIG_JSON; accept it only when it exactly matches the
-  // canonical registry so two competing schemas can never silently diverge.
-  if ('featureOrder' in source) {
-    const suppliedFeatureOrder = requiredStringArray(source.featureOrder, 'featureOrder');
-    assertFeatureOrder(suppliedFeatureOrder);
-  }
+  const suppliedOrder = source.featureOrder == null ? getFeatureOrder() : requiredStringArray(source.featureOrder, 'featureOrder');
+  assertFeatureOrder(suppliedOrder);
 
   return {
-    pipelineVersion: requiredString(source.pipelineVersion, 'pipelineVersion'),
+    pipelineVersion: requiredString(source.pipelineVersion ?? bootstrap.pipelineVersion, 'pipelineVersion'),
     canonicalFeatureWindowTicks,
     defaultHorizonTicks,
     maxHorizonTicks,
     featureWindows,
-    regimeThreshold: requiredFiniteNumber(source.regimeThreshold, 'regimeThreshold'),
-    digitPrecision: requiredNonNegativeInteger(source.digitPrecision, 'digitPrecision'),
-    syntheticSymbolPrefixes: requiredStringArray(source.syntheticSymbolPrefixes, 'syntheticSymbolPrefixes'),
+    regimeThreshold: requiredFiniteNumber(source.regimeThreshold ?? bootstrap.regimeThreshold, 'regimeThreshold'),
+    digitPrecision: requiredNonNegativeInteger(source.digitPrecision ?? bootstrap.digitPrecision, 'digitPrecision'),
+    syntheticSymbolPrefixes: requiredStringArray(source.syntheticSymbolPrefixes ?? bootstrap.syntheticSymbolPrefixes, 'syntheticSymbolPrefixes'),
     featureOrder: getFeatureOrder(),
     splitRatios,
-    splitGapMultiplier: requiredPositiveInteger(source.splitGapMultiplier, 'splitGapMultiplier'),
+    splitGapMultiplier: requiredPositiveInteger(source.splitGapMultiplier ?? bootstrap.splitGapMultiplier, 'splitGapMultiplier'),
     normalizationMethod: 'zscore',
-    normalizationEpsilon: requiredPositiveNumber(source.normalizationEpsilon, 'normalizationEpsilon'),
+    normalizationEpsilon: requiredPositiveNumber(source.normalizationEpsilon ?? bootstrap.normalizationEpsilon, 'normalizationEpsilon'),
   };
 }
 
+export function validateMlPipelineConfig(value: unknown): FeaturePipelineConfig {
+  return canonicalizeConfig(asRecord(value, 'ML pipeline configuration'));
+}
+
 function hashConfig(config: FeaturePipelineConfig): string {
-  return crypto.createHash('sha256').update(JSON.stringify(config)).digest('hex').slice(0, 16);
+  return crypto.createHash('sha256').update(JSON.stringify(config)).digest('hex');
+}
+
+function buildRuntime(config: FeaturePipelineConfig, stored?: StoredMlPipelineConfig | null): MlPipelineConfigRuntime {
+  return {
+    config,
+    source: stored ? 'persistent-active' : 'bootstrap',
+    version: stored?.version ?? null,
+    configHash: stored?.configHash ?? hashConfig(config),
+    featureSchemaVersion: deriveFeatureSchemaVersion(config.featureOrder, config.pipelineVersion),
+  };
+}
+
+export async function initializeMlPipelineConfig(): Promise<MlPipelineConfigRuntime> {
+  if (cachedRuntime) return cachedRuntime;
+  if (initializationPromise) return initializationPromise;
+
+  initializationPromise = (async () => {
+    const bootstrap = buildBootstrapMlPipelineConfig();
+    try {
+      const active = await getActiveMlPipelineConfig();
+      if (active) {
+        const validated = validateMlPipelineConfig(active.config);
+        cachedRuntime = buildRuntime(validated, active);
+        return cachedRuntime;
+      }
+
+      const featureSchemaVersion = deriveFeatureSchemaVersion(bootstrap.featureOrder, bootstrap.pipelineVersion);
+      const created = await ensureBootstrapMlPipelineConfig(bootstrap, featureSchemaVersion);
+      if (created) {
+        const validated = validateMlPipelineConfig(created.config);
+        cachedRuntime = buildRuntime(validated, created);
+        return cachedRuntime;
+      }
+    } catch (error) {
+      console.error('[ML Config] persistent initialization failed; using centralized bootstrap template:', error);
+    }
+
+    cachedRuntime = buildRuntime(bootstrap);
+    return cachedRuntime;
+  })().finally(() => {
+    initializationPromise = null;
+  });
+
+  return initializationPromise;
+}
+
+export async function reloadMlPipelineConfig(): Promise<MlPipelineConfigRuntime> {
+  cachedRuntime = null;
+  return initializeMlPipelineConfig();
 }
 
 export function getMlPipelineConfig(): FeaturePipelineConfig {
-  if (!cachedConfig) cachedConfig = parseExternalConfig();
-  return cachedConfig;
+  return cachedRuntime?.config ?? buildBootstrapMlPipelineConfig();
+}
+
+export function getMlPipelineConfigRuntime(): MlPipelineConfigRuntime {
+  const config = getMlPipelineConfig();
+  return cachedRuntime ?? buildRuntime(config);
 }
 
 export function getFeatureVectorSnapshot(config: FeaturePipelineConfig = getMlPipelineConfig()): FeatureVectorSnapshot {
