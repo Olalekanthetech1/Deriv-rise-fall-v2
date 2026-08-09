@@ -1,5 +1,4 @@
 import { spawn, ChildProcess } from 'child_process';
-import path from 'path';
 
 interface PendingRequest {
   resolve: (data: any) => void;
@@ -25,13 +24,15 @@ class XGBoostDaemonManager {
   private ensureDaemonRunning() {
     if (this.child) return;
 
-    // Resolve the script at runtime from the deployed application root.
-    // The Turbopack directive prevents dynamic runtime resolution from causing
-    // the tracer to walk the entire project filesystem during the build.
-    const pythonScript = path.join(/*turbopackIgnore: true*/ process.cwd(), 'scripts', 'xgboost_engine.py');
+    // Keep the runtime script location deployment-aware without filesystem
+    // resolution in the module graph. The Docker runner copies scripts/ into
+    // the application root, while PYTHON_ML_SCRIPT_PATH can override it when
+    // a deployment uses a different runtime layout.
+    const pythonScript = process.env.PYTHON_ML_SCRIPT_PATH?.trim() || 'scripts/xgboost_engine.py';
 
     try {
       this.child = spawn(process.env.PYTHON_BIN || 'python3', [pythonScript], {
+        cwd: process.cwd(),
         stdio: ['pipe', 'pipe', 'inherit'],
         env: { ...process.env, PYTHONUNBUFFERED: '1' },
       });
