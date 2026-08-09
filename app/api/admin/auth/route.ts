@@ -69,14 +69,15 @@ function getRequestIp(req: NextRequest): string {
     || 'unknown';
 }
 
-function getPresentedToken(req: NextRequest): string | undefined {
-  return req.cookies.get('admin_session_token')?.value
-    || req.headers.get('x-admin-token')
-    || req.headers.get('authorization')?.replace(/^Bearer\s+/i, '');
+function isRequestAuthenticated(req: NextRequest): boolean {
+  const cookie = req.cookies.get('admin_session_token')?.value;
+  const header = req.headers.get('x-admin-token');
+  const bearer = req.headers.get('authorization')?.replace(/^Bearer\s+/i, '');
+  return verifySessionToken(cookie) || verifySessionToken(header) || verifySessionToken(bearer);
 }
 
 export async function GET(req: NextRequest) {
-  const isAuthenticated = verifySessionToken(getPresentedToken(req));
+  const isAuthenticated = isRequestAuthenticated(req);
 
   return NextResponse.json(
     {
