@@ -1,4 +1,5 @@
 import { spawn, ChildProcess } from 'child_process';
+import { fileURLToPath } from 'url';
 
 interface PendingRequest {
   resolve: (data: any) => void;
@@ -24,9 +25,7 @@ class XGBoostDaemonManager {
   private ensureDaemonRunning() {
     if (this.child) return;
 
-    // Use a static relative path so Turbopack does not trace the entire repository.
-    // The process cwd is still the app root in Render/Next runtime.
-    const pythonScript = 'scripts/xgboost_engine.py';
+    const pythonScript = fileURLToPath(new URL('../scripts/xgboost_engine.py', import.meta.url));
 
     try {
       this.child = spawn(process.env.PYTHON_BIN || 'python3', [pythonScript], {
