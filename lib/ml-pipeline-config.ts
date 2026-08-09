@@ -124,17 +124,19 @@ function normalizeConfig(raw: Partial<FeaturePipelineConfig>): FeaturePipelineCo
     ? raw.featureOrder.map((item) => String(item).trim()).filter(Boolean)
     : [...base.featureOrder];
 
+  const normalizedWindows: FeatureWindowConfig = {
+    micro: clampPositiveInteger(featureWindows.micro, base.featureWindows.micro, 100000),
+    short: clampPositiveInteger(featureWindows.short, base.featureWindows.short, 100000),
+    medium: clampPositiveInteger(featureWindows.medium, base.featureWindows.medium, 100000),
+    macro: clampPositiveInteger(featureWindows.macro, base.featureWindows.macro, 100000),
+  };
+
   const normalized: FeaturePipelineConfig = {
     pipelineVersion: typeof raw.pipelineVersion === 'string' && raw.pipelineVersion.trim() ? raw.pipelineVersion.trim() : base.pipelineVersion,
-    canonicalFeatureWindowTicks: clampPositiveInteger(raw.canonicalFeatureWindowTicks, base.canonicalFeatureWindowTicks, base.canonicalFeatureWindowTicks),
-    defaultHorizonTicks: clampPositiveInteger(raw.defaultHorizonTicks, base.defaultHorizonTicks, base.maxHorizonTicks),
+    canonicalFeatureWindowTicks: clampPositiveInteger(raw.canonicalFeatureWindowTicks, base.canonicalFeatureWindowTicks, 100000),
+    defaultHorizonTicks: clampPositiveInteger(raw.defaultHorizonTicks, base.defaultHorizonTicks, 100000),
     maxHorizonTicks: clampPositiveInteger(raw.maxHorizonTicks, base.maxHorizonTicks, 100000),
-    featureWindows: {
-      micro: clampPositiveInteger(featureWindows.micro, base.featureWindows.micro, base.featureWindows.micro),
-      short: clampPositiveInteger(featureWindows.short, base.featureWindows.short, base.featureWindows.short),
-      medium: clampPositiveInteger(featureWindows.medium, base.featureWindows.medium, base.featureWindows.medium),
-      macro: clampPositiveInteger(featureWindows.macro, base.featureWindows.macro, base.featureWindows.macro),
-    },
+    featureWindows: normalizedWindows,
     regimeThreshold: Number.isFinite(Number(raw.regimeThreshold)) ? Number(raw.regimeThreshold) : base.regimeThreshold,
     digitPrecision: clampPositiveInteger(raw.digitPrecision, base.digitPrecision, 12),
     syntheticSymbolPrefixes: Array.isArray(raw.syntheticSymbolPrefixes) && raw.syntheticSymbolPrefixes.length > 0
@@ -150,6 +152,11 @@ function normalizeConfig(raw: Partial<FeaturePipelineConfig>): FeaturePipelineCo
     normalizationMethod: raw.normalizationMethod === 'zscore' ? 'zscore' : base.normalizationMethod,
     normalizationEpsilon: Number.isFinite(Number(raw.normalizationEpsilon)) && Number(raw.normalizationEpsilon) > 0 ? Number(raw.normalizationEpsilon) : base.normalizationEpsilon,
   };
+
+  const maxConfiguredWindow = Math.max(normalizedWindows.micro, normalizedWindows.short, normalizedWindows.medium, normalizedWindows.macro);
+  if (normalized.canonicalFeatureWindowTicks < maxConfiguredWindow) {
+    normalized.canonicalFeatureWindowTicks = maxConfiguredWindow;
+  }
 
   const splitSum = normalized.splitRatios.train + normalized.splitRatios.validation + normalized.splitRatios.test;
   if (Math.abs(splitSum - 1) > 1e-6) {
