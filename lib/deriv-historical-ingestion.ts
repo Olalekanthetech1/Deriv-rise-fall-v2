@@ -170,14 +170,10 @@ async function findResumableRun(sql: Sql, symbol: string, requestedCount: number
   let lastTickTime = row.lastTickTime ? new Date(row.lastTickTime).toISOString() : null;
   let batches = readBatches(metadata);
 
-  // Migrate the older two-row partial format into one logical resumable session.
-  // Only legacy rows without a session id are absorbed; explicit sessions remain independent.
   if (typeof metadata.backfillSessionId !== 'string' || !metadata.backfillSessionId) {
     const legacyRows = (await sql`
       SELECT
         id,
-        started_at,
-        completed_at,
         records_received,
         records_inserted,
         records_rejected,
@@ -357,7 +353,7 @@ export async function ingestDerivHistoricalTicks(input: {
       }
     }
 
-    let remaining = Math.max(0, requestedCount - run.recordsReceived);
+    let remaining = Math.max(0, requestedCount - run.recordsInserted);
     let chunks = Number(run.metadata.chunks || 0);
     let earliestEpoch = run.firstTickTime ? new Date(run.firstTickTime).getTime() : Number.POSITIVE_INFINITY;
     let latestEpoch = run.lastTickTime ? new Date(run.lastTickTime).getTime() : 0;
@@ -408,19 +404,19 @@ export async function ingestDerivHistoricalTicks(input: {
       await upsertCheckpoint(sql, normalizedSymbol, checkpointEpoch, new Date(oldest.epochMs).toISOString());
 
       cursor = Math.max(1, checkpointEpoch - 1);
-      remaining = Math.max(0, requestedCount - run.recordsReceived);
+      remaining = Math.max(0, requestedCount - run.recordsInserted);
       if (rawTicks.length < batchSize) break;
       if (typeof cursor !== 'number' || cursor <= 0) break;
     }
 
     batch.completedAt = new Date().toISOString();
-    batch.status = run.recordsReceived >= requestedCount ? 'completed' : (run.recordsReceived > 0 ? 'partial' : 'failed');
+    batch.status = run.recordsInserted >= requestedCount ? 'completed' : (run.recordsReceived > 0 ? 'partial' : 'failed');
     const batches = [...previousBatches, batch];
 
     run = {
       ...run,
       completedAt: batch.completedAt,
-      status: run.recordsInserted > 0 ? (run.recordsReceived >= requestedCount ? 'completed' : 'partial') : 'failed',
+      status: run.recordsInserted >= requestedCount ? 'completed' : (run.recordsInserted > 0 ? 'partial' : 'failed'),
       firstTickTime: Number.isFinite(earliestEpoch) ? new Date(earliestEpoch).toISOString() : null,
       lastTickTime: latestEpoch > 0 ? new Date(latestEpoch).toISOString() : null,
       errorMessage: null,
