@@ -4,153 +4,100 @@ import Link from 'next/link';
 import { useEffect, useMemo, useState } from 'react';
 import { AlertTriangle, ArrowLeft, Beaker, CheckCircle2, Database, RefreshCw, ShieldCheck, Sparkles } from 'lucide-react';
 
-type SymbolItem = {
-  symbol: string;
-  displayName: string;
-  market: string;
-  submarket: string;
-  isOpen: boolean;
-  isAvailable: boolean;
-};
-
-type DatasetQualityReport = {
-  status: 'READY' | 'REVIEW';
-  totalTicks: number;
-  validTicks: number;
-  invalidTicks: number;
-  duplicateTicks: number;
-  candidateSamples: number;
-  generatedSamples: number;
-  excludedMissingWindows: number;
-  excludedAmbiguousTargets: number;
-  excludedSplitGap: number;
-  featureCount: number;
-  trainCount: number;
-  validationCount: number;
-  testCount: number;
-  splitGapTicks: number;
-  leakageCheckPassed: boolean;
-  temporalSplitValidated: boolean;
-  normalizationVersion: string;
-  featureSchemaVersion: string;
-  labelSchemaVersion: string;
-};
-
+type SymbolItem = { symbol: string; displayName: string; market: string; submarket: string; isOpen: boolean; isAvailable: boolean };
+type DurationUnit = 't' | 's' | 'm' | 'h' | 'd';
+type DurationRange = { id: string; unit: DurationUnit; min: number; max: number; tradeTypes: string[]; source: string };
+type TrainingHorizon = { value: number; unit: DurationUnit; rangeId: string };
+type DurationDiscovery = { symbol: string; ranges: DurationRange[]; fetchedAt: string; source: string };
 type Dataset = {
-  id: string;
-  name: string;
-  version: string;
-  asset_symbol: string;
-  horizon_ticks: number;
-  feature_schema_version: string;
-  label_schema_version: string;
-  sample_count: number;
-  train_count: number;
-  validation_count: number;
-  test_count: number;
-  status: string;
-  leakage_check_passed: boolean;
-  checksum: string | null;
-  source_from: string;
-  source_to: string;
-  created_at: string;
-  metadata?: {
-    qualityReport?: DatasetQualityReport;
-    normalization?: { version?: string; method?: string };
-    pipelineConfig?: { canonicalFeatureWindowTicks?: number; defaultHorizonTicks?: number; featureOrder?: string[]; pipelineVersion?: string };
-    assetDisplayName?: string;
-  } | null;
+  id: string; name: string; version: string; asset_symbol: string; horizon_ticks: number;
+  duration_value: number | null; duration_unit: DurationUnit | null; duration_seconds: number | null;
+  horizon_type: 'tick' | 'time' | null; contract_type: string | null; feature_schema_version: string;
+  label_schema_version: string; sample_count: number; train_count: number; validation_count: number; test_count: number;
+  status: string; leakage_check_passed: boolean; checksum: string | null; created_at: string;
+  metadata?: { assetDisplayName?: string; duration?: { value?: number; unit?: DurationUnit; seconds?: number | null; effectiveHorizonTicks?: number }; qualityReport?: { status?: string; splitGapTicks?: number; excludedAmbiguousTargets?: number; featureCount?: number } } | null;
 };
+type ApiState = { datasets: Dataset[]; discovery: DurationDiscovery | null; horizons: TrainingHorizon[] };
 
-type BuildResult = {
-  sampleCount: number;
-  trainCount: number;
-  validationCount: number;
-  testCount: number;
-  checksum: string;
-  sourceFrom: string;
-  sourceTo: string;
-  qualityReport: DatasetQualityReport;
-  normalizationVersion: string;
-  datasetFingerprint: string;
-};
-
-type PipelineConfig = {
-  canonicalFeatureWindowTicks: number;
-  defaultHorizonTicks: number;
-  maxHorizonTicks: number;
-  featureWindows: { micro: number; short: number; medium: number; macro: number };
-  featureOrder: string[];
-  pipelineVersion: string;
-  normalizationMethod: string;
-};
+const unitLabel: Record<DurationUnit, string> = { t: 'ticks', s: 'seconds', m: 'minutes', h: 'hours', d: 'days' };
+function formatDuration(value: number, unit: DurationUnit) { return `${value} ${unitLabel[unit]}`; }
 
 export default function TrainingDatasetBuilderPage() {
   const [symbols, setSymbols] = useState<SymbolItem[]>([]);
   const [selectedSymbol, setSelectedSymbol] = useState('');
-  const [horizonTicks, setHorizonTicks] = useState<number>(0);
-  const [datasets, setDatasets] = useState<Dataset[]>([]);
-  const [pipelineConfig, setPipelineConfig] = useState<PipelineConfig | null>(null);
+  const [state, setState] = useState<ApiState>({ datasets: [], discovery: null, horizons: [] });
   const [loading, setLoading] = useState(true);
   const [building, setBuilding] = useState(false);
+  const [buildingAll, setBuildingAll] = useState(false);
+  const [selectedHorizon, setSelectedHorizon] = useState('');
   const [error, setError] = useState<string | null>(null);
-  const [success, setSuccess] = useState<BuildResult | null>(null);
+  const [success, setSuccess] = useState<string | null>(null);
 
   const availableSymbols = useMemo(() => symbols.filter((item) => item.isAvailable), [symbols]);
   const selectedAsset = availableSymbols.find((item) => item.symbol === selectedSymbol);
-  const canonicalWindowTicks = pipelineConfig?.canonicalFeatureWindowTicks ?? 0;
-  const defaultHorizonTicks = pipelineConfig?.defaultHorizonTicks ?? 0;
-  const featureCount = pipelineConfig?.featureOrder?.length ?? 0;
+
+  async function loadSymbols() {
+    const response = await fetch('/api/symbols', { cache: 'no-store' });
+    const data = await response.json();
+    const liveSymbols = Array.isArray(data?.symbols) ? data.symbols : [];
+    setSymbols(liveSymbols);
+    setSelectedSymbol((current) => current || liveSymbols.find((item: SymbolItem) => item.isAvailable)?.symbol || '');
+    if (!response.ok) throw new Error(data?.error || 'Live Deriv symbols are unavailable.');
+  }
+
+  async function loadDatasetState(symbol: string) {
+    if (!symbol) return;
+    const response = await fetch(`/api/admin/datasets?symbol=${encodeURIComponent(symbol)}`, { cache: 'no-store' });
+    const data = await response.json();
+    if (!response.ok) throw new Error(data?.error || 'Unable to load Deriv duration capabilities.');
+    setState({ datasets: Array.isArray(data?.datasets) ? data.datasets : [], discovery: data?.durationDiscovery ?? null, horizons: Array.isArray(data?.trainingHorizons) ? data.trainingHorizons : [] });
+    const first = data?.trainingHorizons?.[0];
+    setSelectedHorizon(first ? `${first.value}:${first.unit}` : '');
+  }
 
   async function load() {
-    setLoading(true);
-    setError(null);
+    setLoading(true); setError(null);
     try {
-      const [symbolResponse, datasetResponse] = await Promise.all([
-        fetch('/api/symbols', { cache: 'no-store' }),
-        fetch('/api/admin/datasets', { cache: 'no-store' }),
-      ]);
-      const symbolData = await symbolResponse.json();
-      const datasetData = await datasetResponse.json();
-      if (!datasetResponse.ok) throw new Error(datasetData?.error || 'Unable to load dataset operations.');
-      const liveSymbols = Array.isArray(symbolData?.symbols) ? symbolData.symbols : [];
-      setSymbols(liveSymbols);
-      setDatasets(Array.isArray(datasetData?.datasets) ? datasetData.datasets : []);
-      setPipelineConfig(datasetData?.pipelineConfig ?? null);
-      const defaultFromServer = Number(datasetData?.defaults?.horizonTicks ?? 0);
-      setHorizonTicks((current) => (Number.isFinite(current) && current > 0 ? current : defaultFromServer));
-      setSelectedSymbol((current) => current || liveSymbols.find((item: SymbolItem) => item.isAvailable)?.symbol || '');
-      if (!symbolResponse.ok) setError(symbolData?.error || 'Live Deriv symbols are currently unavailable.');
-    } catch (err) {
-      setError(err instanceof Error ? err.message : 'Unable to load dataset builder.');
-    } finally {
-      setLoading(false);
-    }
+      await loadSymbols();
+    } catch (err) { setError(err instanceof Error ? err.message : 'Unable to load dataset builder.'); }
+    finally { setLoading(false); }
   }
 
   useEffect(() => { void load(); }, []);
+  useEffect(() => {
+    if (!selectedSymbol) return;
+    setError(null);
+    void loadDatasetState(selectedSymbol).catch((err) => setError(err instanceof Error ? err.message : 'Unable to load duration capabilities.'));
+  }, [selectedSymbol]);
 
   async function buildDataset() {
-    if (!selectedSymbol || !canonicalWindowTicks || !horizonTicks) return;
-    setBuilding(true);
-    setError(null);
-    setSuccess(null);
+    if (!selectedSymbol || !selectedHorizon) return;
+    const [valueText, unit] = selectedHorizon.split(':');
+    const durationValue = Number(valueText);
+    if (!Number.isSafeInteger(durationValue)) return;
+    setBuilding(true); setError(null); setSuccess(null);
     try {
-      const response = await fetch('/api/admin/datasets', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ symbol: selectedSymbol, horizonTicks, windowTicks: canonicalWindowTicks }),
-      });
+      const response = await fetch('/api/admin/datasets', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ symbol: selectedSymbol, durationValue, durationUnit: unit }) });
       const data = await response.json();
       if (!response.ok || !data?.success) throw new Error(data?.error || 'Dataset construction failed.');
-      setSuccess(data.dataset);
-      setPipelineConfig(data.pipelineConfig ?? pipelineConfig);
-      await load();
-    } catch (err) {
-      setError(err instanceof Error ? err.message : 'Dataset construction failed.');
-    } finally {
-      setBuilding(false);
-    }
+      setSuccess(`Built ${formatDuration(durationValue, unit as DurationUnit)} dataset from persisted real Deriv ticks.`);
+      await loadDatasetState(selectedSymbol);
+    } catch (err) { setError(err instanceof Error ? err.message : 'Dataset construction failed.'); }
+    finally { setBuilding(false); }
+  }
+
+  async function buildAllSupported() {
+    if (!selectedSymbol) return;
+    setBuildingAll(true); setError(null); setSuccess(null);
+    try {
+      const response = await fetch('/api/admin/datasets', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ symbol: selectedSymbol, buildAllSupportedHorizons: true }) });
+      const data = await response.json();
+      if (!response.ok || !data?.success) throw new Error(data?.error || 'Unable to build all supported duration datasets.');
+      const result = data.result;
+      setSuccess(`Completed ${result.completedCount} of ${result.requestedCount} discovered duration datasets for ${selectedSymbol}.`);
+      await loadDatasetState(selectedSymbol);
+    } catch (err) { setError(err instanceof Error ? err.message : 'Unable to build all supported duration datasets.'); }
+    finally { setBuildingAll(false); }
   }
 
   return <main className="min-h-screen bg-[#05070b] px-4 py-5 text-slate-100 sm:px-6 lg:px-8">
@@ -158,55 +105,38 @@ export default function TrainingDatasetBuilderPage() {
       <header className="mb-5 flex flex-col gap-4 rounded-3xl border border-white/10 bg-white/[0.03] p-5 backdrop-blur-xl sm:flex-row sm:items-center sm:justify-between">
         <div>
           <Link href="/admin" className="mb-3 inline-flex items-center gap-2 text-xs font-semibold text-slate-500 hover:text-slate-300"><ArrowLeft className="h-3.5 w-3.5" />Back to Admin Operations</Link>
-          <div className="flex items-center gap-3"><div className="rounded-2xl border border-cyan-400/20 bg-cyan-400/10 p-3"><Beaker className="h-6 w-6 text-cyan-300" /></div><div><p className="text-[11px] font-semibold uppercase tracking-[0.2em] text-cyan-300">Agenda 5</p><h1 className="text-2xl font-black sm:text-3xl">Training Dataset Builder</h1><p className="mt-1 text-sm text-slate-500">Leakage-safe datasets built exclusively from persisted real Deriv ticks.</p></div></div>
+          <div className="flex items-center gap-3"><div className="rounded-2xl border border-cyan-400/20 bg-cyan-400/10 p-3"><Beaker className="h-6 w-6 text-cyan-300" /></div><div><p className="text-[11px] font-semibold uppercase tracking-[0.2em] text-cyan-300">Agenda 5</p><h1 className="text-2xl font-black sm:text-3xl">Training Dataset Builder</h1><p className="mt-1 text-sm text-slate-500">Leakage-safe datasets built from persisted real Deriv ticks with broker-driven durations.</p></div></div>
         </div>
-        <button onClick={() => void load()} disabled={loading || building} className="inline-flex items-center justify-center gap-2 rounded-xl border border-white/10 bg-white/5 px-4 py-2.5 text-sm font-semibold text-slate-200 disabled:opacity-50"><RefreshCw className={`h-4 w-4 ${loading ? 'animate-spin' : ''}`} />Refresh</button>
+        <button onClick={() => void load()} disabled={loading || building || buildingAll} className="inline-flex items-center justify-center gap-2 rounded-xl border border-white/10 bg-white/5 px-4 py-2.5 text-sm font-semibold text-slate-200 disabled:opacity-50"><RefreshCw className={`h-4 w-4 ${loading ? 'animate-spin' : ''}`} />Refresh</button>
       </header>
 
       {error && <div className="mb-5 flex items-start gap-3 rounded-2xl border border-amber-400/20 bg-amber-400/5 p-4 text-sm text-amber-200"><AlertTriangle className="mt-0.5 h-4 w-4 shrink-0" /><span>{error}</span></div>}
-      {success && <div className="mb-5 rounded-2xl border border-emerald-400/20 bg-emerald-400/5 p-4">
-        <div className="flex items-center gap-2 text-sm font-bold text-emerald-300"><CheckCircle2 className="h-4 w-4" />Dataset built from real Deriv ticks</div>
-        <p className="mt-2 text-xs text-slate-400">{success.sampleCount.toLocaleString()} samples · Train {success.trainCount.toLocaleString()} · Validation {success.validationCount.toLocaleString()} · Test {success.testCount.toLocaleString()}</p>
-        <p className="mt-1 break-all text-[11px] text-slate-500">SHA-256: {success.checksum}</p>
-        <p className="mt-1 text-[11px] text-slate-500">Fingerprint: {success.datasetFingerprint} · Normalization: {success.normalizationVersion}</p>
-        <div className="mt-3 grid gap-2 sm:grid-cols-3 text-xs text-slate-300">
-          <div className="rounded-xl border border-white/10 bg-black/20 p-3">Status<br /><span className={success.qualityReport.status === 'READY' ? 'text-emerald-300' : 'text-amber-300'}>{success.qualityReport.status}</span></div>
-          <div className="rounded-xl border border-white/10 bg-black/20 p-3">Leakage<br /><span className={success.qualityReport.leakageCheckPassed ? 'text-emerald-300' : 'text-red-300'}>{success.qualityReport.leakageCheckPassed ? 'Passed' : 'Failed'}</span></div>
-          <div className="rounded-xl border border-white/10 bg-black/20 p-3">Split validation<br /><span className={success.qualityReport.temporalSplitValidated ? 'text-emerald-300' : 'text-red-300'}>{success.qualityReport.temporalSplitValidated ? 'Passed' : 'Failed'}</span></div>
-        </div>
-      </div>}
+      {success && <div className="mb-5 flex items-start gap-3 rounded-2xl border border-emerald-400/20 bg-emerald-400/5 p-4 text-sm text-emerald-300"><CheckCircle2 className="mt-0.5 h-4 w-4 shrink-0" /><span>{success}</span></div>}
 
-      <section className="mb-5 grid gap-4 lg:grid-cols-[1.15fr_.85fr]">
+      <section className="mb-5 grid gap-4 lg:grid-cols-[1.1fr_.9fr]">
         <article className="rounded-3xl border border-white/10 bg-white/[0.025] p-5">
           <div className="mb-5 flex items-center gap-2 text-sm font-bold text-cyan-300"><Sparkles className="h-4 w-4" />Build dataset</div>
-          <div className="grid gap-4 sm:grid-cols-2">
-            <label className="sm:col-span-2"><span className="mb-2 block text-xs font-semibold uppercase tracking-wider text-slate-500">Deriv asset</span><select value={selectedSymbol} onChange={(event) => setSelectedSymbol(event.target.value)} className="w-full rounded-xl border border-white/10 bg-black/30 px-4 py-3 text-sm outline-none focus:border-cyan-400/50"><option value="">Select a live Deriv asset</option>{availableSymbols.map((item) => <option key={item.symbol} value={item.symbol}>{item.displayName} — {item.symbol}</option>)}</select>{selectedAsset && <span className="mt-2 block text-xs text-slate-500">{selectedAsset.market} / {selectedAsset.submarket} · {selectedAsset.isOpen ? 'Open' : 'Available but closed'}</span>}</label>
-            <label><span className="mb-2 block text-xs font-semibold uppercase tracking-wider text-slate-500">Prediction horizon (ticks)</span><input type="number" min={1} max={pipelineConfig?.maxHorizonTicks ?? 1} value={horizonTicks} onChange={(event) => setHorizonTicks(Number(event.target.value))} className="w-full rounded-xl border border-white/10 bg-black/30 px-4 py-3 text-sm outline-none focus:border-cyan-400/50" /></label>
-            <div><span className="mb-2 block text-xs font-semibold uppercase tracking-wider text-slate-500">Feature window</span><div className="rounded-xl border border-white/10 bg-black/20 px-4 py-3 text-sm text-slate-300">{canonicalWindowTicks || 'Loading…'} ticks · {featureCount || 'Loading…'} features</div></div>
+          <label className="block"><span className="mb-2 block text-xs font-semibold uppercase tracking-wider text-slate-500">Deriv asset</span><select value={selectedSymbol} onChange={(event) => { setSelectedSymbol(event.target.value); setSelectedHorizon(''); }} disabled={loading || building || buildingAll} className="w-full rounded-xl border border-white/10 bg-black/30 px-4 py-3 text-sm outline-none focus:border-cyan-400/50"><option value="">Select a live Deriv asset</option>{availableSymbols.map((item) => <option key={item.symbol} value={item.symbol}>{item.displayName} — {item.symbol}</option>)}</select>{selectedAsset && <span className="mt-2 block text-xs text-slate-500">{selectedAsset.market} / {selectedAsset.submarket} · {selectedAsset.isOpen ? 'Open' : 'Available but closed'}</span>}</label>
+
+          <div className="mt-4"><span className="mb-2 block text-xs font-semibold uppercase tracking-wider text-slate-500">Supported prediction horizon</span><select value={selectedHorizon} onChange={(event) => setSelectedHorizon(event.target.value)} disabled={!state.horizons.length || building || buildingAll} className="w-full rounded-xl border border-white/10 bg-black/30 px-4 py-3 text-sm outline-none focus:border-cyan-400/50"><option value="">Select a Deriv-supported horizon</option>{state.horizons.map((item) => <option key={`${item.value}:${item.unit}`} value={`${item.value}:${item.unit}`}>{formatDuration(item.value, item.unit)}</option>)}</select><p className="mt-2 text-xs text-slate-500">The horizon is discovered from Deriv for the selected asset. There is no fixed tick-only input.</p></div>
+
+          <div className="mt-5 rounded-2xl border border-cyan-400/10 bg-cyan-400/[0.03] p-4 text-xs leading-5 text-slate-400"><strong className="text-slate-200">Pipeline contract:</strong> real Deriv ticks → registry-driven features → broker duration target → leakage checks → train-only normalization → chronological split with embargo. Time horizons use timestamp-based future targets; tick horizons use future tick positions.</div>
+          <div className="mt-5 grid gap-3 sm:grid-cols-2">
+            <button onClick={() => void buildDataset()} disabled={!selectedSymbol || !selectedHorizon || building || buildingAll || loading} className="inline-flex items-center justify-center gap-2 rounded-xl bg-cyan-400 px-4 py-3 text-sm font-black text-slate-950 transition hover:bg-cyan-300 disabled:cursor-not-allowed disabled:opacity-50">{building ? <RefreshCw className="h-4 w-4 animate-spin" /> : <Database className="h-4 w-4" />}{building ? 'Building…' : 'Build selected horizon'}</button>
+            <button onClick={() => void buildAllSupported()} disabled={!selectedSymbol || !state.horizons.length || building || buildingAll || loading} className="inline-flex items-center justify-center gap-2 rounded-xl border border-emerald-400/30 bg-emerald-400/10 px-4 py-3 text-sm font-black text-emerald-300 transition hover:bg-emerald-400/15 disabled:cursor-not-allowed disabled:opacity-50">{buildingAll ? <RefreshCw className="h-4 w-4 animate-spin" /> : <Database className="h-4 w-4" />}{buildingAll ? 'Building all supported…' : 'Build all supported horizons'}</button>
           </div>
-          <div className="mt-5 rounded-2xl border border-cyan-400/10 bg-cyan-400/[0.03] p-4 text-xs leading-5 text-slate-400"><strong className="text-slate-200">Pipeline contract:</strong> raw Deriv ticks → registry-driven features → leakage checks → z-score normalization fit on train split only → future direction label → chronological split with embargo. Flat outcomes are excluded. No synthetic fallback is permitted.</div>
-          <button onClick={() => void buildDataset()} disabled={!selectedSymbol || building || loading || !canonicalWindowTicks || !horizonTicks} className="mt-5 inline-flex w-full items-center justify-center gap-2 rounded-xl bg-cyan-400 px-4 py-3 text-sm font-black text-slate-950 transition hover:bg-cyan-300 disabled:cursor-not-allowed disabled:opacity-50">{building ? <RefreshCw className="h-4 w-4 animate-spin" /> : <Database className="h-4 w-4" />}{building ? 'Building leakage-safe dataset…' : 'Build Training Dataset'}</button>
         </article>
 
         <article className="rounded-3xl border border-white/10 bg-white/[0.025] p-5">
-          <div className="mb-5 flex items-center gap-2 text-sm font-bold text-emerald-300"><ShieldCheck className="h-4 w-4" />Dataset integrity</div>
-          <div className="space-y-4 text-sm">
-            <div><p className="text-xs uppercase tracking-wider text-slate-500">Source policy</p><p className="mt-1 text-slate-200">Deriv real ticks only</p></div>
-            <div><p className="text-xs uppercase tracking-wider text-slate-500">Feature schema</p><p className="mt-1 text-slate-200">Registry-driven · {featureCount || 'Loading…'} active features</p></div>
-            <div><p className="text-xs uppercase tracking-wider text-slate-500">Split</p><p className="mt-1 text-slate-200">Chronological with embargo</p></div>
-            <div><p className="text-xs uppercase tracking-wider text-slate-500">Leakage control</p><p className="mt-1 text-emerald-300">Future outcome excluded from feature window</p></div>
-            <div><p className="text-xs uppercase tracking-wider text-slate-500">Normalization</p><p className="mt-1 text-slate-200">z-score fit on train split only</p></div>
-            <div><p className="text-xs uppercase tracking-wider text-slate-500">Pipeline version</p><p className="mt-1 break-all text-slate-200">{pipelineConfig?.pipelineVersion ?? 'Loading…'}</p></div>
-          </div>
+          <div className="mb-5 flex items-center gap-2 text-sm font-bold text-emerald-300"><ShieldCheck className="h-4 w-4" />Dynamic duration contract</div>
+          {!state.discovery ? <p className="text-sm text-slate-500">Select an asset to query Deriv duration metadata.</p> : <div className="space-y-3">{state.discovery.ranges.map((range) => <div key={range.id} className="rounded-2xl border border-white/10 bg-black/20 p-3"><div className="flex items-center justify-between gap-3"><span className="font-semibold text-slate-200">{formatDuration(range.min, range.unit)}{range.min !== range.max ? ` – ${formatDuration(range.max, range.unit)}` : ''}</span><span className="text-[10px] uppercase tracking-wider text-emerald-300">Deriv</span></div>{range.tradeTypes.length > 0 && <p className="mt-1 text-[11px] text-slate-500">Trade type: {range.tradeTypes.join(', ')}</p>}</div>)}</div>}
+          <p className="mt-4 text-[11px] leading-5 text-slate-500">Source: {state.discovery?.source || 'waiting for Deriv'}. The registry is refreshed when the selected asset changes.</p>
         </article>
       </section>
 
       <section className="rounded-3xl border border-white/10 bg-white/[0.025] p-5">
-        <div className="mb-4 flex items-end justify-between gap-3"><div><h2 className="text-lg font-bold">Built datasets</h2><p className="mt-1 text-xs text-slate-500">Persisted dataset manifests and lineage metadata. Samples remain linked to raw market ticks.</p></div><span className="text-xs text-slate-500">{datasets.length} shown</span></div>
-        {datasets.length === 0 ? <div className="rounded-2xl border border-dashed border-white/10 p-8 text-center text-sm text-slate-500">No training datasets have been built yet.</div> : <div className="grid gap-3 lg:grid-cols-2">{datasets.map((dataset) => {
-          const quality = dataset.metadata?.qualityReport;
-          return <article key={dataset.id} className="rounded-2xl border border-white/10 bg-black/20 p-4"><div className="flex items-start justify-between gap-3"><div><h3 className="font-bold text-slate-100">{dataset.name}</h3><p className="mt-1 text-xs text-slate-500">{dataset.metadata?.assetDisplayName || dataset.asset_symbol} · {dataset.version}</p></div><span className={`rounded-full border px-2.5 py-1 text-[10px] font-semibold tracking-wider ${dataset.status === 'completed' ? 'border-emerald-400/20 bg-emerald-400/10 text-emerald-300' : 'border-amber-400/20 bg-amber-400/10 text-amber-200'}`}>{dataset.status.toUpperCase()}</span></div><div className="mt-4 grid grid-cols-2 gap-3 text-xs text-slate-400 sm:grid-cols-4"><div><span className="block text-slate-600">Samples</span>{Number(dataset.sample_count).toLocaleString()}</div><div><span className="block text-slate-600">Train</span>{Number(dataset.train_count).toLocaleString()}</div><div><span className="block text-slate-600">Validation</span>{Number(dataset.validation_count).toLocaleString()}</div><div><span className="block text-slate-600">Test</span>{Number(dataset.test_count).toLocaleString()}</div></div><div className="mt-4 flex flex-wrap gap-2 text-[11px] text-slate-500"><span>Horizon: {dataset.horizon_ticks} ticks</span><span>•</span><span>{dataset.feature_schema_version}</span><span>•</span><span className={dataset.leakage_check_passed ? 'text-emerald-300' : 'text-red-300'}>{dataset.leakage_check_passed ? 'Leakage check passed' : 'Leakage check failed'}</span>{quality ? <><span>•</span><span className={quality.status === 'READY' ? 'text-emerald-300' : 'text-amber-300'}>{quality.status}</span><span>•</span><span>{quality.normalizationVersion}</span></> : null}</div></article>;
-        })}</div>}
+        <div className="mb-4 flex items-end justify-between gap-3"><div><h2 className="text-lg font-bold">Built datasets</h2><p className="mt-1 text-xs text-slate-500">Each dataset records asset, duration value/unit, effective tick horizon, feature schema and lineage.</p></div><span className="text-xs text-slate-500">{state.datasets.length} shown</span></div>
+        {state.datasets.length === 0 ? <div className="rounded-2xl border border-dashed border-white/10 p-8 text-center text-sm text-slate-500">No duration-aware training datasets have been built for this asset.</div> : <div className="grid gap-3 lg:grid-cols-2">{state.datasets.map((dataset) => { const duration = dataset.duration_value && dataset.duration_unit ? formatDuration(Number(dataset.duration_value), dataset.duration_unit) : `${dataset.horizon_ticks} ticks`; const quality = dataset.metadata?.qualityReport; return <article key={dataset.id} className="rounded-2xl border border-white/10 bg-black/20 p-4"><div className="flex items-start justify-between gap-3"><div><h3 className="font-bold text-slate-100">{dataset.name}</h3><p className="mt-1 text-xs text-slate-500">{dataset.metadata?.assetDisplayName || dataset.asset_symbol} · {duration}</p></div><span className="rounded-full border border-emerald-400/20 bg-emerald-400/10 px-2.5 py-1 text-[10px] font-semibold tracking-wider text-emerald-300">{dataset.status.toUpperCase()}</span></div><div className="mt-4 grid grid-cols-2 gap-3 text-xs text-slate-400 sm:grid-cols-4"><div><span className="block text-slate-600">Samples</span>{Number(dataset.sample_count).toLocaleString()}</div><div><span className="block text-slate-600">Train</span>{Number(dataset.train_count).toLocaleString()}</div><div><span className="block text-slate-600">Validation</span>{Number(dataset.validation_count).toLocaleString()}</div><div><span className="block text-slate-600">Test</span>{Number(dataset.test_count).toLocaleString()}</div></div><div className="mt-4 flex flex-wrap gap-2 text-[10px]"><span className="rounded-full border border-white/10 px-2 py-1 text-slate-400">{dataset.horizon_type || 'tick'} horizon</span>{dataset.duration_seconds != null && <span className="rounded-full border border-white/10 px-2 py-1 text-slate-400">{Number(dataset.duration_seconds).toLocaleString()}s</span>}<span className="rounded-full border border-emerald-400/20 px-2 py-1 text-emerald-300">Leakage passed</span>{quality?.status && <span className="rounded-full border border-white/10 px-2 py-1 text-slate-400">{quality.status}</span>}</div><p className="mt-3 break-all text-[10px] text-slate-600">{dataset.version} · {dataset.feature_schema_version}</p></article>; })}</div>}
       </section>
     </div>
   </main>;
