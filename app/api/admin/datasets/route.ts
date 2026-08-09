@@ -19,51 +19,130 @@ function matchingRanges(discovery: Awaited<ReturnType<typeof getSupportedDuratio
   });
 }
 
-function expandTrainingHorizonLadder(ranges: DerivDurationRange[]): Array<{ value: number; unit: DerivDurationUnit; rangeId: string }> {
-  const result: Array<{ value: number; unit: DerivDurationUnit; rangeId: string }> = [];
-  for (const range of ranges) {
-    const brokerStep = Number.isSafeInteger(range.step) && range.step > 0 ? range.step : 1;
-    let displayStep = brokerStep;
-    let start = range.min;
-    if ((range.unit === 's' || range.unit === 'm') && brokerStep === 1 && range.max - range.min >= 15) {
-      displayStep = Math.max(15, range.min);
-      start = Math.ceil(range.min / displayStep) * displayStep;
-      if (start > range.max) start = range.min;
-      if (start !== range.min) result.push({ value: range.min, unit: range.unit, rangeId: range.id });
-    }
-    const count = Math.floor((range.max - start) / displayStep) + 1;
-    const boundedCount = Math.min(count, 10000);
-    for (let index = 0; index < boundedCount; index += 1) {
-      const value = start + index * displayStep;
-      if (value > range.max) break;
-      result.push({ value, unit: range.unit, rangeId: range.id });
-    }
-    if (!result.some((item) => item.rangeId === range.id && item.value === range.max)) result.push({ value: range.max, unit: range.unit, rangeId: range.id });
-  }
-  const seen = new Set<string>();
-  return result.filter((item) => { const key = `${item.value}:${item.unit}`; if (seen.has(key)) return false; seen.add(key); return true; });
+function envPositiveInt(name: string, fallback: number, max: number): number {
+  const parsed = Number(process.env[name]);
+  return Number.isSafeInteger(parsed) && parsed > 0 ? Math.min(parsed, max) : fallback;
 }
 
-type AutoJob = { id: string; symbol: string; status: 'running' | 'completed' | 'failed'; requestedCount: number; completedCount: number; failedCount: number; failures: Array<{ value: number; unit: DerivDurationUnit; error: string }>; startedAt: string; finishedAt?: string };
+/**
+ * Deriv exposes duration capability as ranges rather than a finite list.
+ * AUTO therefore builds a dynamically derived training ladder, not every
+ * integer duration in a large broker range. Min/max and broker step remain
+ * authoritative; intermediate points are logarithmically distributed.
+ */
+function expandTrainingHorizonLadder(ranges: DerivDurationRange[]): Array<{ value: number; unit: DerivDurationUnit; rangeId: string }> {
+  const maxPerRange = envPositiveInt('DERIV_AUTO_HORIZONS_PER_RANGE', 48, 256);
+  const maxTotal = envPositiveInt('DERIV_AUTO_HORIZON_TOTAL', 192, 512);
+  const result: Array<{ value: number; unit: DerivDurationUnit; rangeId: string }> = [];
+
+  for (const range of ranges) {
+    if (result.length >= maxTotal) break;
+    const step = Number.isSafeInteger(range.step) && range.step > 0 ? range.step : 1;
+    const min = range.min;
+    const max = range.max;
+    if (min > max) continue;
+
+    const values: number[] = [min];
+    if (max !== min) values.push(max);
+
+    const count = Math.min(maxPerRange, Math.max(2, maxPerRange));
+    if (count > 2) {
+      const span = max - min;
+      for (let i = 1; i < count - 1; i += 1) {
+        const ratio = i / (count - 1);
+        const raw = min + span * (Math.exp(ratio * Math.log1p(span)) - 1) / Math.expm1(Math.log1p(span));
+        const stepped = min + Math.round((raw - min) / step) * step;
+        if (stepped >= min && stepped <= max) values.push(stepped);
+      }
+    }
+
+    const unique = Array.from(new Set(values)).sort((a, b) => a - b);
+    for (const value of unique) {
+      if (result.length >= maxTotal) break;
+      result.push({ value, unit: range.unit, rangeId: range.id });
+    }
+  }
+
+  const seen = new Set<string>();
+  return result.filter((item) => {
+    const key = `${item.value}:${item.unit}`;
+    if (seen.has(key)) return false;
+    seen.add(key);
+    return true;
+  });
+}
+
+type AutoJob = {
+  id: string;
+  symbol: string;
+  status: 'running' | 'completed' | 'failed';
+  requestedCount: number;
+  completedCount: number;
+  failedCount: number;
+  failures: Array<{ value: number; unit: DerivDurationUnit; error: string }>;
+  startedAt: string;
+  finishedAt?: string;
+};
+
 const autoJobs = new Map<string, AutoJob>();
 const activeAutoJobs = new Map<string, string>();
 
+async function runWithConcurrency<T>(items: T[], concurrency: number, worker: (item: T) => Promise<void>): Promise<void> {
+  let cursor = 0;
+  const workers = Array.from({ length: Math.min(concurrency, items.length) }, async () => {
+    while (true) {
+      const index = cursor++;
+      if (index >= items.length) return;
+      await worker(items[index]);
+    }
+  });
+  await Promise.all(workers);
+}
+
 function startAutoBuild(symbol: string, discovery: Awaited<ReturnType<typeof getSupportedDurationDiscovery>>): AutoJob {
   const existingId = activeAutoJobs.get(symbol);
-  if (existingId) { const existing = autoJobs.get(existingId); if (existing?.status === 'running') return existing; activeAutoJobs.delete(symbol); }
+  if (existingId) {
+    const existing = autoJobs.get(existingId);
+    if (existing?.status === 'running') return existing;
+    activeAutoJobs.delete(symbol);
+  }
+
   const durations = expandTrainingHorizonLadder(discovery.ranges);
-  const job: AutoJob = { id: crypto.randomUUID(), symbol, status: 'running', requestedCount: durations.length, completedCount: 0, failedCount: 0, failures: [], startedAt: new Date().toISOString() };
-  autoJobs.set(job.id, job); activeAutoJobs.set(symbol, job.id);
+  const job: AutoJob = {
+    id: crypto.randomUUID(),
+    symbol,
+    status: 'running',
+    requestedCount: durations.length,
+    completedCount: 0,
+    failedCount: 0,
+    failures: [],
+    startedAt: new Date().toISOString(),
+  };
+  autoJobs.set(job.id, job);
+  activeAutoJobs.set(symbol, job.id);
+
+  const concurrency = envPositiveInt('DERIV_AUTO_BUILD_CONCURRENCY', 2, 8);
   void (async () => {
     try {
-      for (const duration of durations) {
-        try { await buildDurationTrainingDataset({ symbol, durationValue: duration.value, durationUnit: duration.unit, durationRangeId: duration.rangeId }); job.completedCount += 1; }
-        catch (error) { job.failedCount += 1; job.failures.push({ value: duration.value, unit: duration.unit, error: error instanceof Error ? error.message : String(error) }); }
-      }
-      job.status = 'completed';
-    } catch (error) { job.status = 'failed'; job.failures.push({ value: 0, unit: 't', error: error instanceof Error ? error.message : String(error) }); }
-    finally { job.finishedAt = new Date().toISOString(); activeAutoJobs.delete(symbol); }
+      await runWithConcurrency(durations, concurrency, async (duration) => {
+        try {
+          await buildDurationTrainingDataset({ symbol, durationValue: duration.value, durationUnit: duration.unit, durationRangeId: duration.rangeId });
+          job.completedCount += 1;
+        } catch (error) {
+          job.failedCount += 1;
+          job.failures.push({ value: duration.value, unit: duration.unit, error: error instanceof Error ? error.message : String(error) });
+        }
+      });
+      job.status = job.failedCount > 0 && job.completedCount === 0 ? 'failed' : 'completed';
+    } catch (error) {
+      job.status = 'failed';
+      job.failures.push({ value: 0, unit: 't', error: error instanceof Error ? error.message : String(error) });
+    } finally {
+      job.finishedAt = new Date().toISOString();
+      activeAutoJobs.delete(symbol);
+    }
   })();
+
   return job;
 }
 
@@ -72,12 +151,18 @@ export async function GET(req: NextRequest) {
   try {
     const symbol = req.nextUrl.searchParams.get('symbol')?.trim().toUpperCase() || undefined;
     const autoJobId = req.nextUrl.searchParams.get('autoJobId')?.trim();
-    if (autoJobId) { const job = autoJobs.get(autoJobId); if (!job) return NextResponse.json({ success: false, error: 'AUTO dataset build job was not found on this application instance.' }, { status: 404, headers: noStore() }); return NextResponse.json({ success: true, job }, { headers: noStore() }); }
+    if (autoJobId) {
+      const job = autoJobs.get(autoJobId);
+      if (!job) return NextResponse.json({ success: false, error: 'AUTO dataset build job was not found on this application instance. Start a new AUTO build.' }, { status: 404, headers: noStore() });
+      return NextResponse.json({ success: true, job }, { headers: noStore() });
+    }
     const datasets = await listDurationTrainingDatasets(symbol);
     if (!symbol) return NextResponse.json({ success: true, datasets, durationSource: 'deriv-dynamic' }, { headers: noStore() });
     const discovery = await getSupportedDurationDiscovery(symbol);
     return NextResponse.json({ success: true, datasets, durationSource: discovery.source, durationDiscovery: discovery, trainingHorizons: expandTrainingHorizonLadder(discovery.ranges), brokerTrainingHorizons: expandTrainingDurations(discovery.ranges) }, { headers: noStore() });
-  } catch (error) { return NextResponse.json({ success: false, error: error instanceof Error ? error.message : 'Unable to load training dataset operations.' }, { status: 503, headers: noStore() }); }
+  } catch (error) {
+    return NextResponse.json({ success: false, error: error instanceof Error ? error.message : 'Unable to load training dataset operations.' }, { status: 503, headers: noStore() });
+  }
 }
 
 export async function POST(req: NextRequest) {
@@ -90,7 +175,7 @@ export async function POST(req: NextRequest) {
     if (body?.buildAllSupportedHorizons === true) {
       const job = startAutoBuild(symbol, discovery);
       const result = { status: job.status, jobId: job.id, requestedCount: job.requestedCount, completedCount: job.completedCount, failedCount: job.failedCount };
-      return NextResponse.json({ success: true, accepted: true, dataSource: 'deriv-real-ticks', durationSource: discovery.source, result, job, message: `AUTO dataset build started for ${job.requestedCount} dynamically discovered training horizons.` }, { status: 202, headers: noStore() });
+      return NextResponse.json({ success: true, accepted: true, dataSource: 'deriv-real-ticks', durationSource: discovery.source, result, job, message: `AUTO dataset build started for ${job.requestedCount} dynamically derived training horizons.` }, { status: 202, headers: noStore() });
     }
     const legacyHorizon = body?.horizonTicks;
     const durationValue = legacyHorizon != null ? Number(legacyHorizon) : Number(body?.durationValue);
