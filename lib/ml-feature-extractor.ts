@@ -1,4 +1,11 @@
 import { getMlPipelineConfig, isSyntheticSymbol, type FeaturePipelineConfig } from './ml-pipeline-config';
+import {
+  buildFeatureRecord,
+  getFeatureOrder,
+  type EngineeredFeatureRecord,
+  type FeatureKey,
+  type FeatureContext,
+} from './ml-feature-registry';
 
 export interface TickPoint {
   price: number;
@@ -8,58 +15,11 @@ export interface TickPoint {
 export interface FeatureExtractionOptions {
   contractDurationSecs?: number;
   symbol?: string;
-  assetCategoryNum?: number; // 0.0 for Synthetics, 1.0 for Forex, 2.0 for Metals
+  assetCategoryNum?: number;
   pipelineConfig?: FeaturePipelineConfig;
 }
 
-export interface EngineeredTickFeatures {
-  // --- Pillar 1: Price Behaviour (1-10) ---
-  deltaP1: number;
-  deltaP2: number;
-  deltaP3: number;
-  micro_momentum: number;
-  short_momentum: number;
-  medium_momentum: number;
-  macro_momentum: number;
-  short_range: number;
-  medium_displacement: number;
-  macro_displacement: number;
-
-  // --- Pillar 2: Tick Pressure & Sequencing (11-19) ---
-  up_tick_ratio: number;
-  down_tick_ratio: number;
-  directional_imbalance: number;
-  consecutive_up: number;
-  consecutive_down: number;
-  micro_persistence: number;
-  short_persistence: number;
-  short_reversal_rate: number;
-  medium_reversal_rate: number;
-
-  // --- Pillar 3: Tick Velocity & Acceleration (20-25) ---
-  micro_velocity: number;
-  short_velocity: number;
-  medium_velocity: number;
-  acceleration: number;
-  ticks_per_second: number;
-  velocity_per_second: number;
-
-  // --- Pillar 4: Short / Medium / Macro Volatility (26-31) ---
-  short_volatility: number;
-  medium_volatility: number;
-  macro_volatility: number;
-  short_rangeCompression: number;
-  medium_distHigh: number;
-  medium_distLow: number;
-
-  // --- Contextual & Regime Metadata (32-37) ---
-  macro_regime: number;
-  is1SecondSynthetic: number;
-  contractDurationSecs: number;
-  durationFactor: number;
-  digitFrequency: number;
-  assetCategory: number;
-}
+export type EngineeredTickFeatures = EngineeredFeatureRecord;
 
 function ensureTicks(rawTicks: TickPoint[]): TickPoint[] {
   if (!Array.isArray(rawTicks) || rawTicks.length === 0) {
@@ -231,7 +191,7 @@ export function extractTickFeatures(rawTicks: TickPoint[], options: FeatureExtra
   });
   const digitFrequency = totalCount > 0 ? evenDigits / totalCount : 0.5;
 
-  return {
+  const context: FeatureContext = {
     deltaP1,
     deltaP2,
     deltaP3,
@@ -270,10 +230,18 @@ export function extractTickFeatures(rawTicks: TickPoint[], options: FeatureExtra
     digitFrequency,
     assetCategory: assetCategoryNum,
   };
+
+  return buildFeatureRecord(context);
 }
 
 export const extract37TickFeatures = extractTickFeatures;
 
-export function featureObjToArray(features: EngineeredTickFeatures, featureOrder: string[] = getMlPipelineConfig().featureOrder): number[] {
-  return featureOrder.map((key) => Number((features as Record<string, number>)[key] ?? 0));
+export function featureObjToArray(
+  features: EngineeredTickFeatures,
+  featureOrder: readonly FeatureKey[] = getFeatureOrder(),
+): number[] {
+  return featureOrder.map((key) => {
+    const value = features[key];
+    return Number.isFinite(value) ? value : 0;
+  });
 }
