@@ -68,13 +68,18 @@ function normalizeTicks(symbol: string, ticks: TickPoint[]): HistoricalTick[] {
 }
 
 async function getAssetId(sql: ReturnType<typeof neon>, symbol: string): Promise<number> {
-  const rows = await sql`
+  const rows = (await sql`
     INSERT INTO market_assets (symbol, display_name, asset_class, market_type, source, is_active)
     VALUES (${symbol}, ${symbol}, 'unknown', 'unknown', 'deriv', TRUE)
     ON CONFLICT (symbol) DO UPDATE SET updated_at = NOW()
     RETURNING id
-  `;
-  return Number(rows[0]?.id);
+  `) as unknown as Array<{ id?: number | string | null }>;
+
+  const id = Number(rows[0]?.id);
+  if (!Number.isSafeInteger(id) || id <= 0) {
+    throw new Error(`Unable to resolve market asset id for ${symbol}.`);
+  }
+  return id;
 }
 
 async function createRunRecord(sql: ReturnType<typeof neon>, run: HistoricalIngestionRun): Promise<void> {
@@ -202,12 +207,12 @@ export async function ingestDerivHistoricalTicks(input: {
   try {
     let cursor: number | 'latest' = typeof input.endEpoch === 'number' && Number.isFinite(input.endEpoch) ? input.endEpoch : 'latest';
     if (input.resumeFromCheckpoint) {
-      const checkpointRows = await sql`
+      const checkpointRows = (await sql`
         SELECT last_tick_epoch
         FROM data_ingestion_checkpoints
         WHERE source = 'deriv' AND asset_symbol = ${normalizedSymbol}
         LIMIT 1
-      `;
+      `) as unknown as Array<{ last_tick_epoch?: number | string | null }>;
       const checkpointEpoch = Number(checkpointRows[0]?.last_tick_epoch);
       if (Number.isFinite(checkpointEpoch) && checkpointEpoch > 0) {
         cursor = Math.max(1, Math.floor(checkpointEpoch) - 1);
