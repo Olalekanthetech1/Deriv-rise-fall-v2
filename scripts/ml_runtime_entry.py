@@ -11,7 +11,10 @@ import sys
 import ml_native_runtime as runtime
 import ml_duration_training as duration_training
 from ml_ensemble_runtime import predict_ensemble
+from ml_duration_runtime_adapter import install as install_duration_runtime_adapter
 
+
+install_duration_runtime_adapter()
 
 ACTIONS = ("predict", "predict_ensemble", "train", "train_partitioned", "list_models", "ping", "backtest")
 
