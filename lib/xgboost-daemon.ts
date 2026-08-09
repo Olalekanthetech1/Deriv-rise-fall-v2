@@ -44,9 +44,9 @@ class XGBoostDaemonManager {
 
     try {
       const pythonScript = this.getRuntimeScript();
-      // Intentionally inherit the Node process working directory instead of computing
-      // one dynamically. This keeps the ML bridge filesystem-independent at bundle time.
-      this.child = spawn(process.env.PYTHON_BIN || 'python3', [pythonScript], {
+      // This is intentional runtime process spawning. Turbopack must not statically trace
+      // the Python subprocess boundary or include the whole project in the server bundle.
+      this.child = spawn(/*turbopackIgnore: true*/ process.env.PYTHON_BIN || 'python3', [pythonScript], {
         stdio: ['pipe', 'pipe', 'inherit'],
         env: { ...process.env, PYTHONUNBUFFERED: '1' },
       });
