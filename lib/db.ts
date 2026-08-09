@@ -1,3 +1,4 @@
+import { randomUUID } from 'crypto';
 import { neon } from '@neondatabase/serverless';
 
 /**
@@ -318,7 +319,7 @@ export async function initDbSchema(): Promise<boolean> {
   }
 }
 
-async function getAssetId(sql: ReturnType<typeof neon>, symbol: string): Promise<number> {
+async function getAssetId(sql: any, symbol: string): Promise<number> {
   const rows = await sql`
     INSERT INTO market_assets (symbol, asset_class, market_type, source)
     VALUES (${symbol}, 'unknown', 'unknown', 'deriv')
@@ -340,7 +341,7 @@ export async function saveTicksBatch(symbol: string, ticks: Array<{ price: numbe
     const assetIds = ticks.map(() => assetId);
     const prices = ticks.map((tick) => tick.price);
     const epochs = ticks.map((tick) => tick.epoch ?? Math.floor((tick.timestamp ?? Date.now()) / 1000));
-    const times = ticks.map((tick) => new Date((tick.timestamp ?? Date.now())).toISOString());
+    const times = ticks.map((tick) => new Date(tick.timestamp ?? Date.now()).toISOString());
     const sourceIds = ticks.map((tick) => tick.sourceTickId ?? null);
 
     await sql`
@@ -392,15 +393,9 @@ export async function getRegisteredModels(symbol?: string, status?: string) {
 
   try {
     const sql = neon(dbUrl);
-    if (symbol && status) {
-      return await sql`SELECT * FROM ml_model_registry_v2 WHERE asset_symbol = ${symbol} AND status = ${status} ORDER BY updated_at DESC`;
-    }
-    if (symbol) {
-      return await sql`SELECT * FROM ml_model_registry_v2 WHERE asset_symbol = ${symbol} ORDER BY updated_at DESC`;
-    }
-    if (status) {
-      return await sql`SELECT * FROM ml_model_registry_v2 WHERE status = ${status} ORDER BY updated_at DESC`;
-    }
+    if (symbol && status) return await sql`SELECT * FROM ml_model_registry_v2 WHERE asset_symbol = ${symbol} AND status = ${status} ORDER BY updated_at DESC`;
+    if (symbol) return await sql`SELECT * FROM ml_model_registry_v2 WHERE asset_symbol = ${symbol} ORDER BY updated_at DESC`;
+    if (status) return await sql`SELECT * FROM ml_model_registry_v2 WHERE status = ${status} ORDER BY updated_at DESC`;
     return await sql`SELECT * FROM ml_model_registry_v2 ORDER BY updated_at DESC`;
   } catch (error) {
     console.error('[getRegisteredModels Error]:', error);
@@ -434,6 +429,7 @@ export async function registerModelInDb(data: {
 
   try {
     const sql = neon(dbUrl);
+    const metrics = data.metrics && typeof data.metrics === 'object' ? data.metrics : {};
     await sql`
       INSERT INTO ml_model_registry_v2 (
         model_id, model_family, version, asset_symbol, asset_class, horizon_ticks,
@@ -444,7 +440,7 @@ export async function registerModelInDb(data: {
         ${data.assetClass || 'unknown'}, ${data.horizonSecs || 5}, ${data.datasetId || null},
         ${data.format || 'onnx'}, ${data.status || 'candidate'}, ${data.featureSchemaVersion || 'v1'},
         ${data.framework || null}, ${data.trainingRunId || null},
-        ${JSON.stringify({ accuracy: data.accuracy, backtestWinRate: data.backtestWinRate, backtestProfitFactor: data.backtestProfitFactor, ...(data.metrics as Record<string, unknown> || {}) })}::jsonb,
+        ${JSON.stringify({ accuracy: data.accuracy, backtestWinRate: data.backtestWinRate, backtestProfitFactor: data.backtestProfitFactor, ...metrics })}::jsonb,
         ${JSON.stringify(data.hyperparameters || {})}::jsonb, NOW()
       )
       ON CONFLICT (model_id) DO UPDATE SET
@@ -476,15 +472,16 @@ export async function promoteModelInRegistry(modelId: string, symbol: string, ho
 
   try {
     const sql = neon(dbUrl);
-    const result = await sql`
+    const rows = await sql`
       UPDATE ml_model_registry_v2
       SET status = CASE WHEN model_id = ${modelId} THEN 'production' ELSE 'staging' END,
           updated_at = NOW()
       WHERE asset_symbol = ${symbol}
         AND horizon_ticks = ${horizonSecs}
         AND (model_id = ${modelId} OR status = 'production')
+      RETURNING model_id
     `;
-    return Number(result.count ?? 0) > 0;
+    return rows.some((row: any) => row.model_id === modelId);
   } catch (error) {
     console.error('[promoteModelInRegistry Error]:', error);
     return false;
@@ -509,7 +506,7 @@ export async function saveBacktestResults(data: {
         id, model_id, asset_symbol, horizon_ticks, total_samples, winning_samples,
         profit_factor, completed_at, status
       ) VALUES (
-        gen_random_uuid(), ${data.modelId || null}, ${data.symbol}, ${data.durationSec},
+        ${randomUUID()}, ${data.modelId || null}, ${data.symbol}, ${data.durationSec},
         ${data.totalTrades}, ${data.winningTrades}, ${data.profitFactor}, NOW(), 'completed'
       )
     `;
