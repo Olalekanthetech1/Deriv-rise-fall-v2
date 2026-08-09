@@ -10,6 +10,7 @@ type LiveSymbol = {
   market: string;
   submarket: string;
   isOpen: boolean;
+  isAvailable: boolean;
 };
 
 type IngestionRun = {
@@ -47,20 +48,23 @@ export default function MarketDataIngestionPage() {
   const [message, setMessage] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
 
-  const openSymbols = useMemo(() => symbols.filter((symbol) => symbol.isOpen), [symbols]);
+  const availableSymbols = useMemo(() => symbols.filter((symbol) => symbol.isAvailable), [symbols]);
 
   async function loadSymbols() {
-    try {
-      const response = await fetch('/api/symbols', { cache: 'no-store' });
-      const data = await response.json();
-      if (response.ok && Array.isArray(data?.symbols)) {
-        setSymbols(data.symbols.filter((item: LiveSymbol) => item?.symbol));
-        const firstOpen = data.symbols.find((item: LiveSymbol) => item?.isOpen && item?.symbol);
-        if (firstOpen && !selectedSymbol) setSelectedSymbol(firstOpen.symbol);
-      }
-    } catch {
-      // Leave the selector empty; the ingestion API still accepts a manual symbol.
+    const response = await fetch('/api/symbols', { cache: 'no-store' });
+    const data = await response.json();
+
+    if (!response.ok) {
+      throw new Error(data?.error || `Unable to load live Deriv symbols (${response.status}).`);
     }
+
+    if (!Array.isArray(data?.symbols)) {
+      throw new Error('Deriv symbol endpoint returned an invalid symbol list.');
+    }
+
+    setSymbols(data.symbols.filter((item: LiveSymbol) => item?.symbol && item?.isAvailable));
+    const firstAvailable = data.symbols.find((item: LiveSymbol) => item?.isAvailable && item?.symbol);
+    if (firstAvailable && !selectedSymbol) setSelectedSymbol(firstAvailable.symbol);
   }
 
   async function loadState(symbol?: string) {
@@ -134,8 +138,8 @@ export default function MarketDataIngestionPage() {
             <label className="block">
               <span className="mb-2 block text-xs font-semibold uppercase tracking-wider text-slate-500">Deriv symbol</span>
               <select value={selectedSymbol} onChange={(e) => setSelectedSymbol(e.target.value)} className="w-full rounded-xl border border-white/10 bg-black/30 px-4 py-3 text-sm outline-none focus:border-cyan-400/50">
-                {openSymbols.length > 0 ? null : <option value="">No open symbols loaded</option>}
-                {openSymbols.map((symbol) => <option key={symbol.symbol} value={symbol.symbol}>{symbol.symbol} — {symbol.displayName}</option>)}
+                {availableSymbols.length === 0 ? <option value="">No available symbols loaded</option> : null}
+                {availableSymbols.map((symbol) => <option key={symbol.symbol} value={symbol.symbol}>{symbol.symbol} — {symbol.displayName}</option>)}
               </select>
             </label>
             <label className="block">
@@ -172,7 +176,7 @@ export default function MarketDataIngestionPage() {
       <section className="mt-6 rounded-2xl border border-white/10 bg-white/[0.03] p-5">
         <div className="mb-4 flex items-center gap-2 text-sm font-semibold text-emerald-300"><ShieldCheck className="h-4 w-4" />Recent ingestion runs</div>
         {loading ? <div className="text-sm text-slate-500">Loading ingestion state…</div> : recentRuns.length === 0 ? <div className="text-sm text-slate-500">No historical ingestion runs recorded yet.</div> : <div className="grid gap-3 lg:grid-cols-2 xl:grid-cols-3">{recentRuns.map((run) => <article key={run.runId} className="rounded-xl border border-white/10 bg-black/20 p-4 text-sm">
-          <div className="flex items-start justify-between gap-3"><div><div className="font-bold text-slate-100">{run.symbol}</div><div className="mt-1 text-xs text-slate-500">{run.startedAt}</div></div><span className={`rounded-full border px-2.5 py-1 text-[10px] font-semibold tracking-wider ${run.status === 'completed' ? 'border-emerald-400/20 bg-emerald-400/10 text-emerald-300' : run.status === 'partial' ? 'border-amber-400/20 bg-amber-400/10 text-amber-200' : run.status === 'failed' ? 'border-red-400/20 bg-red-400/10 text-red-200' : 'border-cyan-400/20 bg-cyan-400/10 text-cyan-200'}`}>{run.status.toUpperCase()}</span></div>
+          <div className="flex items-start justify-between gap-3"><div><div className="font-bold text-slate-100">{run.symbol}</div><div className="mt-1 text-xs text-slate-500">{run.startedAt}</div></div><span className={`rounded-full border px-2.5 py-1 text-[10px] font-semibold tracking-wider ${run.status === 'completed' ? 'border-emerald-400/20 bg-emerald-400/10 text-emerald-300' : run.status === 'partial' ? 'border-amber-400/20 bg-amber-400/10 text-amber-200' : run.status === 'failed' ? 'border-red-400/20 bg-red-400/5 text-red-200' : 'border-cyan-400/20 bg-cyan-400/10 text-cyan-200'}`}>{run.status.toUpperCase()}</span></div>
           <div className="mt-3 grid grid-cols-2 gap-3 text-xs text-slate-400"><div><span className="block text-slate-500">Requested</span>{run.requestedCount.toLocaleString()}</div><div><span className="block text-slate-500">Inserted</span>{run.recordsInserted.toLocaleString()}</div><div><span className="block text-slate-500">Received</span>{run.recordsReceived.toLocaleString()}</div><div><span className="block text-slate-500">Rejected</span>{run.recordsRejected.toLocaleString()}</div></div>
           <div className="mt-3 text-xs text-slate-500">{run.firstTickTime ? `From ${run.firstTickTime}` : 'No start time'}{run.lastTickTime ? ` • to ${run.lastTickTime}` : ''}</div>
           {run.errorMessage ? <div className="mt-3 rounded-lg border border-red-400/20 bg-red-400/5 p-3 text-xs text-red-200">{run.errorMessage}</div> : null}
