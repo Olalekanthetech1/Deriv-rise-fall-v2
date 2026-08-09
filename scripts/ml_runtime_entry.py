@@ -10,6 +10,7 @@ import sys
 
 import ml_native_runtime as runtime
 import ml_duration_training as duration_training
+from ml_ensemble_runtime import predict_ensemble
 
 
 ACTIONS = ("predict", "predict_ensemble", "train", "train_partitioned", "list_models", "ping", "backtest")
@@ -29,16 +30,7 @@ def dispatch(request: dict) -> dict:
         return duration_training.train_partitioned(request.get("modelType", "xgboost"), request)
 
     if action == "predict_ensemble":
-        requested = request.get("modelTypes")
-        model_types = requested if isinstance(requested, list) and requested else runtime.model_types()
-        return {
-            "success": True,
-            "id": request.get("id"),
-            "models": {
-                model_type: runtime.predict_one({**request, "modelType": model_type})
-                for model_type in model_types
-            },
-        }
+        return predict_ensemble(request)
 
     if action == "backtest":
         return runtime.backtest(request)
