@@ -17,15 +17,10 @@ export type AssetAwareModelStrategy = {
   version: string;
   assetClass: string;
   marketType: string;
-  horizon: {
-    value: number;
-    unit: AssetAwareStrategyContext['durationUnit'];
-    seconds: number | null;
-    effectiveTicks: number;
-  };
+  horizon: { value: number; unit: AssetAwareStrategyContext['durationUnit']; seconds: number | null; effectiveTicks: number };
   sequenceLength: number;
   minimumSamples: Partial<Record<MlModelKey, number>>;
-  hyperparameters: Record<MlModelKey, Readonly<Record<string, number>>>;
+  hyperparameters: Partial<Record<MlModelKey, Readonly<Record<string, number>>>>;
   rationale: string[];
 };
 
@@ -46,17 +41,10 @@ function assetFactor(assetClass: string, marketType: string): number {
   return 1.0;
 }
 
-export function resolveAssetAwareModelStrategy(
-  context: AssetAwareStrategyContext,
-  definitions: readonly MlModelDefinition[],
-): AssetAwareModelStrategy {
+export function resolveAssetAwareModelStrategy(context: AssetAwareStrategyContext, definitions: readonly MlModelDefinition[]): AssetAwareModelStrategy {
   const assetClass = normalize(context.assetClass);
   const marketType = normalize(context.marketType);
   const factor = assetFactor(assetClass, marketType);
-
-  // The contract horizon is part of the strategy, but sequence context remains
-  // data-driven rather than being a fixed UI setting. Longer effective horizons
-  // receive more historical context, bounded for predictable training cost.
   const horizonBase = Math.sqrt(Math.max(2, context.effectiveHorizonTicks)) * 4 * factor;
   const sequenceLength = clamp(horizonBase, 32, 128);
   const sampleCount = Math.max(0, context.sampleCount);
@@ -65,7 +53,7 @@ export function resolveAssetAwareModelStrategy(
   const neuralBatchSize = sequenceLength >= 96 ? 32 : 64;
   const hmmComponents = clamp(2 + Math.log10(Math.max(100, sampleCount)), 3, 6);
 
-  const hyperparameters: Record<MlModelKey, Readonly<Record<string, number>>> = {};
+  const hyperparameters: Partial<Record<MlModelKey, Readonly<Record<string, number>>>> = {};
   for (const definition of definitions) {
     const base = { ...definition.defaultHyperparameters } as Record<string, number>;
     if (definition.family === 'tabular') {
@@ -88,9 +76,7 @@ export function resolveAssetAwareModelStrategy(
   const minimumBase = Math.max(512, sequenceLength * 16);
   const minimumSamples: Partial<Record<MlModelKey, number>> = {};
   for (const definition of definitions) {
-    minimumSamples[definition.key] = definition.family === 'sequential'
-      ? Math.max(1_024, minimumBase)
-      : Math.max(256, Math.round(minimumBase / 2));
+    minimumSamples[definition.key] = definition.family === 'sequential' ? Math.max(1_024, minimumBase) : Math.max(256, Math.round(minimumBase / 2));
   }
 
   return {
@@ -98,12 +84,7 @@ export function resolveAssetAwareModelStrategy(
     version: ASSET_MODEL_STRATEGY_VERSION,
     assetClass,
     marketType,
-    horizon: {
-      value: context.durationValue,
-      unit: context.durationUnit,
-      seconds: context.durationSeconds,
-      effectiveTicks: context.effectiveHorizonTicks,
-    },
+    horizon: { value: context.durationValue, unit: context.durationUnit, seconds: context.durationSeconds, effectiveTicks: context.effectiveHorizonTicks },
     sequenceLength,
     minimumSamples,
     hyperparameters,
