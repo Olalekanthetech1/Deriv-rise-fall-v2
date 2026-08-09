@@ -137,7 +137,7 @@ async function insertTickBatch(sql: Sql, symbol: string, assetId: number, runId:
       ${ticks.map((tick) => tick.price)}::numeric[],
       ${ticks.map((tick) => Math.floor(tick.epochMs / 1000))}::bigint[],
       ${ticks.map((tick) => new Date(tick.epochMs).toISOString())}::timestamptz[],
-      ARRAY_FILL('deriv'::text, ARRAY[${ticks.length}]),
+      ${ticks.map(() => 'deriv')}::text[],
       ${ticks.map((tick) => tick.sourceTickId)}::text[],
       ${ticks.map(() => runId)}::uuid[]
     )
