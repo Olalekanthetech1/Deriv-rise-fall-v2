@@ -1,3 +1,4 @@
+import crypto from 'crypto';
 import { NextRequest, NextResponse } from 'next/server';
 import { verifySessionToken } from '../auth/route';
 import { buildAllSupportedDurationDatasets, buildDurationTrainingDataset, getSupportedDurationDiscovery, listDurationTrainingDatasets } from '@/lib/training-dataset-builder-duration-v2';
@@ -18,33 +19,18 @@ function matchingRanges(discovery: Awaited<ReturnType<typeof getSupportedDuratio
   });
 }
 
-/**
- * Deriv's current contracts_for/proposal APIs expose a valid duration range,
- * but do not expose a discrete UI duration-choice list. A proposal can accept
- * every integer second/minute inside that range. The dataset builder therefore
- * needs a bounded, human-usable training horizon ladder instead of rendering
- * 60k+ individual seconds. The ladder is derived from each broker range; it is
- * not an assertion that omitted values are unsupported by Deriv.
- */
 function expandTrainingHorizonLadder(ranges: DerivDurationRange[]): Array<{ value: number; unit: DerivDurationUnit; rangeId: string }> {
   const result: Array<{ value: number; unit: DerivDurationUnit; rangeId: string }> = [];
-
   for (const range of ranges) {
     const brokerStep = Number.isSafeInteger(range.step) && range.step > 0 ? range.step : 1;
     let displayStep = brokerStep;
     let start = range.min;
-
-    // Seconds/minutes can have very large integer-valued broker ranges. Use a
-    // dynamically bounded 15-unit training cadence when the broker itself has
-    // a 1-unit granularity; the exact broker range remains authoritative and
-    // POST validation still accepts any broker-valid value.
     if ((range.unit === 's' || range.unit === 'm') && brokerStep === 1 && range.max - range.min >= 15) {
       displayStep = Math.max(15, range.min);
       start = Math.ceil(range.min / displayStep) * displayStep;
       if (start > range.max) start = range.min;
       if (start !== range.min) result.push({ value: range.min, unit: range.unit, rangeId: range.id });
     }
-
     const count = Math.floor((range.max - start) / displayStep) + 1;
     const boundedCount = Math.min(count, 10000);
     for (let index = 0; index < boundedCount; index += 1) {
@@ -52,12 +38,10 @@ function expandTrainingHorizonLadder(ranges: DerivDurationRange[]): Array<{ valu
       if (value > range.max) break;
       result.push({ value, unit: range.unit, rangeId: range.id });
     }
-
     if (!result.some((item) => item.rangeId === range.id && item.value === range.max)) {
       result.push({ value: range.max, unit: range.unit, rangeId: range.id });
     }
   }
-
   const seen = new Set<string>();
   return result.filter((item) => {
     const key = `${item.value}:${item.unit}`;
@@ -67,23 +51,75 @@ function expandTrainingHorizonLadder(ranges: DerivDurationRange[]): Array<{ valu
   });
 }
 
+type AutoJob = {
+  id: string;
+  symbol: string;
+  status: 'running' | 'completed' | 'failed';
+  requestedCount: number;
+  completedCount: number;
+  failedCount: number;
+  failures: Array<{ value: number; unit: DerivDurationUnit; error: string }>;
+  startedAt: string;
+  finishedAt?: string;
+};
+
+const autoJobs = new Map<string, AutoJob>();
+const activeAutoJobs = new Map<string, string>();
+
+function startAutoBuild(symbol: string, discovery: Awaited<ReturnType<typeof getSupportedDurationDiscovery>>): AutoJob {
+  const existingId = activeAutoJobs.get(symbol);
+  if (existingId) {
+    const existing = autoJobs.get(existingId);
+    if (existing?.status === 'running') return existing;
+    activeAutoJobs.delete(symbol);
+  }
+
+  const durations = expandTrainingHorizonLadder(discovery.ranges);
+  const job: AutoJob = {
+    id: crypto.randomUUID(), symbol, status: 'running', requestedCount: durations.length,
+    completedCount: 0, failedCount: 0, failures: [], startedAt: new Date().toISOString(),
+  };
+  autoJobs.set(job.id, job);
+  activeAutoJobs.set(symbol, job.id);
+
+  void (async () => {
+    try {
+      for (const duration of durations) {
+        try {
+          await buildDurationTrainingDataset({ symbol, durationValue: duration.value, durationUnit: duration.unit, durationRangeId: duration.rangeId });
+          job.completedCount += 1;
+        } catch (error) {
+          job.failedCount += 1;
+          job.failures.push({ value: duration.value, unit: duration.unit, error: error instanceof Error ? error.message : String(error) });
+        }
+      }
+      job.status = 'completed';
+    } catch (error) {
+      job.status = 'failed';
+      job.failures.push({ value: 0, unit: 't', error: error instanceof Error ? error.message : String(error) });
+    } finally {
+      job.finishedAt = new Date().toISOString();
+      activeAutoJobs.delete(symbol);
+    }
+  })();
+
+  return job;
+}
+
 export async function GET(req: NextRequest) {
   if (!isAuthenticated(req)) return NextResponse.json({ error: 'Unauthorized admin access.' }, { status: 401, headers: noStore() });
   try {
     const symbol = req.nextUrl.searchParams.get('symbol')?.trim().toUpperCase() || undefined;
+    const autoJobId = req.nextUrl.searchParams.get('autoJobId')?.trim();
+    if (autoJobId) {
+      const job = autoJobs.get(autoJobId);
+      if (!job) return NextResponse.json({ success: false, error: 'AUTO dataset build job was not found on this application instance.' }, { status: 404, headers: noStore() });
+      return NextResponse.json({ success: true, job }, { headers: noStore() });
+    }
     const datasets = await listDurationTrainingDatasets(symbol);
     if (!symbol) return NextResponse.json({ success: true, datasets, durationSource: 'deriv-dynamic' }, { headers: noStore() });
     const discovery = await getSupportedDurationDiscovery(symbol);
-    return NextResponse.json({
-      success: true,
-      datasets,
-      durationSource: discovery.source,
-      durationDiscovery: discovery,
-      trainingHorizons: expandTrainingHorizonLadder(discovery.ranges),
-      // Keep the exact broker ranges available to callers that need arbitrary
-      // valid durations, while the UI receives a bounded training ladder.
-      brokerTrainingHorizons: expandTrainingDurations(discovery.ranges),
-    }, { headers: noStore() });
+    return NextResponse.json({ success: true, datasets, durationSource: discovery.source, durationDiscovery: discovery, trainingHorizons: expandTrainingHorizonLadder(discovery.ranges), brokerTrainingHorizons: expandTrainingDurations(discovery.ranges) }, { headers: noStore() });
   } catch (error) {
     return NextResponse.json({ success: false, error: error instanceof Error ? error.message : 'Unable to load training dataset operations.' }, { status: 503, headers: noStore() });
   }
@@ -97,8 +133,8 @@ export async function POST(req: NextRequest) {
     if (!symbol) return NextResponse.json({ success: false, error: 'A Deriv symbol is required.' }, { status: 400, headers: noStore() });
     const discovery = await getSupportedDurationDiscovery(symbol);
     if (body?.buildAllSupportedHorizons === true) {
-      const result = await buildAllSupportedDurationDatasets(symbol);
-      return NextResponse.json({ success: true, dataSource: 'deriv-real-ticks', durationSource: discovery.source, result }, { status: 201, headers: noStore() });
+      const job = startAutoBuild(symbol, discovery);
+      return NextResponse.json({ success: true, accepted: true, dataSource: 'deriv-real-ticks', durationSource: discovery.source, job, message: job.status === 'running' ? `AUTO dataset build started for ${job.requestedCount} dynamically discovered training horizons.` : `An AUTO dataset build is already running for ${symbol}.` }, { status: 202, headers: noStore() });
     }
     const legacyHorizon = body?.horizonTicks;
     const durationValue = legacyHorizon != null ? Number(legacyHorizon) : Number(body?.durationValue);
