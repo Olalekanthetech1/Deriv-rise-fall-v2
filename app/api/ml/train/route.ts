@@ -3,6 +3,7 @@ import { TrainSchema } from '@/lib/validation-schemas';
 import { getDb, registerModelInDb } from '@/lib/db';
 import { ensureMinTicks } from '@/lib/ticks-helper';
 import { initializeMlPipelineConfig } from '@/lib/ml-pipeline-config';
+import { getMlRuntimeSchemaContract } from '@/lib/ml-runtime-schema';
 import { verifySessionToken } from '../../admin/auth/route';
 
 const CATEGORY_MAP: Record<string, string[]> = {
@@ -29,7 +30,8 @@ export async function POST(req: NextRequest) {
 
     const { symbol, category, retrainAll, modelType, durationSecs, maxDepth, learningRate, numEstimators, subsample, epochs, batchSize } = parsed.data;
     const pipeline = await initializeMlPipelineConfig();
-    const minimumTrainingTicks = pipeline.config.canonicalFeatureWindowTicks + Math.max(1, durationSecs);
+    const schema = await getMlRuntimeSchemaContract();
+    const minimumTrainingTicks = schema.canonicalFeatureWindowTicks + Math.max(1, durationSecs);
     const symbols = category && CATEGORY_MAP[category] ? CATEGORY_MAP[category] : (retrainAll || symbol === 'ALL') ? CATEGORY_MAP.ALL : [symbol];
     const models = modelType === 'all' || retrainAll ? MODEL_TYPES : [modelType];
     const daemon = (await import('@/lib/xgboost-daemon')).xgboostDaemon;
@@ -75,6 +77,12 @@ export async function POST(req: NextRequest) {
               backtestProfitFactor: undefined,
               filePath: `${sym}_${durationSecs}s_${model}.pkl`,
               hyperparameters: { maxDepth, learningRate, numEstimators, subsample, epochs, batchSize },
+              metrics: {
+                schemaFingerprint: result.schemaFingerprint || schema.schemaFingerprint,
+                featureSchemaVersion: result.schemaVersion || schema.featureSchemaVersion,
+                featureCount: result.featureCount || schema.featureCount,
+                sequenceLength: result.sequenceLength || schema.sequenceLength,
+              },
             });
           } catch (dbErr) {
             console.warn('[ML Registry Warning]:', dbErr);
@@ -91,7 +99,9 @@ export async function POST(req: NextRequest) {
       trainedCount: successes,
       totalJobs: results.length,
       requiredTrainingTicks: minimumTrainingTicks,
-      schemaVersion: pipeline.featureSchemaVersion,
+      schemaVersion: schema.featureSchemaVersion,
+      schemaFingerprint: schema.schemaFingerprint,
+      featureCount: schema.featureCount,
       results,
       trainedAt: new Date().toISOString(),
     });
