@@ -9,6 +9,7 @@ export interface ActiveSymbolItem {
   market: string;
   submarket: string;
   isOpen: boolean;
+  isAvailable: boolean;
 }
 
 type DerivActiveSymbol = {
@@ -40,7 +41,7 @@ async function fetchLiveSymbols(): Promise<ActiveSymbolItem[]> {
         handled = true;
         reject(new Error('Deriv symbol discovery timed out.'));
       }
-    }, 4000);
+    }, 7000);
 
     const ws = new WebSocket(wsUrl);
 
@@ -53,30 +54,31 @@ async function fetchLiveSymbols(): Promise<ActiveSymbolItem[]> {
     };
 
     ws.on('open', () => {
-      // Keep this request compatible with the current Deriv active_symbols API.
-      // Filtering is performed locally because product_type was removed from
-      // the current endpoint contract.
-      ws.send(JSON.stringify({ active_symbols: 'brief' }));
+      ws.send(JSON.stringify({ active_symbols: 'brief', req_id: 1 }));
     });
 
     ws.on('message', (data: WebSocket.Data) => {
       try {
         const response = JSON.parse(data.toString());
+
         if (response.error) {
           fail(new Error(String(response.error.message || 'Deriv symbol discovery failed.')));
           return;
         }
 
-        if (!Array.isArray(response.active_symbols) || response.active_symbols.length === 0) return;
+        if (response.msg_type !== 'active_symbols') return;
+
+        if (!Array.isArray(response.active_symbols)) {
+          fail(new Error('Deriv returned an invalid active_symbols response.'));
+          return;
+        }
 
         const formatted = (response.active_symbols as DerivActiveSymbol[])
           .map((item): ActiveSymbolItem | null => {
-            // Support both the current API field names and the legacy names so
-            // the application remains resilient during Deriv API transitions.
             const symbol = String(item.underlying_symbol || item.symbol || '').trim();
             if (!symbol) return null;
 
-            const exchangeOpen = asBoolean(item.exchange_is_open);
+            const exchangeIsOpen = asBoolean(item.exchange_is_open);
             const tradingSuspended = asBoolean(item.is_trading_suspended);
 
             return {
@@ -84,7 +86,12 @@ async function fetchLiveSymbols(): Promise<ActiveSymbolItem[]> {
               displayName: String(item.underlying_symbol_name || item.display_name || symbol),
               market: String(item.market || ''),
               submarket: String(item.submarket || item.submarket_display_name || ''),
-              isOpen: exchangeOpen && !tradingSuspended,
+              // Exchange hours are kept separately from availability. This is
+              // important for 24/7 Deriv markets and for weekends/closed exchanges.
+              isOpen: exchangeIsOpen && !tradingSuspended,
+              // active_symbols itself represents currently available trading
+              // underlyings; only an explicit suspension makes one unavailable.
+              isAvailable: !tradingSuspended,
             };
           })
           .filter((item): item is ActiveSymbolItem => item !== null);
@@ -111,7 +118,7 @@ async function fetchLiveSymbols(): Promise<ActiveSymbolItem[]> {
 }
 
 const derivCircuitBreaker = new CircuitBreaker(fetchLiveSymbols, {
-  timeout: 5000,
+  timeout: 8000,
   errorThresholdPercentage: 50,
   resetTimeout: 10000,
 });
@@ -126,6 +133,9 @@ export async function GET() {
     return NextResponse.json({
       success: true,
       dataSource: 'deriv-live',
+      symbolCount: symbols.length,
+      availableCount: symbols.filter((symbol) => symbol.isAvailable).length,
+      openCount: symbols.filter((symbol) => symbol.isOpen).length,
       symbols,
     }, { headers: { 'Cache-Control': 'no-store' } });
   } catch (err: any) {
