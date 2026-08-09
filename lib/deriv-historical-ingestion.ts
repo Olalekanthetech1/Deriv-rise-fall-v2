@@ -155,13 +155,70 @@ async function findResumableRun(sql: Sql, symbol: string, requestedCount: number
       AND asset_symbol = ${symbol}
       AND status = 'partial'
       AND COALESCE((metadata->>'requestedCount')::int, 0) = ${requestedCount}
-      AND COALESCE(metadata->>'backfillSessionId', '') <> ''
+      AND COALESCE(metadata->>'supersededBy', '') = ''
     ORDER BY started_at DESC
     LIMIT 1
   `) as any[];
 
   if (!rows.length) return null;
   const row = rows[0];
+  let metadata = row.metadata && typeof row.metadata === 'object' ? row.metadata as Record<string, unknown> : {};
+  let recordsReceived = Number(row.recordsReceived || 0);
+  let recordsInserted = Number(row.recordsInserted || 0);
+  let recordsRejected = Number(row.recordsRejected || 0);
+  let firstTickTime = row.firstTickTime ? new Date(row.firstTickTime).toISOString() : null;
+  let lastTickTime = row.lastTickTime ? new Date(row.lastTickTime).toISOString() : null;
+  let batches = readBatches(metadata);
+
+  // Migrate the older two-row partial format into one logical resumable session.
+  // Only legacy rows without a session id are absorbed; explicit sessions remain independent.
+  if (typeof metadata.backfillSessionId !== 'string' || !metadata.backfillSessionId) {
+    const legacyRows = (await sql`
+      SELECT
+        id,
+        started_at,
+        completed_at,
+        records_received,
+        records_inserted,
+        records_rejected,
+        first_tick_time,
+        last_tick_time,
+        COALESCE(metadata, '{}'::jsonb) AS metadata
+      FROM data_ingestion_runs
+      WHERE source = 'deriv'
+        AND asset_symbol = ${symbol}
+        AND status = 'partial'
+        AND COALESCE((metadata->>'requestedCount')::int, 0) = ${requestedCount}
+        AND COALESCE(metadata->>'backfillSessionId', '') = ''
+        AND COALESCE(metadata->>'supersededBy', '') = ''
+      ORDER BY started_at ASC
+    `) as any[];
+
+    const sessionId = crypto.randomUUID();
+    for (const legacy of legacyRows) {
+      if (String(legacy.id) !== String(row.runId)) {
+        recordsReceived += Number(legacy.records_received || 0);
+        recordsInserted += Number(legacy.records_inserted || 0);
+        recordsRejected += Number(legacy.records_rejected || 0);
+        if (legacy.first_tick_time && (!firstTickTime || new Date(legacy.first_tick_time).getTime() < new Date(firstTickTime).getTime())) firstTickTime = new Date(legacy.first_tick_time).toISOString();
+        if (legacy.last_tick_time && (!lastTickTime || new Date(legacy.last_tick_time).getTime() > new Date(lastTickTime).getTime())) lastTickTime = new Date(legacy.last_tick_time).toISOString();
+        batches = [...batches, ...readBatches(legacy.metadata && typeof legacy.metadata === 'object' ? legacy.metadata : {})];
+        await sql`
+          UPDATE data_ingestion_runs
+          SET metadata = jsonb_set(COALESCE(metadata, '{}'::jsonb), '{supersededBy}', to_jsonb(${String(row.runId)}::text))
+          WHERE id = ${legacy.id}
+        `;
+      }
+    }
+
+    metadata = {
+      ...metadata,
+      backfillSessionId: sessionId,
+      migratedLegacyRuns: legacyRows.length,
+      batches,
+    };
+  }
+
   return {
     runId: String(row.runId),
     symbol: String(row.symbol),
@@ -171,13 +228,13 @@ async function findResumableRun(sql: Sql, symbol: string, requestedCount: number
     startedAt: new Date(row.startedAt).toISOString(),
     completedAt: row.completedAt ? new Date(row.completedAt).toISOString() : null,
     status: row.status,
-    recordsReceived: Number(row.recordsReceived || 0),
-    recordsInserted: Number(row.recordsInserted || 0),
-    recordsRejected: Number(row.recordsRejected || 0),
-    firstTickTime: row.firstTickTime ? new Date(row.firstTickTime).toISOString() : null,
-    lastTickTime: row.lastTickTime ? new Date(row.lastTickTime).toISOString() : null,
+    recordsReceived,
+    recordsInserted,
+    recordsRejected,
+    firstTickTime,
+    lastTickTime,
     errorMessage: row.errorMessage ? String(row.errorMessage) : null,
-    metadata: row.metadata && typeof row.metadata === 'object' ? row.metadata : {},
+    metadata,
   };
 }
 
@@ -306,10 +363,9 @@ export async function ingestDerivHistoricalTicks(input: {
     let latestEpoch = run.lastTickTime ? new Date(run.lastTickTime).getTime() : 0;
     const assetId = await getAssetId(sql, normalizedSymbol);
     const batchId = crypto.randomUUID();
-    const batchStartedAt = startedAt;
     const batch: IngestionBatch = {
       batchId,
-      startedAt: batchStartedAt,
+      startedAt,
       completedAt: null,
       requestedCount: remaining,
       recordsReceived: 0,
@@ -442,6 +498,7 @@ export async function listHistoricalIngestionRuns(limit = 10): Promise<Historica
       COALESCE(metadata, '{}'::jsonb) AS metadata
     FROM data_ingestion_runs
     WHERE source = 'deriv'
+      AND COALESCE(metadata->>'supersededBy', '') = ''
     ORDER BY started_at DESC
     LIMIT ${Math.max(1, Math.min(50, limit))}
   `;
