@@ -1,3 +1,4 @@
+import crypto from 'crypto';
 import { NextRequest, NextResponse } from 'next/server';
 import { neon } from '@neondatabase/serverless';
 import { verifySessionToken } from '../auth/route';
@@ -15,18 +16,18 @@ function auth(req: NextRequest) {
 function noStore() { return { 'Cache-Control': 'no-store, max-age=0' }; }
 function token(value: unknown): string { return typeof value === 'string' && /^[A-Za-z0-9_-]+$/.test(value) ? value : ''; }
 
-function sequencePartitions(rows: any[], sequenceLength: number) {
+function sequencePartitions(rows: any[], sequenceLength: number, schema: { featureCount: number; featureSchemaVersion: string; schemaFingerprint: string }) {
   const result: Record<string, { featureSequences: number[][][]; labels: number[]; featureCount: number; sequenceLength: number; schemaVersion: string; schemaFingerprint: string }> = {};
   for (const split of ['train', 'validation', 'test']) {
     const ordered = rows.filter((row) => row.split === split).sort((a, b) => Number(a.sample_index) - Number(b.sample_index));
     const featureSequences: number[][][] = []; const labels: number[] = [];
     for (let i = sequenceLength - 1; i < ordered.length; i += 1) {
       const window = ordered.slice(i - sequenceLength + 1, i + 1);
-      const vectors = window.map((row) => JSON.parse(JSON.stringify(row.feature_vector)) as number[]);
-      if (vectors.some((vector) => !Array.isArray(vector))) continue;
-      featureSequences.push(vectors); labels.push(String(ordered[i].label).toUpperCase() === 'RISE' ? 1 : 0);
+      const vectors = window.map((row) => Array.isArray(row.feature_vector) ? row.feature_vector.map(Number) : null);
+      if (vectors.some((vector) => !vector || vector.length !== schema.featureCount || vector.some((value) => !Number.isFinite(value)))) continue;
+      featureSequences.push(vectors as number[][]); labels.push(String(ordered[i].label).toUpperCase() === 'RISE' ? 1 : 0);
     }
-    result[split] = { featureSequences, labels, featureCount: Number(rows[0]?.feature_vector?.length || 0), sequenceLength, schemaVersion: String(rows[0]?.feature_schema_version || ''), schemaFingerprint: String(rows[0]?.schema_fingerprint || '') };
+    result[split] = { featureSequences, labels, featureCount: schema.featureCount, sequenceLength, schemaVersion: schema.featureSchemaVersion, schemaFingerprint: schema.schemaFingerprint };
   }
   return result;
 }
@@ -57,6 +58,10 @@ export async function POST(req: NextRequest) {
     if (!dataset) return NextResponse.json({ error: 'Training dataset not found.' }, { status: 404, headers: noStore() });
     if (dataset.status !== 'completed' || dataset.leakage_check_passed !== true) return NextResponse.json({ error: 'Only completed datasets with a passed leakage check can be trained.' }, { status: 422, headers: noStore() });
 
+    const durationValue = Number(dataset.duration_value); const durationUnit = dataset.duration_unit as 't'|'s'|'m'|'h'|'d';
+    const durationSeconds = dataset.duration_seconds == null ? null : Number(dataset.duration_seconds); const effectiveHorizonTicks = Number(dataset.horizon_ticks);
+    if (!Number.isSafeInteger(durationValue) || durationValue <= 0 || !['t','s','m','h','d'].includes(durationUnit) || !Number.isSafeInteger(effectiveHorizonTicks) || effectiveHorizonTicks <= 0) return NextResponse.json({ error: 'Dataset duration metadata is invalid.' }, { status: 422, headers: noStore() });
+
     const samples = await sql`SELECT sample_index,split,label,feature_vector FROM training_dataset_samples WHERE dataset_id = ${datasetId} ORDER BY sample_index ASC`;
     if (!samples.length) return NextResponse.json({ error: 'Dataset contains no persisted samples.' }, { status: 422, headers: noStore() });
     const schema = await import('@/lib/ml-runtime-schema').then((m) => m.getMlRuntimeSchemaContract());
@@ -64,25 +69,26 @@ export async function POST(req: NextRequest) {
     const partitions: Record<string, any> = {};
     for (const split of ['train','validation','test']) {
       const splitRows = samples.filter((row: any) => row.split === split);
-      partitions[split] = { featureVectors: splitRows.map((row: any) => row.feature_vector), labels: splitRows.map((row: any) => String(row.label).toUpperCase() === 'RISE' ? 1 : 0), sampleCount: splitRows.length, featureCount, schemaVersion: schema.featureSchemaVersion, schemaFingerprint: schema.schemaFingerprint };
+      const vectors = splitRows.map((row: any) => Array.isArray(row.feature_vector) ? row.feature_vector.map(Number) : null);
+      if (vectors.some((vector: number[] | null) => !vector || vector.length !== featureCount || vector.some((value) => !Number.isFinite(value)))) return NextResponse.json({ error: `Invalid persisted feature vector in ${split} partition.` }, { status: 422, headers: noStore() });
+      partitions[split] = { featureVectors: vectors, labels: splitRows.map((row: any) => String(row.label).toUpperCase() === 'RISE' ? 1 : 0), sampleCount: splitRows.length, featureCount, schemaVersion: schema.featureSchemaVersion, schemaFingerprint: schema.schemaFingerprint };
     }
     if (partitions.train.sampleCount < 2 || new Set(partitions.train.labels).size < 2 || partitions.validation.sampleCount < 2 || new Set(partitions.validation.labels).size < 2) return NextResponse.json({ error: 'Insufficient two-class train/validation samples.' }, { status: 422, headers: noStore() });
 
-    const sequence = sequencePartitions(samples, sequenceLength);
+    const sequence = sequencePartitions(samples, sequenceLength, schema);
     if (sequence.train.featureSequences.length < 2 || new Set(sequence.train.labels).size < 2 || sequence.validation.featureSequences.length < 2 || new Set(sequence.validation.labels).size < 2) return NextResponse.json({ error: 'Insufficient two-class sequence samples for deep models.' }, { status: 422, headers: noStore() });
 
     const requested = Array.isArray(body?.modelTypes) ? body.modelTypes.filter((v: unknown) => typeof v === 'string') : [];
     const definitions = getMlModelDefinitions().filter((definition) => requested.length === 0 || requested.includes(definition.key));
-    const runId = crypto.randomUUID();
-    const durationValue = Number(dataset.duration_value); const durationUnit = dataset.duration_unit as 't'|'s'|'m'|'h'|'d'; const durationSeconds = dataset.duration_seconds == null ? null : Number(dataset.duration_seconds); const effectiveHorizonTicks = Number(dataset.horizon_ticks);
-    const hyperparams = Object.fromEntries(definitions.map((definition) => [definition.key, definition.defaultHyperparameters]));
+    if (!definitions.length) return NextResponse.json({ error: 'No registered model types were requested.' }, { status: 400, headers: noStore() });
+    const runId = crypto.randomUUID(); const assetRows = await sql`SELECT asset_class FROM market_assets WHERE symbol = ${String(dataset.asset_symbol)} LIMIT 1`; const assetClass = String(assetRows[0]?.asset_class || 'unknown');
     const results: any[] = [];
 
     for (const definition of definitions) {
       const sequenceModel = definition.family === 'sequential';
       const result = await xgboostDaemon.sendCommand('train_partitioned', {
-        symbol: String(dataset.asset_symbol), modelType: definition.key, durationValue, durationUnit, durationSeconds,
-        effectiveHorizonTicks, trainTabularDataset: sequenceModel ? undefined : partitions.train, validationTabularDataset: sequenceModel ? undefined : partitions.validation,
+        symbol: String(dataset.asset_symbol), modelType: definition.key, durationValue, durationUnit, durationSeconds, effectiveHorizonTicks,
+        trainTabularDataset: sequenceModel ? undefined : partitions.train, validationTabularDataset: sequenceModel ? undefined : partitions.validation,
         trainSequenceDataset: sequenceModel ? sequence.train : undefined, validationSequenceDataset: sequenceModel ? sequence.validation : undefined,
         datasetId, hyperparams: definition.defaultHyperparameters,
       });
@@ -90,9 +96,8 @@ export async function POST(req: NextRequest) {
       const modelId = String(result.modelId);
       await registerDurationModel({
         modelId, modelFamily: definition.family, version: `${String(schema.featureSchemaVersion)}-${Date.now()}`,
-        symbol: String(dataset.asset_symbol), assetClass: String(dataset.metadata?.assetClass || 'unknown'), durationValue, durationUnit,
-        durationSeconds, effectiveHorizonTicks, datasetId, format: sequenceModel ? 'PT_STATE' : 'PKL', status: 'candidate',
-        featureSchemaVersion: String(schema.featureSchemaVersion), framework: sequenceModel ? 'pytorch' : definition.key,
+        symbol: String(dataset.asset_symbol), assetClass, durationValue, durationUnit, durationSeconds, effectiveHorizonTicks, datasetId,
+        format: sequenceModel ? 'PT_STATE' : 'PKL', status: 'candidate', featureSchemaVersion: String(schema.featureSchemaVersion), framework: sequenceModel ? 'pytorch' : definition.key,
         trainingRunId: runId, metrics: { ...(result.metrics || {}), engine: result.engine, samplesCount: result.samplesCount, validationSamples: result.validationSamples }, hyperparameters: definition.defaultHyperparameters,
       });
       results.push({ modelType: definition.key, success: true, modelId, metrics: result.metrics, engine: result.engine });
