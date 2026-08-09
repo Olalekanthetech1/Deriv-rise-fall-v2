@@ -28,7 +28,6 @@ function parseBoundary(record: UnknownRecord, names: string[], fallbackUnit: Der
   return null;
 }
 
-/** Rise/Fall uses the digital-option CALL/PUT contract families. */
 function isRiseFallTradeType(value: string): boolean {
   const type = value.trim().toUpperCase();
   return type === 'CALL' || type === 'PUT' || type === 'CALLE' || type === 'PUTE' || type === 'RISE' || type === 'FALL';
@@ -37,15 +36,13 @@ function filterRiseFallRanges(ranges: DerivDurationRange[]): DerivDurationRange[
   const filtered = ranges.filter((range) => range.tradeTypes.some(isRiseFallTradeType));
   return filtered.length ? filtered : ranges.filter((range) => range.tradeTypes.length === 0);
 }
-function mergeRanges(ranges: DerivDurationRange[]): DerivDurationRange[] {
+function mergeRanges(ranges: DerivDurationRange[], source: DerivDurationRange['source']): DerivDurationRange[] {
   const merged = new Map<string, DerivDurationRange>();
   for (const range of ranges) {
     const key = `${range.unit}:${range.min}:${range.max}`;
     const existing = merged.get(key);
-    if (existing) {
-      existing.tradeTypes = Array.from(new Set([...existing.tradeTypes, ...range.tradeTypes])).sort();
-      existing.source = existing.source === range.source ? existing.source : 'deriv-trading-durations';
-    } else merged.set(key, { ...range });
+    if (existing) existing.tradeTypes = Array.from(new Set([...existing.tradeTypes, ...range.tradeTypes])).sort();
+    else merged.set(key, { ...range, source });
   }
   const unitOrder: DerivDurationUnit[] = ['t', 's', 'm', 'h', 'd'];
   return Array.from(merged.values()).sort((a, b) => unitOrder.indexOf(a.unit) - unitOrder.indexOf(b.unit) || a.min - b.min || a.max - b.max);
@@ -64,37 +61,47 @@ function collectTradeDurationNodes(value: unknown, symbol: string, inheritedSymb
       const itemSymbol = typeof itemRecord?.symbol === 'string' ? itemRecord.symbol : typeof itemRecord?.underlying_symbol === 'string' ? itemRecord.underlying_symbol : '';
       return itemSymbol.toUpperCase() === symbol.toUpperCase();
     });
-    if (matches) return record.trade_durations.flatMap((tradeDuration) => { const trade = asRecord(tradeDuration); if (!trade || !Array.isArray(trade.durations)) return []; return [{ durations: trade.durations, tradeType: String(trade.trade_type ?? '') }]; });
+    if (matches) return record.trade_durations.flatMap((tradeDuration) => {
+      const trade = asRecord(tradeDuration);
+      return trade && Array.isArray(trade.durations) ? [{ durations: trade.durations, tradeType: String(trade.trade_type ?? '') }] : [];
+    });
   }
-  if (currentSymbol.toUpperCase() === symbol.toUpperCase() && Array.isArray(record.trade_durations)) return record.trade_durations.flatMap((tradeDuration) => { const trade = asRecord(tradeDuration); if (!trade || !Array.isArray(trade.durations)) return []; return [{ durations: trade.durations, tradeType: String(trade.trade_type ?? '') }]; });
+  if (currentSymbol.toUpperCase() === symbol.toUpperCase() && Array.isArray(record.trade_durations)) return record.trade_durations.flatMap((tradeDuration) => {
+    const trade = asRecord(tradeDuration);
+    return trade && Array.isArray(trade.durations) ? [{ durations: trade.durations, tradeType: String(trade.trade_type ?? '') }] : [];
+  });
   return Object.values(record).flatMap((child) => collectTradeDurationNodes(child, symbol, currentSymbol));
 }
+
 function parseTradingDurations(response: UnknownRecord, symbol: string): DerivDurationRange[] {
   const ranges: DerivDurationRange[] = [];
   for (const node of collectTradeDurationNodes(response.trading_durations, symbol)) for (const rawDuration of node.durations) {
-    const duration = asRecord(rawDuration); if (!duration) continue;
+    const duration = asRecord(rawDuration);
+    if (!duration) continue;
     const explicitUnit = normalizeUnit(duration.unit ?? duration.duration_unit ?? duration.units);
     const min = parseBoundary(duration, ['min', 'minimum', 'min_duration', 'min_contract_duration'], explicitUnit);
     const max = parseBoundary(duration, ['max', 'maximum', 'max_duration', 'max_contract_duration'], explicitUnit);
     if (!min || !max || min.unit !== max.unit || max.value < min.value) continue;
     ranges.push({ id: `${symbol}:${node.tradeType || 'unknown'}:${min.unit}:${min.value}-${max.value}`, unit: min.unit, min: min.value, max: max.value, tradeTypes: node.tradeType ? [node.tradeType] : [], source: 'deriv-trading-durations' });
   }
-  return filterRiseFallRanges(mergeRanges(ranges));
+  return filterRiseFallRanges(mergeRanges(ranges, 'deriv-trading-durations'));
 }
+
 function parseContractsFor(response: UnknownRecord, symbol: string): DerivDurationRange[] {
   const contractsFor = asRecord(response.contracts_for);
   const available = Array.isArray(contractsFor?.available) ? contractsFor.available : [];
   const ranges: DerivDurationRange[] = [];
   for (const rawItem of available) {
-    const item = asRecord(rawItem); if (!item) continue;
-    const explicitUnit = normalizeUnit(item.duration_unit);
+    const item = asRecord(rawItem);
+    if (!item) continue;
+    const explicitUnit = normalizeUnit(item.duration_unit ?? item.duration_units);
     const min = parseDurationToken(item.min_contract_duration, explicitUnit);
     const max = parseDurationToken(item.max_contract_duration, explicitUnit);
     if (!min || !max || min.unit !== max.unit || max.value < min.value) continue;
-    const contractType = String(item.contract_type ?? '');
+    const contractType = String(item.contract_type ?? item.contract_type_display ?? '');
     ranges.push({ id: `${symbol}:${contractType || 'unknown'}:${min.unit}:${min.value}-${max.value}`, unit: min.unit, min: min.value, max: max.value, tradeTypes: contractType ? [contractType] : [], source: 'deriv-contracts-for' });
   }
-  return filterRiseFallRanges(mergeRanges(ranges));
+  return filterRiseFallRanges(mergeRanges(ranges, 'deriv-contracts-for'));
 }
 
 async function requestDeriv(symbol: string, request: UnknownRecord, expectedMsgType: string, timeoutMs: number): Promise<UnknownRecord> {
@@ -121,18 +128,22 @@ async function requestDeriv(symbol: string, request: UnknownRecord, expectedMsgT
 export async function getDerivDurationDiscovery(symbol: string): Promise<DerivDurationDiscovery> {
   const normalized = String(symbol ?? '').trim().toUpperCase();
   if (!normalized) throw new Error('A Deriv symbol is required for duration discovery.');
+
+  // contracts_for is asset-specific; use it first. The generic trading_durations
+  // endpoint can describe broad product capabilities and must not override an
+  // asset-specific contract-duration response.
   try {
-    const response = await requestDeriv(normalized, { trading_durations: 1 }, 'trading_durations', 10_000);
-    const ranges = parseTradingDurations(response, normalized);
-    if (ranges.length) return { symbol: normalized, ranges, fetchedAt: new Date().toISOString(), source: 'deriv-trading-durations' };
+    const response = await requestDeriv(normalized, { contracts_for: normalized }, 'contracts_for', 10_000);
+    const ranges = parseContractsFor(response, normalized);
+    if (ranges.length) return { symbol: normalized, ranges, fetchedAt: new Date().toISOString(), source: 'deriv-contracts-for' };
   } catch {
-    // Fall through to contracts_for if the public trading_durations request is unavailable.
+    // Fall through to the broader discovery endpoint only when asset-specific discovery is unavailable.
   }
-  // Deriv's contracts_for schema accepts the symbol request without currency/product_type.
-  const response = await requestDeriv(normalized, { contracts_for: normalized }, 'contracts_for', 10_000);
-  const ranges = parseContractsFor(response, normalized);
+
+  const response = await requestDeriv(normalized, { trading_durations: 1 }, 'trading_durations', 10_000);
+  const ranges = parseTradingDurations(response, normalized);
   if (!ranges.length) throw new Error(`Deriv returned no supported Rise/Fall duration ranges for ${normalized}.`);
-  return { symbol: normalized, ranges, fetchedAt: new Date().toISOString(), source: 'deriv-contracts-for' };
+  return { symbol: normalized, ranges, fetchedAt: new Date().toISOString(), source: 'deriv-trading-durations' };
 }
 
 export function durationToSeconds(value: number, unit: DerivDurationUnit): number | null { return Number.isSafeInteger(value) && value > 0 && unit !== 't' ? value * UNIT_SECONDS[unit] : null; }
