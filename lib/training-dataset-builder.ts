@@ -62,8 +62,11 @@ function getSql() {
 }
 
 function normalizePositiveInteger(value: unknown, fallback: number, max: number): number {
+  if (value === undefined || value === null || value === '') return fallback;
   const parsed = Number(value);
-  if (!Number.isSafeInteger(parsed) || parsed <= 0 || parsed > max) return fallback;
+  if (!Number.isSafeInteger(parsed) || parsed <= 0 || parsed > max) {
+    throw new Error(`Value must be a positive integer no greater than ${max}.`);
+  }
   return parsed;
 }
 
@@ -196,8 +199,8 @@ export async function buildTrainingDataset(request: DatasetBuildRequest): Promis
   if (!symbol) throw new Error('A Deriv symbol is required.');
 
   const horizonTicks = normalizePositiveInteger(request.horizonTicks, DEFAULT_HORIZON_TICKS, 5000);
-  const windowTicks = normalizePositiveInteger(request.windowTicks, DEFAULT_WINDOW_TICKS, 3000);
-  if (windowTicks < 300) throw new Error('windowTicks must be at least 300 for the canonical 37-feature schema.');
+  const windowTicks = normalizePositiveInteger(request.windowTicks, DEFAULT_WINDOW_TICKS, DEFAULT_WINDOW_TICKS);
+  if (windowTicks !== DEFAULT_WINDOW_TICKS) throw new Error('The canonical 37-feature schema requires a 300-tick feature window.');
 
   const sql = getSql();
   if (!sql || !(await initDbSchema())) throw new Error('Database is unavailable or the Operations schema could not be initialized.');
