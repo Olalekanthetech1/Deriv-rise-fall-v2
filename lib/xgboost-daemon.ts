@@ -22,7 +22,7 @@ class XGBoostDaemonManager {
 
   private ensureDaemonRunning() {
     if (this.child) return;
-    const pythonScript = path.join(process.cwd(), 'scripts', 'xgboost_engine.py');
+    const pythonScript = path.join(/*turbopackIgnore: true*/ process.cwd(), 'scripts', 'xgboost_engine.py');
     try {
       this.child = spawn(process.env.PYTHON_BIN || 'python3', [pythonScript], {
         stdio: ['pipe', 'pipe', 'inherit'],
