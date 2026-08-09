@@ -54,13 +54,13 @@ export const adminRoadmap: RoadmapSection[] = [
     id: 'database',
     title: 'Database Operations',
     description: 'New-schema migration, live Neon verification, data integrity and safe maintenance.',
-    status: 'next',
+    status: 'complete',
   },
   {
     id: 'market-data-ingestion',
     title: 'Market Data Ingestion',
     description: 'Historical ticks, live streams and validation before they enter the training pipeline.',
-    status: 'planned',
+    status: 'next',
   },
   {
     id: 'dataset-builder',
