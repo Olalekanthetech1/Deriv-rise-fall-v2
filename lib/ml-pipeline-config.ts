@@ -33,160 +33,163 @@ export type FeatureVectorSnapshot = {
   schemaVersion: string;
 };
 
-const DEFAULT_FEATURE_ORDER = [
-  'deltaP1',
-  'deltaP2',
-  'deltaP3',
-  'micro_momentum',
-  'short_momentum',
-  'medium_momentum',
-  'macro_momentum',
-  'short_range',
-  'medium_displacement',
-  'macro_displacement',
-  'up_tick_ratio',
-  'down_tick_ratio',
-  'directional_imbalance',
-  'consecutive_up',
-  'consecutive_down',
-  'micro_persistence',
-  'short_persistence',
-  'short_reversal_rate',
-  'medium_reversal_rate',
-  'micro_velocity',
-  'short_velocity',
-  'medium_velocity',
-  'acceleration',
-  'ticks_per_second',
-  'velocity_per_second',
-  'short_volatility',
-  'medium_volatility',
-  'macro_volatility',
-  'short_rangeCompression',
-  'medium_distHigh',
-  'medium_distLow',
-  'macro_regime',
-  'is1SecondSynthetic',
-  'contractDurationSecs',
-  'durationFactor',
-  'digitFrequency',
-  'assetCategory',
-];
+type UnknownRecord = Record<string, unknown>;
 
-const DEFAULT_PIPELINE_CONFIG: FeaturePipelineConfig = {
-  pipelineVersion: 'ml-pipeline-v1',
-  canonicalFeatureWindowTicks: 300,
-  defaultHorizonTicks: 5,
-  maxHorizonTicks: 5000,
-  featureWindows: {
-    micro: 5,
-    short: 25,
-    medium: 100,
-    macro: 300,
-  },
-  regimeThreshold: 0.05,
-  digitPrecision: 5,
-  syntheticSymbolPrefixes: ['1HZ', 'R_'],
-  featureOrder: DEFAULT_FEATURE_ORDER,
-  splitRatios: {
-    train: 0.7,
-    validation: 0.15,
-    test: 0.15,
-  },
-  splitGapMultiplier: 1,
-  normalizationMethod: 'zscore',
-  normalizationEpsilon: 1e-12,
-};
+const CONFIG_ENV_NAME = 'ML_PIPELINE_CONFIG_JSON';
+const REQUIRED_CONFIG_KEYS = [
+  'pipelineVersion',
+  'canonicalFeatureWindowTicks',
+  'defaultHorizonTicks',
+  'maxHorizonTicks',
+  'featureWindows',
+  'regimeThreshold',
+  'digitPrecision',
+  'syntheticSymbolPrefixes',
+  'featureOrder',
+  'splitRatios',
+  'splitGapMultiplier',
+  'normalizationMethod',
+  'normalizationEpsilon',
+] as const;
 
 let cachedConfig: FeaturePipelineConfig | null = null;
 
-function clampPositiveInteger(value: unknown, fallback: number, max: number): number {
-  const parsed = Number(value);
-  if (!Number.isFinite(parsed) || parsed <= 0) return fallback;
-  return Math.min(max, Math.max(1, Math.floor(parsed)));
+function asRecord(value: unknown, path: string): UnknownRecord {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) {
+    throw new Error(`[ML Config] ${path} must be an object.`);
+  }
+  return value as UnknownRecord;
 }
 
-function clampRatio(value: unknown, fallback: number): number {
+function requiredString(value: unknown, path: string): string {
+  if (typeof value !== 'string' || !value.trim()) {
+    throw new Error(`[ML Config] ${path} must be a non-empty string.`);
+  }
+  return value.trim();
+}
+
+function requiredPositiveInteger(value: unknown, path: string): number {
+  if (!Number.isSafeInteger(value) || Number(value) <= 0) {
+    throw new Error(`[ML Config] ${path} must be a positive safe integer.`);
+  }
+  return Number(value);
+}
+
+function requiredNonNegativeInteger(value: unknown, path: string): number {
+  if (!Number.isSafeInteger(value) || Number(value) < 0) {
+    throw new Error(`[ML Config] ${path} must be a non-negative safe integer.`);
+  }
+  return Number(value);
+}
+
+function requiredFiniteNumber(value: unknown, path: string): number {
   const parsed = Number(value);
-  if (!Number.isFinite(parsed) || parsed <= 0 || parsed >= 1) return fallback;
+  if (!Number.isFinite(parsed)) {
+    throw new Error(`[ML Config] ${path} must be a finite number.`);
+  }
   return parsed;
+}
+
+function requiredPositiveNumber(value: unknown, path: string): number {
+  const parsed = requiredFiniteNumber(value, path);
+  if (parsed <= 0) throw new Error(`[ML Config] ${path} must be greater than zero.`);
+  return parsed;
+}
+
+function requiredRatio(value: unknown, path: string): number {
+  const parsed = requiredFiniteNumber(value, path);
+  if (parsed <= 0 || parsed >= 1) throw new Error(`[ML Config] ${path} must be greater than zero and less than one.`);
+  return parsed;
+}
+
+function requiredStringArray(value: unknown, path: string): string[] {
+  if (!Array.isArray(value) || value.length === 0) {
+    throw new Error(`[ML Config] ${path} must be a non-empty array.`);
+  }
+  const result = value.map((item, index) => requiredString(item, `${path}[${index}]`));
+  if (new Set(result).size !== result.length) {
+    throw new Error(`[ML Config] ${path} must not contain duplicate values.`);
+  }
+  return result;
+}
+
+function parseExternalConfig(): FeaturePipelineConfig {
+  const raw = process.env[CONFIG_ENV_NAME];
+  if (!raw?.trim()) {
+    throw new Error(`[ML Config] ${CONFIG_ENV_NAME} is required. Configure the complete ML pipeline contract in the deployment environment.`);
+  }
+
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(raw);
+  } catch {
+    throw new Error(`[ML Config] ${CONFIG_ENV_NAME} contains invalid JSON.`);
+  }
+
+  const source = asRecord(parsed, CONFIG_ENV_NAME);
+  const missing = REQUIRED_CONFIG_KEYS.filter((key) => !(key in source));
+  if (missing.length) {
+    throw new Error(`[ML Config] ${CONFIG_ENV_NAME} is missing required keys: ${missing.join(', ')}.`);
+  }
+
+  const featureWindowsSource = asRecord(source.featureWindows, 'featureWindows');
+  const splitSource = asRecord(source.splitRatios, 'splitRatios');
+  const featureWindows: FeatureWindowConfig = {
+    micro: requiredPositiveInteger(featureWindowsSource.micro, 'featureWindows.micro'),
+    short: requiredPositiveInteger(featureWindowsSource.short, 'featureWindows.short'),
+    medium: requiredPositiveInteger(featureWindowsSource.medium, 'featureWindows.medium'),
+    macro: requiredPositiveInteger(featureWindowsSource.macro, 'featureWindows.macro'),
+  };
+
+  const canonicalFeatureWindowTicks = requiredPositiveInteger(source.canonicalFeatureWindowTicks, 'canonicalFeatureWindowTicks');
+  const defaultHorizonTicks = requiredPositiveInteger(source.defaultHorizonTicks, 'defaultHorizonTicks');
+  const maxHorizonTicks = requiredPositiveInteger(source.maxHorizonTicks, 'maxHorizonTicks');
+  const maxConfiguredWindow = Math.max(...Object.values(featureWindows));
+  if (canonicalFeatureWindowTicks < maxConfiguredWindow) {
+    throw new Error('[ML Config] canonicalFeatureWindowTicks must be at least the largest configured feature window.');
+  }
+  if (defaultHorizonTicks > maxHorizonTicks) {
+    throw new Error('[ML Config] defaultHorizonTicks cannot exceed maxHorizonTicks.');
+  }
+
+  const splitRatios = {
+    train: requiredRatio(splitSource.train, 'splitRatios.train'),
+    validation: requiredRatio(splitSource.validation, 'splitRatios.validation'),
+    test: requiredRatio(splitSource.test, 'splitRatios.test'),
+  };
+  const splitSum = splitRatios.train + splitRatios.validation + splitRatios.test;
+  if (Math.abs(splitSum - 1) > Number.EPSILON * 100) {
+    throw new Error('[ML Config] splitRatios must sum to 1.');
+  }
+
+  const normalizationMethod = requiredString(source.normalizationMethod, 'normalizationMethod');
+  if (normalizationMethod !== 'zscore') {
+    throw new Error(`[ML Config] Unsupported normalizationMethod: ${normalizationMethod}.`);
+  }
+
+  return {
+    pipelineVersion: requiredString(source.pipelineVersion, 'pipelineVersion'),
+    canonicalFeatureWindowTicks,
+    defaultHorizonTicks,
+    maxHorizonTicks,
+    featureWindows,
+    regimeThreshold: requiredFiniteNumber(source.regimeThreshold, 'regimeThreshold'),
+    digitPrecision: requiredNonNegativeInteger(source.digitPrecision, 'digitPrecision'),
+    syntheticSymbolPrefixes: requiredStringArray(source.syntheticSymbolPrefixes, 'syntheticSymbolPrefixes'),
+    featureOrder: requiredStringArray(source.featureOrder, 'featureOrder'),
+    splitRatios,
+    splitGapMultiplier: requiredPositiveInteger(source.splitGapMultiplier, 'splitGapMultiplier'),
+    normalizationMethod: 'zscore',
+    normalizationEpsilon: requiredPositiveNumber(source.normalizationEpsilon, 'normalizationEpsilon'),
+  };
 }
 
 function hashConfig(config: FeaturePipelineConfig): string {
   return crypto.createHash('sha256').update(JSON.stringify(config)).digest('hex').slice(0, 16);
 }
 
-function normalizeConfig(raw: Partial<FeaturePipelineConfig>): FeaturePipelineConfig {
-  const base = DEFAULT_PIPELINE_CONFIG;
-  const featureWindows = raw.featureWindows ?? {};
-
-  const order = Array.isArray(raw.featureOrder) && raw.featureOrder.length > 0
-    ? raw.featureOrder.map((item) => String(item).trim()).filter(Boolean)
-    : [...base.featureOrder];
-
-  const normalizedWindows: FeatureWindowConfig = {
-    micro: clampPositiveInteger(featureWindows.micro, base.featureWindows.micro, 100000),
-    short: clampPositiveInteger(featureWindows.short, base.featureWindows.short, 100000),
-    medium: clampPositiveInteger(featureWindows.medium, base.featureWindows.medium, 100000),
-    macro: clampPositiveInteger(featureWindows.macro, base.featureWindows.macro, 100000),
-  };
-
-  const normalized: FeaturePipelineConfig = {
-    pipelineVersion: typeof raw.pipelineVersion === 'string' && raw.pipelineVersion.trim() ? raw.pipelineVersion.trim() : base.pipelineVersion,
-    canonicalFeatureWindowTicks: clampPositiveInteger(raw.canonicalFeatureWindowTicks, base.canonicalFeatureWindowTicks, 100000),
-    defaultHorizonTicks: clampPositiveInteger(raw.defaultHorizonTicks, base.defaultHorizonTicks, 100000),
-    maxHorizonTicks: clampPositiveInteger(raw.maxHorizonTicks, base.maxHorizonTicks, 100000),
-    featureWindows: normalizedWindows,
-    regimeThreshold: Number.isFinite(Number(raw.regimeThreshold)) ? Number(raw.regimeThreshold) : base.regimeThreshold,
-    digitPrecision: clampPositiveInteger(raw.digitPrecision, base.digitPrecision, 12),
-    syntheticSymbolPrefixes: Array.isArray(raw.syntheticSymbolPrefixes) && raw.syntheticSymbolPrefixes.length > 0
-      ? raw.syntheticSymbolPrefixes.map((value) => String(value).trim()).filter(Boolean)
-      : [...base.syntheticSymbolPrefixes],
-    featureOrder: order,
-    splitRatios: {
-      train: clampRatio(raw.splitRatios?.train, base.splitRatios.train),
-      validation: clampRatio(raw.splitRatios?.validation, base.splitRatios.validation),
-      test: clampRatio(raw.splitRatios?.test, base.splitRatios.test),
-    },
-    splitGapMultiplier: clampPositiveInteger(raw.splitGapMultiplier, base.splitGapMultiplier, 100),
-    normalizationMethod: raw.normalizationMethod === 'zscore' ? 'zscore' : base.normalizationMethod,
-    normalizationEpsilon: Number.isFinite(Number(raw.normalizationEpsilon)) && Number(raw.normalizationEpsilon) > 0 ? Number(raw.normalizationEpsilon) : base.normalizationEpsilon,
-  };
-
-  const maxConfiguredWindow = Math.max(normalizedWindows.micro, normalizedWindows.short, normalizedWindows.medium, normalizedWindows.macro);
-  if (normalized.canonicalFeatureWindowTicks < maxConfiguredWindow) {
-    normalized.canonicalFeatureWindowTicks = maxConfiguredWindow;
-  }
-
-  const splitSum = normalized.splitRatios.train + normalized.splitRatios.validation + normalized.splitRatios.test;
-  if (Math.abs(splitSum - 1) > 1e-6) {
-    normalized.splitRatios = {
-      train: base.splitRatios.train,
-      validation: base.splitRatios.validation,
-      test: base.splitRatios.test,
-    };
-  }
-
-  normalized.pipelineVersion = `${normalized.pipelineVersion}-${hashConfig(normalized)}`;
-  return normalized;
-}
-
-function readJsonEnv(name: string): Partial<FeaturePipelineConfig> {
-  const raw = process.env[name];
-  if (!raw) return {};
-  try {
-    const parsed = JSON.parse(raw) as Partial<FeaturePipelineConfig>;
-    return parsed && typeof parsed === 'object' ? parsed : {};
-  } catch {
-    console.warn(`[ML Config] Failed to parse ${name}. Falling back to defaults.`);
-    return {};
-  }
-}
-
 export function getMlPipelineConfig(): FeaturePipelineConfig {
-  if (cachedConfig) return cachedConfig;
-  const fromEnv = readJsonEnv('ML_PIPELINE_CONFIG_JSON');
-  cachedConfig = normalizeConfig(fromEnv);
+  if (!cachedConfig) cachedConfig = parseExternalConfig();
   return cachedConfig;
 }
 
