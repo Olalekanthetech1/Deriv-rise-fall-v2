@@ -1,4 +1,3 @@
-import path from 'path';
 import { spawn, ChildProcess } from 'child_process';
 import { getMlRuntimeSchemaContract } from './ml-runtime-schema';
 
@@ -27,9 +26,10 @@ class XGBoostDaemonManager {
 
   private getRuntimeScript(): string {
     const configuredScript = process.env.PYTHON_ML_SCRIPT_PATH?.trim();
-    const pythonScript = configuredScript || path.resolve(process.cwd(), 'scripts', CANONICAL_RUNTIME_ENTRYPOINT);
+    const pythonScript = configuredScript || `scripts/${CANONICAL_RUNTIME_ENTRYPOINT}`;
+    const scriptName = pythonScript.split(/[\\/]/).pop() || '';
 
-    if (path.basename(pythonScript) !== CANONICAL_RUNTIME_ENTRYPOINT) {
+    if (scriptName !== CANONICAL_RUNTIME_ENTRYPOINT) {
       throw new Error(`PYTHON_ML_SCRIPT_PATH must target the canonical ${CANONICAL_RUNTIME_ENTRYPOINT} entrypoint`);
     }
 
