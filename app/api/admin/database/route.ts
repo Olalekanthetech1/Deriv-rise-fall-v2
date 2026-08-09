@@ -21,16 +21,6 @@ const EXPECTED_TABLES = [
   'ops_health_events',
 ] as const;
 
-const LEGACY_TABLES = [
-  'ticks',
-  'ml_models',
-  'ml_training_logs',
-  'trades',
-  'ml_model_registry',
-  'ml_backtest_results',
-  'ml_performance_audit',
-] as const;
-
 function authorized(req: NextRequest) {
   const cookie = req.cookies.get('admin_session_token')?.value;
   const header = req.headers.get('x-admin-token') || req.headers.get('authorization')?.replace(/^Bearer\s+/i, '');
@@ -63,7 +53,6 @@ export async function GET(req: NextRequest) {
     const tables = tableRows.map((row: any) => String(row.table_name));
     const expectedPresent = EXPECTED_TABLES.filter((table) => tables.includes(table));
     const missingExpectedTables = EXPECTED_TABLES.filter((table) => !tables.includes(table));
-    const legacyTablesDetected = LEGACY_TABLES.filter((table) => tables.includes(table));
     const schemaReady = missingExpectedTables.length === 0;
     const latencyMs = Number((performance.now() - started).toFixed(2));
 
@@ -84,8 +73,6 @@ export async function GET(req: NextRequest) {
         expectedTableCount: EXPECTED_TABLES.length,
         expectedTablesPresent: expectedPresent.length,
         missingExpectedTables,
-        legacyTablesDetected,
-        legacyDependency: legacyTablesDetected.length === 0,
       },
       migrations: migrationRows,
       integrity: {
