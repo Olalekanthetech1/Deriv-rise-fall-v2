@@ -5,7 +5,7 @@ import { ensureMinTicks } from '@/lib/ticks-helper';
 import { initializeMlPipelineConfig } from '@/lib/ml-pipeline-config';
 import { getMlRuntimeSchemaContract } from '@/lib/ml-runtime-schema';
 import { buildSequenceFeatureDataset, buildTabularFeatureDataset } from '@/lib/ml-feature-dataset';
-import { getMlModelKeys, getSequenceModelKeys } from '@/lib/ml-model-registry';
+import { getMlModelDefinition, getMlModelKeys, getSequenceModelKeys } from '@/lib/ml-model-registry';
 import { verifySessionToken } from '../../admin/auth/route';
 
 const CATEGORY_MAP: Record<string, string[]> = {
@@ -60,6 +60,22 @@ export async function POST(req: NextRequest) {
           tabularDataset ??= await buildTabularFeatureDataset(ticks, context);
         }
 
+        const definition = getMlModelDefinition(model);
+        if (!definition) {
+          results.push({ symbol: sym, modelType: model, success: false, error: 'MODEL_NOT_REGISTERED' });
+          continue;
+        }
+
+        const hyperparams = {
+          ...definition.defaultHyperparameters,
+          maxDepth,
+          learningRate,
+          numEstimators,
+          subsample,
+          epochs,
+          batchSize,
+        };
+
         const result = await daemon.sendCommand('train', {
           symbol: sym,
           durationSecs,
@@ -67,7 +83,7 @@ export async function POST(req: NextRequest) {
           assetCategory,
           featureDataset: tabularDataset,
           sequenceDataset,
-          hyperparams: { maxDepth, learningRate, numEstimators, subsample, epochs, batchSize },
+          hyperparams,
         });
 
         if (!result?.success) {
@@ -91,7 +107,7 @@ export async function POST(req: NextRequest) {
               backtestWinRate: undefined,
               backtestProfitFactor: undefined,
               filePath: `${sym}_${durationSecs}s_${model}.pkl`,
-              hyperparameters: { maxDepth, learningRate, numEstimators, subsample, epochs, batchSize },
+              hyperparameters,
               metrics: {
                 schemaFingerprint: result.schemaFingerprint || schema.schemaFingerprint,
                 featureSchemaVersion: result.schemaVersion || schema.featureSchemaVersion,
