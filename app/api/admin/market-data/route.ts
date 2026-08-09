@@ -67,10 +67,12 @@ export async function POST(req: NextRequest) {
       endEpoch,
     });
 
+    const { success: _ignoredSuccess, ...ingestionResult } = result as typeof result & { success?: unknown };
+
     return NextResponse.json(
       {
         success: true,
-        ...result,
+        ...ingestionResult,
         checkpointUsed: checkpoint,
         realDataOnly: true,
         syntheticDataDisabled: true,
