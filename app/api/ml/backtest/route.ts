@@ -3,6 +3,7 @@ import { BacktestSchema } from '@/lib/validation-schemas';
 import { initDbSchema, saveBacktestResults } from '@/lib/db';
 import { xgboostDaemon } from '@/lib/xgboost-daemon';
 import { ensureMinTicks } from '@/lib/ticks-helper';
+import { buildBacktestFeatureVectors } from '@/lib/ml-feature-dataset';
 
 export async function POST(req: NextRequest) {
   try {
@@ -18,13 +19,23 @@ export async function POST(req: NextRequest) {
     }
 
     const { symbol, horizons, sampleLimit } = parseResult.data;
-
     const ticks = await ensureMinTicks(symbol, sampleLimit || 1000);
+    const assetCategory = symbol.startsWith('FRX') ? 1 : symbol.startsWith('CWM') ? 2 : 0;
+    const featureVectorsByHorizon: Record<string, number[][]> = {};
+
+    for (const horizon of horizons) {
+      featureVectorsByHorizon[String(horizon)] = await buildBacktestFeatureVectors(ticks, horizon, {
+        symbol,
+        durationSecs: horizon,
+        assetCategory,
+      });
+    }
 
     const backtestRes = await xgboostDaemon.sendCommand('backtest', {
       symbol,
       ticks,
       horizons,
+      featureVectorsByHorizon,
     });
 
     if (!backtestRes || !backtestRes.success) {
@@ -32,7 +43,7 @@ export async function POST(req: NextRequest) {
     }
 
     if (backtestRes.horizonMatrix) {
-      for (const [hz, hzData] of Object.entries(backtestRes.horizonMatrix)) {
+      for (const hzData of Object.values(backtestRes.horizonMatrix)) {
         const hData: any = hzData;
         await saveBacktestResults({
           symbol,
@@ -49,4 +60,3 @@ export async function POST(req: NextRequest) {
     return NextResponse.json({ error: err.message || 'Backtest failed' }, { status: 500 });
   }
 }
-
