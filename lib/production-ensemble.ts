@@ -1,6 +1,6 @@
 import { EngineeredTickFeatures, extractTickFeatures, featureObjToArray, TickPoint } from './ml-feature-extractor';
 import { buildFeatureSequence } from './ml-feature-dataset';
-import { getMlModelDefinition, getPredictiveModelDefinitions } from './ml-model-registry';
+import { getMlModelDefinition, getMlModelKeys, getPredictiveModelDefinitions } from './ml-model-registry';
 import { xgboostDaemon } from './xgboost-daemon';
 
 export type Signal = 'RISE' | 'FALL';
@@ -59,7 +59,7 @@ export async function evaluateProductionEnsemble(
     assetCategory,
     featureVector,
     featureSequence,
-    modelTypes: predictiveModels.map(({ key }) => key),
+    modelTypes: getMlModelKeys(),
   });
   if (!remote?.success || !remote.models) throw new Error('NATIVE_ML_ENSEMBLE_UNAVAILABLE');
 
