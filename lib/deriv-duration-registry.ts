@@ -128,7 +128,8 @@ export async function getDerivDurationDiscovery(symbol: string): Promise<DerivDu
   } catch {
     // Fall through to contracts_for if the public trading_durations request is unavailable.
   }
-  const response = await requestDeriv(normalized, { contracts_for: normalized, currency: 'USD', product_type: 'basic' }, 'contracts_for', 10_000);
+  // Deriv's contracts_for schema accepts the symbol request without currency/product_type.
+  const response = await requestDeriv(normalized, { contracts_for: normalized }, 'contracts_for', 10_000);
   const ranges = parseContractsFor(response, normalized);
   if (!ranges.length) throw new Error(`Deriv returned no supported Rise/Fall duration ranges for ${normalized}.`);
   return { symbol: normalized, ranges, fetchedAt: new Date().toISOString(), source: 'deriv-contracts-for' };
