@@ -5,6 +5,21 @@ import { fetchDerivTickHistory, type TickPoint } from '@/lib/ticks-helper';
 
 type Sql = any;
 
+type IngestionBatch = {
+  batchId: string;
+  startedAt: string;
+  completedAt: string | null;
+  requestedCount: number;
+  recordsReceived: number;
+  recordsInserted: number;
+  recordsRejected: number;
+  firstTickTime: string | null;
+  lastTickTime: string | null;
+  checkpointEpoch: number | null;
+  status: 'completed' | 'partial' | 'failed';
+  errorMessage: string | null;
+};
+
 export type HistoricalTick = TickPoint & {
   epochMs: number;
   sourceTickId: string;
@@ -69,6 +84,10 @@ function normalizeTicks(symbol: string, ticks: TickPoint[]): HistoricalTick[] {
   return [...deduped.values()].sort((a, b) => a.epochMs - b.epochMs);
 }
 
+function readBatches(metadata: Record<string, unknown>): IngestionBatch[] {
+  return Array.isArray(metadata.batches) ? metadata.batches.filter((batch): batch is IngestionBatch => Boolean(batch && typeof batch === 'object')) : [];
+}
+
 async function getAssetId(sql: Sql, symbol: string): Promise<number> {
   const rows = (await sql`
     INSERT INTO market_assets (symbol, display_name, asset_class, market_type, source, is_active)
@@ -111,6 +130,55 @@ async function updateRunRecord(sql: Sql, run: HistoricalIngestionRun): Promise<v
         metadata = ${JSON.stringify(run.metadata)}::jsonb
     WHERE id = ${run.runId}
   `;
+}
+
+async function findResumableRun(sql: Sql, symbol: string, requestedCount: number): Promise<HistoricalIngestionRun | null> {
+  const rows = (await sql`
+    SELECT
+      id AS "runId",
+      asset_symbol AS "symbol",
+      COALESCE((metadata->>'requestedCount')::int, 0) AS "requestedCount",
+      requested_from AS "requestedFrom",
+      requested_to AS "requestedTo",
+      started_at AS "startedAt",
+      completed_at AS "completedAt",
+      status,
+      records_received AS "recordsReceived",
+      records_inserted AS "recordsInserted",
+      records_rejected AS "recordsRejected",
+      first_tick_time AS "firstTickTime",
+      last_tick_time AS "lastTickTime",
+      error_message AS "errorMessage",
+      COALESCE(metadata, '{}'::jsonb) AS metadata
+    FROM data_ingestion_runs
+    WHERE source = 'deriv'
+      AND asset_symbol = ${symbol}
+      AND status = 'partial'
+      AND COALESCE((metadata->>'requestedCount')::int, 0) = ${requestedCount}
+      AND COALESCE(metadata->>'backfillSessionId', '') <> ''
+    ORDER BY started_at DESC
+    LIMIT 1
+  `) as any[];
+
+  if (!rows.length) return null;
+  const row = rows[0];
+  return {
+    runId: String(row.runId),
+    symbol: String(row.symbol),
+    requestedCount: Number(row.requestedCount || 0),
+    requestedFrom: row.requestedFrom ? new Date(row.requestedFrom).toISOString() : null,
+    requestedTo: row.requestedTo ? new Date(row.requestedTo).toISOString() : null,
+    startedAt: new Date(row.startedAt).toISOString(),
+    completedAt: row.completedAt ? new Date(row.completedAt).toISOString() : null,
+    status: row.status,
+    recordsReceived: Number(row.recordsReceived || 0),
+    recordsInserted: Number(row.recordsInserted || 0),
+    recordsRejected: Number(row.recordsRejected || 0),
+    firstTickTime: row.firstTickTime ? new Date(row.firstTickTime).toISOString() : null,
+    lastTickTime: row.lastTickTime ? new Date(row.lastTickTime).toISOString() : null,
+    errorMessage: row.errorMessage ? String(row.errorMessage) : null,
+    metadata: row.metadata && typeof row.metadata === 'object' ? row.metadata : {},
+  };
 }
 
 async function upsertCheckpoint(sql: Sql, symbol: string, lastTickEpoch: number, lastTickTime: string): Promise<void> {
@@ -165,37 +233,59 @@ export async function ingestDerivHistoricalTicks(input: {
   const requestedCount = Math.min(50_000, Math.max(50, Math.floor(input.count)));
   await initDbSchema();
   const sql: Sql = neon(dbUrl) as any;
-  const runId = crypto.randomUUID();
   const startedAt = new Date().toISOString();
-  const metadata: Record<string, unknown> = {
-    requestedCount,
-    resumeFromCheckpoint: Boolean(input.resumeFromCheckpoint),
-  };
+  const shouldResume = Boolean(input.resumeFromCheckpoint);
 
-  let run: HistoricalIngestionRun = {
-    runId,
-    symbol: normalizedSymbol,
-    requestedCount,
-    requestedFrom: null,
-    requestedTo: null,
-    startedAt,
-    completedAt: null,
-    status: 'running',
-    recordsReceived: 0,
-    recordsInserted: 0,
-    recordsRejected: 0,
-    firstTickTime: null,
-    lastTickTime: null,
-    errorMessage: null,
-    metadata,
-  };
+  let run = shouldResume ? await findResumableRun(sql, normalizedSymbol, requestedCount) : null;
+  const isContinuingSession = Boolean(run);
+  const runId = run?.runId || crypto.randomUUID();
+  const backfillSessionId = String(run?.metadata?.backfillSessionId || crypto.randomUUID());
+  const previousBatches = run ? readBatches(run.metadata) : [];
 
-  await createRunRecord(sql, run);
+  if (!run) {
+    run = {
+      runId,
+      symbol: normalizedSymbol,
+      requestedCount,
+      requestedFrom: null,
+      requestedTo: null,
+      startedAt,
+      completedAt: null,
+      status: 'running',
+      recordsReceived: 0,
+      recordsInserted: 0,
+      recordsRejected: 0,
+      firstTickTime: null,
+      lastTickTime: null,
+      errorMessage: null,
+      metadata: {
+        requestedCount,
+        resumeFromCheckpoint: shouldResume,
+        backfillSessionId,
+        batches: [],
+      },
+    };
+    await createRunRecord(sql, run);
+  } else {
+    run = {
+      ...run,
+      status: 'running',
+      completedAt: null,
+      errorMessage: null,
+      metadata: {
+        ...run.metadata,
+        resumedAt: startedAt,
+        resumeFromCheckpoint: shouldResume,
+        backfillSessionId,
+        batches: previousBatches,
+      },
+    };
+  }
 
   try {
     let cursor: number | 'latest' = typeof input.endEpoch === 'number' && Number.isFinite(input.endEpoch) ? input.endEpoch : 'latest';
 
-    if (input.resumeFromCheckpoint) {
+    if (shouldResume) {
       const checkpointRows = (await sql`
         SELECT last_tick_epoch
         FROM data_ingestion_checkpoints
@@ -210,11 +300,27 @@ export async function ingestDerivHistoricalTicks(input: {
       }
     }
 
-    let remaining = requestedCount;
-    let chunks = 0;
-    let earliestEpoch = Number.POSITIVE_INFINITY;
-    let latestEpoch = 0;
+    let remaining = Math.max(0, requestedCount - run.recordsReceived);
+    let chunks = Number(run.metadata.chunks || 0);
+    let earliestEpoch = run.firstTickTime ? new Date(run.firstTickTime).getTime() : Number.POSITIVE_INFINITY;
+    let latestEpoch = run.lastTickTime ? new Date(run.lastTickTime).getTime() : 0;
     const assetId = await getAssetId(sql, normalizedSymbol);
+    const batchId = crypto.randomUUID();
+    const batchStartedAt = startedAt;
+    const batch: IngestionBatch = {
+      batchId,
+      startedAt: batchStartedAt,
+      completedAt: null,
+      requestedCount: remaining,
+      recordsReceived: 0,
+      recordsInserted: 0,
+      recordsRejected: 0,
+      firstTickTime: null,
+      lastTickTime: null,
+      checkpointEpoch: null,
+      status: 'partial',
+      errorMessage: null,
+    };
 
     while (remaining > 0) {
       const batchSize = Math.min(5000, remaining);
@@ -223,35 +329,59 @@ export async function ingestDerivHistoricalTicks(input: {
 
       chunks += 1;
       run.recordsReceived += rawTicks.length;
+      batch.recordsReceived += rawTicks.length;
 
       const cleanedTicks = normalizeTicks(normalizedSymbol, rawTicks);
       run.recordsRejected += rawTicks.length - cleanedTicks.length;
+      batch.recordsRejected += rawTicks.length - cleanedTicks.length;
       if (!cleanedTicks.length) break;
 
       const inserted = await insertTickBatch(sql, normalizedSymbol, assetId, runId, cleanedTicks);
       run.recordsInserted += inserted;
+      batch.recordsInserted += inserted;
 
       const oldest = cleanedTicks[0];
       const newest = cleanedTicks[cleanedTicks.length - 1];
       earliestEpoch = Math.min(earliestEpoch, oldest.epochMs);
       latestEpoch = Math.max(latestEpoch, newest.epochMs);
+      batch.firstTickTime = new Date(oldest.epochMs).toISOString();
+      batch.lastTickTime = new Date(newest.epochMs).toISOString();
 
-      await upsertCheckpoint(sql, normalizedSymbol, Math.floor(oldest.epochMs / 1000), new Date(oldest.epochMs).toISOString());
+      const checkpointEpoch = Math.floor(oldest.epochMs / 1000);
+      batch.checkpointEpoch = checkpointEpoch;
+      await upsertCheckpoint(sql, normalizedSymbol, checkpointEpoch, new Date(oldest.epochMs).toISOString());
 
-      cursor = Math.max(1, Math.floor(oldest.epochMs / 1000) - 1);
-      remaining = requestedCount - run.recordsReceived;
+      cursor = Math.max(1, checkpointEpoch - 1);
+      remaining = Math.max(0, requestedCount - run.recordsReceived);
       if (rawTicks.length < batchSize) break;
       if (typeof cursor !== 'number' || cursor <= 0) break;
     }
 
-    const hasData = run.recordsInserted > 0;
+    batch.completedAt = new Date().toISOString();
+    batch.status = run.recordsReceived >= requestedCount ? 'completed' : (run.recordsReceived > 0 ? 'partial' : 'failed');
+    const batches = [...previousBatches, batch];
+
     run = {
       ...run,
-      completedAt: new Date().toISOString(),
-      status: hasData ? (run.recordsReceived >= requestedCount ? 'completed' : 'partial') : 'failed',
+      completedAt: batch.completedAt,
+      status: run.recordsInserted > 0 ? (run.recordsReceived >= requestedCount ? 'completed' : 'partial') : 'failed',
       firstTickTime: Number.isFinite(earliestEpoch) ? new Date(earliestEpoch).toISOString() : null,
       lastTickTime: latestEpoch > 0 ? new Date(latestEpoch).toISOString() : null,
-      metadata: { ...run.metadata, chunks },
+      errorMessage: null,
+      metadata: {
+        ...run.metadata,
+        requestedCount,
+        backfillSessionId,
+        chunks,
+        batches,
+        cumulativeProgress: {
+          requested: requestedCount,
+          received: run.recordsReceived,
+          inserted: run.recordsInserted,
+          rejected: run.recordsRejected,
+          percent: Math.min(100, Number(((run.recordsInserted / requestedCount) * 100).toFixed(2))),
+        },
+      },
     };
 
     await updateRunRecord(sql, run);
@@ -261,6 +391,15 @@ export async function ingestDerivHistoricalTicks(input: {
       ...run,
       dataSource: 'deriv-historical',
       liveDatabase: true,
+      resumedExistingSession: isContinuingSession,
+      progress: {
+        requested: requestedCount,
+        received: run.recordsReceived,
+        inserted: run.recordsInserted,
+        rejected: run.recordsRejected,
+        percent: Math.min(100, Number(((run.recordsInserted / requestedCount) * 100).toFixed(2))),
+        remaining: Math.max(0, requestedCount - run.recordsInserted),
+      },
     };
   } catch (error: any) {
     run = {
@@ -268,6 +407,10 @@ export async function ingestDerivHistoricalTicks(input: {
       completedAt: new Date().toISOString(),
       status: 'failed',
       errorMessage: error?.message || 'Historical ingestion failed.',
+      metadata: {
+        ...run.metadata,
+        backfillSessionId,
+      },
     };
     await updateRunRecord(sql, run).catch(() => {});
     throw error;
