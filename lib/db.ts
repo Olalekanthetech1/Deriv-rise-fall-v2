@@ -342,7 +342,7 @@ export async function saveTicksBatch(symbol: string, ticks: Array<{ price: numbe
 
   const validTicks = ticks.filter((tick) => {
     const epoch = tick.epoch ?? (tick.timestamp != null ? Math.floor(tick.timestamp / 1000) : null);
-    return Number.isFinite(tick.price) && tick.price > 0 && Number.isSafeInteger(epoch) && epoch > 0;
+    return Number.isFinite(tick.price) && tick.price > 0 && epoch !== null && Number.isSafeInteger(epoch) && epoch > 0;
   });
   if (!validTicks.length) return false;
 
