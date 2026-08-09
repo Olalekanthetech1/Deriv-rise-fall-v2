@@ -168,7 +168,7 @@ export function durationToSeconds(value: number, unit: DerivDurationUnit): numbe
   return value * ({ s: 1, m: 60, h: 3600, d: 86400 } as Record<Exclude<DerivDurationUnit, 't'>, number>)[unit];
 }
 export function durationLabel(value: number, unit: DerivDurationUnit): string { return `${value} ${{ t: 'ticks', s: 'seconds', m: 'minutes', h: 'hours', d: 'days' }[unit]}`; }
-export function durationRangeLabel(range: DerivDurationRange): string { return range.min === range.max ? durationLabel(range.min, range.unit) : `${durationLabel(range.min, range.unit)} – ${durationLabel(range.min, range.unit)}`.replace(durationLabel(range.min, range.unit), `${durationLabel(range.min, range.unit)} – ${durationLabel(range.max, range.unit)}`); }
+export function durationRangeLabel(range: DerivDurationRange): string { return range.min === range.max ? durationLabel(range.min, range.unit) : `${durationLabel(range.min, range.unit)} – ${durationLabel(range.max, range.unit)}`; }
 export function expandTrainingDurations(ranges: DerivDurationRange[], maxExpandedPerRange = 128): Array<{ value: number; unit: DerivDurationUnit; rangeId: string }> {
   const result: Array<{ value: number; unit: DerivDurationUnit; rangeId: string }> = [];
   for (const range of ranges) {
