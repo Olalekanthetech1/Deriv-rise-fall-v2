@@ -340,15 +340,21 @@ export async function saveTicksBatch(symbol: string, ticks: Array<{ price: numbe
   const dbUrl = getDbConnectionString();
   if (!dbUrl || !(await initDbSchema())) return false;
 
+  const validTicks = ticks.filter((tick) => {
+    const epoch = tick.epoch ?? (tick.timestamp != null ? Math.floor(tick.timestamp / 1000) : null);
+    return Number.isFinite(tick.price) && tick.price > 0 && Number.isSafeInteger(epoch) && epoch > 0;
+  });
+  if (!validTicks.length) return false;
+
   try {
     const sql = neon(dbUrl);
     const assetId = await getAssetId(sql, symbol);
-    const symbols = ticks.map(() => symbol);
-    const assetIds = ticks.map(() => assetId);
-    const prices = ticks.map((tick) => tick.price);
-    const epochs = ticks.map((tick) => tick.epoch ?? Math.floor((tick.timestamp ?? Date.now()) / 1000));
-    const times = ticks.map((tick) => new Date(tick.timestamp ?? Date.now()).toISOString());
-    const sourceIds = ticks.map((tick) => tick.sourceTickId ?? null);
+    const symbols = validTicks.map(() => symbol);
+    const assetIds = validTicks.map(() => assetId);
+    const prices = validTicks.map((tick) => tick.price);
+    const epochs = validTicks.map((tick) => tick.epoch ?? Math.floor((tick.timestamp as number) / 1000));
+    const times = epochs.map((epoch) => new Date(epoch * 1000).toISOString());
+    const sourceIds = validTicks.map((tick) => tick.sourceTickId ?? null);
 
     await sql`
       INSERT INTO market_ticks (asset_id, symbol, price, tick_epoch, tick_time, source, source_tick_id)
@@ -358,7 +364,7 @@ export async function saveTicksBatch(symbol: string, ticks: Array<{ price: numbe
         ${prices}::numeric[],
         ${epochs}::bigint[],
         ${times}::timestamptz[],
-        ARRAY_FILL('deriv'::text, ARRAY[${ticks.length}]),
+        ARRAY_FILL('deriv'::text, ARRAY[${validTicks.length}]),
         ${sourceIds}::text[]
       )
       ON CONFLICT (source, source_tick_id) DO NOTHING
@@ -385,7 +391,7 @@ export async function getTicksHistory(symbol: string, limit = 300) {
     `;
     return rows.reverse().map((row: any) => ({
       price: Number(row.price),
-      timestamp: Number(row.tick_epoch) * 1000 || new Date(row.tick_time).getTime(),
+      timestamp: Number(row.tick_epoch) * 1000,
     }));
   } catch (error) {
     console.error('[getTicksHistory Error]:', error);
