@@ -1,6 +1,5 @@
 import { NextRequest, NextResponse } from 'next/server';
 import { PredictSchema } from '@/lib/validation-schemas';
-import { xgboostModel } from '@/lib/xgboost-engine';
 import { evaluateProductionEnsemble } from '@/lib/production-ensemble';
 import { ensureMinTicks } from '@/lib/ticks-helper';
 
@@ -15,19 +14,10 @@ export async function POST(req: NextRequest) {
     const { symbol, ticks, durationSecs, assetCategory } = parseResult.data;
     let tickList = Array.isArray(ticks) && ticks.length > 0 ? ticks : [];
     if (tickList.length < 5) tickList = await ensureMinTicks(symbol, 100);
-    if (tickList.length < 5) return NextResponse.json({ success: false, error: `Insufficient ticks for ${symbol}. Need at least 5.` }, { status: 422 });
+    if (tickList.length < 5) return NextResponse.json({ success: false, error: `Insufficient ticks for ${symbol}.` }, { status: 422 });
 
     const startTime = Date.now();
     const ensemble = await evaluateProductionEnsemble(tickList, { symbol, durationSecs, assetCategory });
-
-    let prediction: Awaited<ReturnType<typeof xgboostModel.predictRemote>> | null = null;
-    try {
-      prediction = await xgboostModel.predictRemote(tickList, { symbol, durationSecs, assetCategory });
-    } catch (err) {
-      console.warn('[Prediction] XGBoost compatibility path failed; using native ensemble result.', err);
-    }
-
-    const latencyMs = Date.now() - startTime;
     const feat = ensemble.features;
     const microVelocity = Number.isFinite(Number(feat.micro_velocity)) ? Number(feat.micro_velocity) : null;
     const shortVol = Number.isFinite(Number(feat.short_volatility)) ? Number(feat.short_volatility) : null;
@@ -35,7 +25,7 @@ export async function POST(req: NextRequest) {
       ? Math.min(100, Math.max(0, Math.round((shortVol / (Math.abs(microVelocity) + 0.0001)) * 12)))
       : null;
 
-    const fallbackPrediction = {
+    const prediction = {
       signal: ensemble.direction === 'RISE' ? ('CALL' as const) : ('PUT' as const),
       confidence: ensemble.confidence,
       rawScore: Number(((ensemble.probUp - ensemble.probDown) / 100).toFixed(4)),
@@ -45,15 +35,14 @@ export async function POST(req: NextRequest) {
       modelVersion: 'production-ensemble',
     };
 
-    const basePrediction = prediction ?? fallbackPrediction;
     const enrichedPrediction = {
-      ...basePrediction,
+      ...prediction,
       signal: ensemble.direction === 'RISE' ? 'CALL' : 'PUT',
       confidence: ensemble.confidence,
       probabilityUp: ensemble.probUp,
       probabilityDown: ensemble.probDown,
       ensemble,
-      latencyMs,
+      latencyMs: Date.now() - startTime,
       ticksProcessed: tickList.length,
       marketNoiseScore: noiseScore,
       marketRegime: ensemble.marketRegime,
@@ -62,8 +51,6 @@ export async function POST(req: NextRequest) {
       volatilityRank: Number.isFinite(Number(feat.macro_volatility)) ? Number(feat.macro_volatility) : null,
     };
 
-    // Predictions are analytical observations, not executions. Do not insert them
-    // into the trades table because that would fabricate trade/stake/strategy data.
     return NextResponse.json({
       success: true,
       prediction: enrichedPrediction,
