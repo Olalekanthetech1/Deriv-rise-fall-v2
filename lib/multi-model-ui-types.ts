@@ -1,9 +1,8 @@
 /**
  * Browser-safe contract for the Multi-Model Layer UI.
  *
- * IMPORTANT: keep this file free of runtime imports from the ML engines/daemon.
- * Client Components must not import server-side evaluator modules merely to use
- * their TypeScript interfaces.
+ * Missing native-runtime evidence is represented explicitly as null instead
+ * of being replaced with fabricated numeric values.
  */
 
 export type MultiModelSignal = 'RISE' | 'FALL';
@@ -11,55 +10,54 @@ export type MultiModelSignal = 'RISE' | 'FALL';
 export interface MultiModelEvaluationView {
   modelKey: string;
   modelName: string;
-  /** Every production evaluator must identify its model family. */
   family: 'tabular' | 'sequential' | string;
   runtimeMode?: string;
-  probabilityUp: number;
-  probabilityDown: number;
-  signal: MultiModelSignal;
-  vote?: MultiModelSignal;
-  confidence: number;
-  dynamicWeight?: number;
-  weight?: number;
+  probabilityUp: number | null;
+  probabilityDown: number | null;
+  signal: MultiModelSignal | null;
+  vote?: MultiModelSignal | null;
+  confidence: number | null;
+  dynamicWeight?: number | null;
+  weight?: number | null;
   details?: string;
 }
 
 export interface MultiModelRegimeView {
   primaryRegime?: string;
   regimeName?: string;
-  regimeState?: number;
+  regimeState?: number | null;
   probabilities?: Record<string, number>;
   tradingGuidance?: string;
 }
 
 export interface MultiModelAnomalyView {
-  anomalyScore?: number;
+  anomalyScore?: number | null;
   spikeSeverity?: string;
   isAbnormal?: boolean;
-  confidenceAdjustmentFactor?: number;
+  confidenceAdjustmentFactor?: number | null;
   actionNote?: string;
 }
 
 export interface MultiModelFusionView {
-  directionScore?: number;
-  direction?: MultiModelSignal;
-  regimeState?: string;
-  anomalyRisk?: 'LOW' | 'MODERATE' | 'HIGH' | string;
-  finalCompositeScore?: number;
-  confidenceGateThreshold?: number;
-  gatePassed?: boolean;
-  action?: 'EXECUTE_CALL' | 'EXECUTE_PUT' | 'HOLD_NO_SIGNAL' | string;
+  directionScore?: number | null;
+  direction?: MultiModelSignal | null;
+  regimeState?: string | null;
+  anomalyRisk?: 'LOW' | 'MODERATE' | 'HIGH' | 'UNKNOWN' | string;
+  finalCompositeScore?: number | null;
+  confidenceGateThreshold?: number | null;
+  gatePassed?: boolean | null;
+  action?: 'EXECUTE_CALL' | 'EXECUTE_PUT' | 'HOLD_NO_SIGNAL' | string | null;
 }
 
 export interface MultiModelCalibrationView {
-  rawProbability?: number;
-  calibratedProbability?: number;
-  plattScaledProbability?: number;
-  isotonicProbability?: number;
-  expectedCalibrationError?: number;
+  rawProbability?: number | null;
+  calibratedProbability?: number | null;
+  plattScaledProbability?: number | null;
+  isotonicProbability?: number | null;
+  expectedCalibrationError?: number | null;
   calibrationMethod?: string;
   method?: string;
-  confidenceReductionPct?: number;
+  confidenceReductionPct?: number | null;
   calibrationBins?: Array<{
     binRange: string;
     rawAvg: number;
@@ -76,16 +74,16 @@ export interface MultiModelEvaluationResult {
   probDown: number;
   confidence: number;
   marketRegime?: string;
-  anomalyScore?: number;
+  anomalyScore?: number | null;
   modelBreakdown?: Record<string, any>;
   evaluations: MultiModelEvaluationView[];
   regime?: MultiModelRegimeView;
   anomaly?: MultiModelAnomalyView;
   drift?: {
     modelWeights?: Record<string, number>;
-    recentAccuracies?: Record<string, number>;
+    recentAccuracies?: Record<string, number | null>;
     driftStatus?: string;
-    topPerformingModel?: string;
+    topPerformingModel?: string | null;
   };
   fusion?: MultiModelFusionView;
   calibration?: MultiModelCalibrationView;

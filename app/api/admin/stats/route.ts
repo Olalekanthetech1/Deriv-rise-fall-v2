@@ -16,7 +16,7 @@ let redisClient: Redis | null = null;
 if (process.env.UPSTASH_REDIS_REST_URL && process.env.UPSTASH_REDIS_REST_TOKEN) {
   try {
     redisClient = Redis.fromEnv();
-  } catch (err) {
+  } catch {
     logger.warn('Unable to initialize Redis client for admin stats');
   }
 }
@@ -24,24 +24,8 @@ if (process.env.UPSTASH_REDIS_REST_URL && process.env.UPSTASH_REDIS_REST_TOKEN) 
 const CACHE_KEY = 'admin_stats_cache_v3';
 const CACHE_TTL_SECONDS = 30;
 
-// Empty-state helpers intentionally return fresh values. These are UI-safe zero states,
-// not historical/mock analytics, and are only used when there is no persisted data.
-function createEmptyConfidenceBrackets() {
-  return [
-    { bracket: '70-79%', wins: 0, losses: 0, total: 0, winRate: 0 },
-    { bracket: '80-89%', wins: 0, losses: 0, total: 0, winRate: 0 },
-    { bracket: '90-100%', wins: 0, losses: 0, total: 0, winRate: 0 },
-  ];
-}
-
-function createEmptyPnlCurve() {
-  return [{ tradeIndex: 0, pnl: 0 }];
-}
-
 export async function GET(req: NextRequest) {
-  if (!isAuthValid(req)) {
-    return NextResponse.json({ error: 'Unauthorized admin access.' }, { status: 401 });
-  }
+  if (!isAuthValid(req)) return NextResponse.json({ error: 'Unauthorized admin access.' }, { status: 401 });
 
   try {
     if (redisClient) {
@@ -62,34 +46,19 @@ export async function GET(req: NextRequest) {
         dataSource: 'database-unavailable',
         isSimulated: false,
         realTradesOnly: true,
-        summary: {
-          totalTrades: 0,
-          wins: 0,
-          losses: 0,
-          winRate: 0,
-          totalProfit: 0,
-          totalTicks: 0,
-          totalModels: 0,
-          activeModel: 'Unavailable (DB Offline)',
-          activeAccuracy: null,
-        },
-        confidenceBrackets: createEmptyConfidenceBrackets(),
-        pnlCurve: createEmptyPnlCurve(),
+        summary: { totalTrades: 0, wins: 0, losses: 0, winRate: 0, totalProfit: 0, totalTicks: 0, totalModels: 0, activeModel: 'Unavailable (DB Offline)', activeAccuracy: null },
+        confidenceBrackets: [],
+        pnlCurve: [],
         recentTrades: [],
-      });
+      }, { headers: { 'Cache-Control': 'no-store' } });
     }
 
     const [tradeRows, totalTradesRes, ticksCountRes, modelCountRes, activeModelRes] = await Promise.all([
-      sql`
-        SELECT id, symbol, contract_type, stake, payout, status, prediction_confidence, strategy, executed_at
-        FROM trades
-        ORDER BY executed_at DESC
-        LIMIT 100
-      `.catch(() => []),
-      sql`SELECT COUNT(*) as cnt FROM trades`.catch(() => [{ cnt: '0' }]),
-      sql`SELECT COUNT(*) as cnt FROM ticks`.catch(() => [{ cnt: '0' }]),
-      sql`SELECT COUNT(*) as cnt FROM ml_models`.catch(() => [{ cnt: '0' }]),
-      sql`SELECT model_id, accuracy FROM ml_models ORDER BY trained_at DESC LIMIT 1`.catch(() => []),
+      sql`SELECT id, symbol, contract_type, stake, payout, status, prediction_confidence, strategy, executed_at FROM trades ORDER BY executed_at DESC LIMIT 100`,
+      sql`SELECT COUNT(*) as cnt FROM trades`,
+      sql`SELECT COUNT(*) as cnt FROM ticks`,
+      sql`SELECT COUNT(*) as cnt FROM ml_models`,
+      sql`SELECT model_id, accuracy FROM ml_models ORDER BY trained_at DESC LIMIT 1`,
     ]);
 
     const totalTrades = parseInt(totalTradesRes[0]?.cnt || '0', 10);
@@ -99,38 +68,23 @@ export async function GET(req: NextRequest) {
     const parsedAccuracy = activeModelRes.length > 0 ? Number(activeModelRes[0].accuracy) : NaN;
     const activeAccuracy = Number.isFinite(parsedAccuracy) ? parsedAccuracy : null;
 
-    if (!tradeRows || tradeRows.length === 0) {
+    if (tradeRows.length === 0) {
       return NextResponse.json({
         isDbConnected: true,
         dataSource: 'live-database',
         isSimulated: false,
         realTradesOnly: true,
-        summary: {
-          totalTrades,
-          wins: 0,
-          losses: 0,
-          winRate: 0,
-          totalProfit: 0,
-          totalTicks,
-          totalModels,
-          activeModel,
-          activeAccuracy,
-        },
-        confidenceBrackets: createEmptyConfidenceBrackets(),
-        pnlCurve: createEmptyPnlCurve(),
+        summary: { totalTrades, wins: 0, losses: 0, winRate: 0, totalProfit: 0, totalTicks, totalModels, activeModel, activeAccuracy },
+        confidenceBrackets: [],
+        pnlCurve: [],
         recentTrades: [],
-      });
+      }, { headers: { 'Cache-Control': 'no-store' } });
     }
 
     let wins = 0;
     let losses = 0;
     let pnlDataPoints = 0;
-    const bracketsMap: Record<string, { wins: number; losses: number; total: number }> = {
-      '70-79%': { wins: 0, losses: 0, total: 0 },
-      '80-89%': { wins: 0, losses: 0, total: 0 },
-      '90-100%': { wins: 0, losses: 0, total: 0 },
-    };
-
+    const bracketsMap: Record<string, { wins: number; losses: number; total: number }> = {};
     let cumPnl = 0;
     const pnlCurve: Array<{ tradeIndex: number; pnl: number }> = [];
     const strategyMap: Record<string, { strategy: string; trades: number; wins: number; losses: number }> = {};
@@ -139,64 +93,43 @@ export async function GET(req: NextRequest) {
       const status = String(t.status || '').toUpperCase();
       const stake = Number(t.stake);
       const payout = Number(t.payout);
-      const hasStake = Number.isFinite(stake) && stake >= 0;
-      const hasPayout = Number.isFinite(payout) && payout >= 0;
       const isWin = status === 'WON' || status === 'WIN';
       const isLoss = status === 'LOST' || status === 'LOSS';
-
       if (isWin) wins++;
       if (isLoss) losses++;
 
       const strategy = String(t.strategy || 'Unknown').trim() || 'Unknown';
-      if (!strategyMap[strategy]) {
-        strategyMap[strategy] = { strategy, trades: 0, wins: 0, losses: 0 };
-      }
+      strategyMap[strategy] ??= { strategy, trades: 0, wins: 0, losses: 0 };
       strategyMap[strategy].trades++;
       if (isWin) strategyMap[strategy].wins++;
       if (isLoss) strategyMap[strategy].losses++;
 
-      // Only calculate P&L from actual persisted monetary values. Never invent payout/stake values.
-      if ((isWin || isLoss) && hasStake && hasPayout) {
+      if ((isWin || isLoss) && Number.isFinite(stake) && stake >= 0 && Number.isFinite(payout) && payout >= 0) {
         cumPnl += payout - stake;
         pnlDataPoints++;
       }
-
-      pnlCurve.push({
-        tradeIndex: tradeRows.length - idx,
-        pnl: Number(cumPnl.toFixed(2)),
-      });
+      pnlCurve.push({ tradeIndex: tradeRows.length - idx, pnl: Number(cumPnl.toFixed(2)) });
 
       const confidence = Number(t.prediction_confidence);
       if (!Number.isFinite(confidence) || confidence < 0 || confidence > 100) return;
-
-      let bracketKey: string | null = null;
-      if (confidence >= 90) bracketKey = '90-100%';
-      else if (confidence >= 80) bracketKey = '80-89%';
-      else if (confidence >= 70) bracketKey = '70-79%';
-
-      if (!bracketKey) return;
-      bracketsMap[bracketKey].total++;
-      if (isWin) bracketsMap[bracketKey].wins++;
-      else if (isLoss) bracketsMap[bracketKey].losses++;
+      const bracket = confidence >= 90 ? '90-100%' : confidence >= 80 ? '80-89%' : confidence >= 70 ? '70-79%' : null;
+      if (!bracket) return;
+      bracketsMap[bracket] ??= { wins: 0, losses: 0, total: 0 };
+      bracketsMap[bracket].total++;
+      if (isWin) bracketsMap[bracket].wins++;
+      else if (isLoss) bracketsMap[bracket].losses++;
     });
 
     const resolvedTrades = wins + losses;
     const winRate = resolvedTrades > 0 ? Number(((wins / resolvedTrades) * 100).toFixed(1)) : 0;
-
-    const confidenceBrackets = Object.keys(bracketsMap).map((key) => {
-      const b = bracketsMap[key];
-      const wr = b.total > 0 ? Number(((b.wins / b.total) * 100).toFixed(1)) : 0;
-      return { bracket: key, wins: b.wins, losses: b.losses, total: b.total, winRate: wr };
-    });
-
-    const strategyBreakdown = Object.values(strategyMap)
-      .map((s) => ({
-        ...s,
-        winRate: s.wins + s.losses > 0
-          ? Number(((s.wins / (s.wins + s.losses)) * 100).toFixed(1))
-          : 0,
-      }))
-      .sort((a, b) => b.trades - a.trades);
+    const confidenceBrackets = Object.entries(bracketsMap).map(([bracket, b]) => ({
+      bracket, wins: b.wins, losses: b.losses, total: b.total,
+      winRate: b.total > 0 ? Number(((b.wins / b.total) * 100).toFixed(1)) : 0,
+    }));
+    const strategyBreakdown = Object.values(strategyMap).map((s) => ({
+      ...s,
+      winRate: s.wins + s.losses > 0 ? Number(((s.wins / (s.wins + s.losses)) * 100).toFixed(1)) : 0,
+    })).sort((a, b) => b.trades - a.trades);
 
     const responseData = {
       isDbConnected: true,
@@ -205,20 +138,8 @@ export async function GET(req: NextRequest) {
       realTradesOnly: true,
       generatedAt: new Date().toISOString(),
       summary: {
-        totalTrades,
-        wins,
-        losses,
-        winRate,
-        totalProfit: Number(cumPnl.toFixed(2)),
-        totalTicks,
-        totalModels,
-        activeModel,
-        activeAccuracy,
-        metricsQuality: {
-          recentTradesSampled: tradeRows.length,
-          resolvedTrades,
-          pnlTradesWithCompleteAmounts: pnlDataPoints,
-        },
+        totalTrades, wins, losses, winRate, totalProfit: Number(cumPnl.toFixed(2)), totalTicks, totalModels, activeModel, activeAccuracy,
+        metricsQuality: { recentTradesSampled: tradeRows.length, resolvedTrades, pnlTradesWithCompleteAmounts: pnlDataPoints },
       },
       confidenceBrackets,
       strategyBreakdown,
@@ -227,69 +148,50 @@ export async function GET(req: NextRequest) {
     };
 
     if (redisClient) {
-      try {
-        await redisClient.setex(CACHE_KEY, CACHE_TTL_SECONDS, JSON.stringify(responseData));
-      } catch {
-        logger.warn('Redis cache write error in admin/stats');
-      }
+      try { await redisClient.setex(CACHE_KEY, CACHE_TTL_SECONDS, JSON.stringify(responseData)); } catch { logger.warn('Redis cache write error in admin/stats'); }
     }
-
-    return NextResponse.json(responseData);
+    return NextResponse.json(responseData, { headers: { 'Cache-Control': 'no-store' } });
   } catch (err: any) {
     logger.error(`Error fetching admin stats: ${err.message}`);
-    return NextResponse.json({
-      success: false,
-      isSimulated: false,
-      error: 'Unable to load live admin metrics.',
-    }, { status: 500 });
+    return NextResponse.json({ success: false, isSimulated: false, error: 'Unable to load live admin metrics.' }, { status: 500 });
   }
 }
 
 export async function POST(req: NextRequest) {
-  if (!isAuthValid(req)) {
-    return NextResponse.json({ error: 'Unauthorized admin access.' }, { status: 401 });
-  }
+  if (!isAuthValid(req)) return NextResponse.json({ error: 'Unauthorized admin access.' }, { status: 401 });
 
   try {
     const body = await req.json();
     const { action } = body;
-
     if (action === 'flush_cache') {
       if (redisClient) {
-        try {
-          await redisClient.del(CACHE_KEY);
-        } catch {
-          logger.warn('Failed to flush admin stats cache');
-        }
+        try { await redisClient.del(CACHE_KEY); } catch { logger.warn('Failed to flush admin stats cache'); }
       }
       return NextResponse.json({ success: true, message: 'Stats cache flushed' });
     }
 
     if (action === 'sync_ticks') {
       const isDbConnected = await initDbSchema();
-      if (!isDbConnected) {
-        return NextResponse.json({ success: false, error: 'PostgreSQL Database not connected' }, { status: 400 });
+      if (!isDbConnected) return NextResponse.json({ success: false, error: 'PostgreSQL Database not connected' }, { status: 400 });
+
+      const symbolsResponse = await fetch(new URL('/api/symbols', req.url), { cache: 'no-store' });
+      const symbolsPayload = await symbolsResponse.json().catch(() => null);
+      if (!symbolsResponse.ok || !Array.isArray(symbolsPayload?.symbols)) {
+        return NextResponse.json({ success: false, error: symbolsPayload?.error || 'Live Deriv symbol discovery is unavailable.' }, { status: 503 });
       }
+      const symbolsToSync = symbolsPayload.symbols.filter((item: any) => item?.isOpen && typeof item?.symbol === 'string' && item.symbol.trim()).map((item: any) => item.symbol.trim());
+      if (!symbolsToSync.length) return NextResponse.json({ success: false, error: 'No open Deriv symbols were returned by the live symbol service.' }, { status: 503 });
 
       const { ensureMinTicks } = await import('@/lib/ticks-helper');
-      const symbolsToSync = ['R_100', '1HZ100V', 'R_75', '1HZ75V', 'R_50', '1HZ50V', 'FRXEURUSD', 'CWMXAUUSD'];
       let syncedTotal = 0;
-
       for (const sym of symbolsToSync) {
         const ticks = await ensureMinTicks(sym, 1000, true);
         syncedTotal += ticks.length;
       }
-
       if (redisClient) {
         try { await redisClient.del(CACHE_KEY); } catch {}
       }
-
-      return NextResponse.json({
-        success: true,
-        syncedTotal,
-        dataSource: 'deriv-live-ticks',
-        message: `Successfully synchronized ${syncedTotal.toLocaleString()} real Deriv ticks across ${symbolsToSync.length} assets directly into PostgreSQL.`,
-      });
+      return NextResponse.json({ success: true, syncedTotal, symbolsCount: symbolsToSync.length, dataSource: 'deriv-live-ticks', message: `Successfully synchronized ${syncedTotal.toLocaleString()} real Deriv ticks across ${symbolsToSync.length} live assets directly into PostgreSQL.` });
     }
 
     return NextResponse.json({ error: 'Invalid action' }, { status: 400 });
