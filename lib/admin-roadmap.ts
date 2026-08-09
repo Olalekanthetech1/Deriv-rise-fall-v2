@@ -48,12 +48,12 @@ export const adminRoadmap: RoadmapSection[] = [
     id: 'security',
     title: 'Security & Configuration',
     description: 'Runtime environment posture, secrets exposure, session controls and security events.',
-    status: 'next',
+    status: 'complete',
   },
   {
     id: 'database',
     title: 'Database Operations',
-    description: 'Live connection verification, schema discovery, data integrity and safe maintenance.',
+    description: 'New-schema migration, live Neon verification, data integrity and safe maintenance.',
     status: 'next',
   },
   {
