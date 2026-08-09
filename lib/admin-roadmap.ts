@@ -51,6 +51,12 @@ export const adminRoadmap: RoadmapSection[] = [
     status: 'complete',
   },
   {
+    id: 'ml-config',
+    title: 'ML Pipeline Configuration',
+    description: 'Generate, validate, version and activate the effective ML pipeline configuration from canonical registries.',
+    status: 'next',
+  },
+  {
     id: 'database',
     title: 'Database Operations',
     description: 'New-schema migration, live Neon verification, data integrity and safe maintenance.',
