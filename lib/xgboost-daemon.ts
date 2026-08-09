@@ -1,5 +1,5 @@
 import { spawn, ChildProcess } from 'child_process';
-import { fileURLToPath } from 'url';
+import path from 'path';
 
 interface PendingRequest {
   resolve: (data: any) => void;
@@ -25,7 +25,15 @@ class XGBoostDaemonManager {
   private ensureDaemonRunning() {
     if (this.child) return;
 
-    const pythonScript = fileURLToPath(new URL('../scripts/xgboost_engine.py', import.meta.url));
+    // Resolve the script from the runtime working directory so the production
+    // daemon remains dynamically deployable without exposing the project tree
+    // to Turbopack's file tracer.
+    const pythonScript = path.join(
+      /* turbopackIgnore: true */
+      process.cwd(),
+      'scripts',
+      'xgboost_engine.py',
+    );
 
     try {
       this.child = spawn(process.env.PYTHON_BIN || 'python3', [pythonScript], {
