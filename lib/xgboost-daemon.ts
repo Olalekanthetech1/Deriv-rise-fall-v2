@@ -25,7 +25,7 @@ class XGBoostDaemonManager {
   private ensureDaemonRunning() {
     if (this.child) return;
 
-    const pythonScript = process.env.PYTHON_ML_SCRIPT_PATH?.trim() || 'scripts/xgboost_engine.py';
+    const pythonScript = process.env.PYTHON_ML_SCRIPT_PATH?.trim() || 'scripts/ml_runtime_entry.py';
 
     try {
       this.child = spawn(process.env.PYTHON_BIN || 'python3', [pythonScript], {
