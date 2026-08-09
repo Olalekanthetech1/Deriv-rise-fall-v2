@@ -186,6 +186,12 @@ export async function initDbSchema(): Promise<boolean> {
     `;
 
     await sql`
+      CREATE UNIQUE INDEX IF NOT EXISTS uq_production_model_asset_horizon
+      ON ml_model_registry_v2 (asset_symbol, horizon_ticks)
+      WHERE status = 'production'
+    `;
+
+    await sql`
       CREATE TABLE IF NOT EXISTS ml_model_metrics (
         id BIGSERIAL PRIMARY KEY,
         model_id VARCHAR(160) NOT NULL REFERENCES ml_model_registry_v2(model_id) ON DELETE CASCADE,
