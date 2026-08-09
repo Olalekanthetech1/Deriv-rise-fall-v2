@@ -1,7 +1,17 @@
+export type MlModelKey =
+  | 'xgboost'
+  | 'lightgbm'
+  | 'catboost'
+  | 'tcn'
+  | 'lstm'
+  | 'transformer'
+  | 'hmm'
+  | 'isolation_forest';
+
 export type MlModelFamily = 'tabular' | 'sequential' | 'regime' | 'anomaly';
 
 export type MlModelDefinition = {
-  key: string;
+  key: MlModelKey;
   displayName: string;
   family: MlModelFamily;
   predictive: boolean;
@@ -18,8 +28,6 @@ export const ML_MODEL_DEFINITIONS = [
   { key: 'hmm', displayName: 'HMM Regime Model', family: 'regime', predictive: false, defaultHyperparameters: { components: 4, iterations: 100, randomState: 42 } },
   { key: 'isolation_forest', displayName: 'Isolation Forest', family: 'anomaly', predictive: false, defaultHyperparameters: { numEstimators: 200, randomState: 42, nJobs: 2 } },
 ] as const satisfies readonly MlModelDefinition[];
-
-export type MlModelKey = typeof ML_MODEL_DEFINITIONS[number]['key'];
 
 export function getMlModelDefinitions(): readonly MlModelDefinition[] {
   return ML_MODEL_DEFINITIONS;
