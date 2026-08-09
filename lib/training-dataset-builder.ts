@@ -213,7 +213,8 @@ export async function buildTrainingDataset(request: DatasetBuildRequest): Promis
 
   const { assetCategory } = await resolveAssetContext(sql, symbol);
   const now = new Date();
-  const version = `v${now.toISOString().replace(/[-:.TZ]/g, '').slice(0, 14)}`;
+  const isoVersion = now.toISOString();
+  const version = `v${isoVersion.replaceAll('-', '').replaceAll(':', '').replaceAll('.', '').replace('T', '').replace('Z', '').slice(0, 14)}`;
   const name = String(request.datasetName ?? `Deriv ${symbol} ${horizonTicks}-tick direction dataset`).trim().slice(0, 160);
   const datasetId = crypto.randomUUID();
   const hash = crypto.createHash('sha256');
