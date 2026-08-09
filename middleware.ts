@@ -3,35 +3,41 @@ import type { NextRequest } from 'next/server';
 import { checkRateLimit } from '@/lib/rate-limiter';
 
 export async function middleware(request: NextRequest) {
-  const ip = request.headers.get('x-forwarded-for') ?? request.headers.get('x-real-ip') ?? '127.0.0.1';
-  
+  const ip = request.headers.get('x-forwarded-for')?.split(',')[0]?.trim()
+    ?? request.headers.get('x-real-ip')
+    ?? 'unknown';
+
   if (request.nextUrl.pathname.startsWith('/api/')) {
-    const isAdminRoute = request.nextUrl.pathname.startsWith('/api/admin/');
-    const isMlRoute = request.nextUrl.pathname.startsWith('/api/ml/');
-    const isWsRoute = request.nextUrl.pathname.startsWith('/api/db/ticks');
-    
-    let routeType: 'ml' | 'ws' | 'api' = 'api';
-    if (isMlRoute) routeType = 'ml';
+    const pathname = request.nextUrl.pathname;
+    const isAdminRoute = pathname.startsWith('/api/admin/');
+    const isAuthRoute = pathname === '/api/admin/auth';
+    const isMlRoute = pathname.startsWith('/api/ml/');
+    const isWsRoute = pathname.startsWith('/api/db/ticks');
+
+    let routeType: 'ml' | 'auth' | 'ws' | 'api' = 'api';
+    if (isAuthRoute) routeType = 'auth';
+    else if (isMlRoute) routeType = 'ml';
     else if (isWsRoute) routeType = 'ws';
-    
-    // Dedicated namespace for admin actions and force retrain triggers to avoid rate limit collisions
+
+    // Keep authentication traffic isolated from normal admin/API throughput.
     const keyPrefix = isAdminRoute ? 'admin_' : '';
     const { success, limit, remaining, reset } = await checkRateLimit(
-      `${keyPrefix}${ip}_${routeType}`, 
-      routeType
+      `${keyPrefix}${ip}_${routeType}`,
+      routeType,
     );
-    
+
     if (!success) {
       return NextResponse.json(
         { error: 'Rate limit exceeded. Please try again in a few seconds.' },
-        { 
+        {
           status: 429,
           headers: {
             'X-RateLimit-Limit': limit.toString(),
             'X-RateLimit-Remaining': remaining.toString(),
             'X-RateLimit-Reset': reset.toString(),
-          }
-        }
+            'Cache-Control': 'no-store',
+          },
+        },
       );
     }
   }
@@ -42,4 +48,3 @@ export async function middleware(request: NextRequest) {
 export const config = {
   matcher: '/api/:path*',
 };
-
