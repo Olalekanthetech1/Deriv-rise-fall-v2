@@ -65,7 +65,7 @@ export const adminRoadmap: RoadmapSection[] = [
   {
     id: 'dataset-builder',
     title: 'Training Dataset Builder',
-    description: 'Real-tick feature windows, future-direction labels, chronological splits and leakage validation.',
+    description: 'In progress: source/lineage, asset metadata, registry-driven feature schema and configurable horizons are implemented; target generation, leakage gates, normalization, versioned splits, quality reports, UI verification and dataset registry hardening remain.',
     status: 'next',
   },
   {
