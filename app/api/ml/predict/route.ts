@@ -2,6 +2,7 @@ import { NextRequest, NextResponse } from 'next/server';
 import { PredictSchema } from '@/lib/validation-schemas';
 import { evaluateProductionEnsemble } from '@/lib/production-ensemble';
 import { ensureMinTicks } from '@/lib/ticks-helper';
+import { getMlRuntimeSchemaContract } from '@/lib/ml-runtime-schema';
 
 export async function POST(req: NextRequest) {
   try {
@@ -12,9 +13,11 @@ export async function POST(req: NextRequest) {
     }
 
     const { symbol, ticks, durationSecs, assetCategory } = parseResult.data;
+    const schema = await getMlRuntimeSchemaContract();
+    const requiredContextTicks = Math.max(schema.canonicalFeatureWindowTicks, schema.sequenceLength);
     let tickList = Array.isArray(ticks) && ticks.length > 0 ? ticks : [];
-    if (tickList.length < 5) tickList = await ensureMinTicks(symbol, 100);
-    if (tickList.length < 5) return NextResponse.json({ success: false, error: `Insufficient ticks for ${symbol}.` }, { status: 422 });
+    if (tickList.length < requiredContextTicks) tickList = await ensureMinTicks(symbol, requiredContextTicks);
+    if (tickList.length < requiredContextTicks) return NextResponse.json({ success: false, error: `Insufficient ticks for ${symbol}.` }, { status: 422 });
 
     const startTime = Date.now();
     const ensemble = await evaluateProductionEnsemble(tickList, { symbol, durationSecs, assetCategory });
@@ -51,15 +54,7 @@ export async function POST(req: NextRequest) {
       volatilityRank: Number.isFinite(Number(feat.macro_volatility)) ? Number(feat.macro_volatility) : null,
     };
 
-    return NextResponse.json({
-      success: true,
-      prediction: enrichedPrediction,
-      confidence: ensemble.confidence,
-      marketRegime: ensemble.marketRegime,
-      anomalyScore: ensemble.anomalyScore,
-      modelBreakdown: ensemble.modelBreakdown,
-      multiModelEnsemble: ensemble,
-    }, { headers: { 'Cache-Control': 'no-store' } });
+    return NextResponse.json({ success: true, prediction: enrichedPrediction, confidence: ensemble.confidence, marketRegime: ensemble.marketRegime, anomalyScore: ensemble.anomalyScore, modelBreakdown: ensemble.modelBreakdown, multiModelEnsemble: ensemble }, { headers: { 'Cache-Control': 'no-store' } });
   } catch (err: any) {
     console.error('[ML Predict Route Error]:', err);
     return NextResponse.json({ success: false, error: err?.message || 'Prediction failed' }, { status: 500 });
