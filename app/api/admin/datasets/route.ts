@@ -1,7 +1,7 @@
 import { NextRequest, NextResponse } from 'next/server';
 import { verifySessionToken } from '../auth/route';
 import { buildAllSupportedDurationDatasets, buildDurationTrainingDataset, getSupportedDurationDiscovery, listDurationTrainingDatasets } from '@/lib/training-dataset-builder-duration-v2';
-import { expandTrainingDurations } from '@/lib/deriv-duration-registry';
+import { expandTrainingDurations, type DerivDurationRange, type DerivDurationUnit } from '@/lib/deriv-duration-registry';
 
 function isAuthenticated(req: NextRequest): boolean {
   const cookieToken = req.cookies.get('admin_session_token')?.value;
@@ -9,12 +9,61 @@ function isAuthenticated(req: NextRequest): boolean {
   return verifySessionToken(cookieToken) || verifySessionToken(headerToken);
 }
 function noStore() { return { 'Cache-Control': 'no-store, max-age=0' }; }
-function validUnit(value: unknown): value is 't' | 's' | 'm' | 'h' | 'd' { return value === 't' || value === 's' || value === 'm' || value === 'h' || value === 'd'; }
-function matchingRanges(discovery: Awaited<ReturnType<typeof getSupportedDurationDiscovery>>, value: number, unit: 't' | 's' | 'm' | 'h' | 'd') {
+function validUnit(value: unknown): value is DerivDurationUnit { return value === 't' || value === 's' || value === 'm' || value === 'h' || value === 'd'; }
+function matchingRanges(discovery: Awaited<ReturnType<typeof getSupportedDurationDiscovery>>, value: number, unit: DerivDurationUnit) {
   return discovery.ranges.filter((range) => {
     if (range.unit !== unit || value < range.min || value > range.max) return false;
     const step = Number.isSafeInteger(range.step) && range.step > 0 ? range.step : 1;
     return (value - range.min) % step === 0;
+  });
+}
+
+/**
+ * Deriv's current contracts_for/proposal APIs expose a valid duration range,
+ * but do not expose a discrete UI duration-choice list. A proposal can accept
+ * every integer second/minute inside that range. The dataset builder therefore
+ * needs a bounded, human-usable training horizon ladder instead of rendering
+ * 60k+ individual seconds. The ladder is derived from each broker range; it is
+ * not an assertion that omitted values are unsupported by Deriv.
+ */
+function expandTrainingHorizonLadder(ranges: DerivDurationRange[]): Array<{ value: number; unit: DerivDurationUnit; rangeId: string }> {
+  const result: Array<{ value: number; unit: DerivDurationUnit; rangeId: string }> = [];
+
+  for (const range of ranges) {
+    const brokerStep = Number.isSafeInteger(range.step) && range.step > 0 ? range.step : 1;
+    let displayStep = brokerStep;
+    let start = range.min;
+
+    // Seconds/minutes can have very large integer-valued broker ranges. Use a
+    // dynamically bounded 15-unit training cadence when the broker itself has
+    // a 1-unit granularity; the exact broker range remains authoritative and
+    // POST validation still accepts any broker-valid value.
+    if ((range.unit === 's' || range.unit === 'm') && brokerStep === 1 && range.max - range.min >= 15) {
+      displayStep = Math.max(15, range.min);
+      start = Math.ceil(range.min / displayStep) * displayStep;
+      if (start > range.max) start = range.min;
+      if (start !== range.min) result.push({ value: range.min, unit: range.unit, rangeId: range.id });
+    }
+
+    const count = Math.floor((range.max - start) / displayStep) + 1;
+    const boundedCount = Math.min(count, 10000);
+    for (let index = 0; index < boundedCount; index += 1) {
+      const value = start + index * displayStep;
+      if (value > range.max) break;
+      result.push({ value, unit: range.unit, rangeId: range.id });
+    }
+
+    if (!result.some((item) => item.rangeId === range.id && item.value === range.max)) {
+      result.push({ value: range.max, unit: range.unit, rangeId: range.id });
+    }
+  }
+
+  const seen = new Set<string>();
+  return result.filter((item) => {
+    const key = `${item.value}:${item.unit}`;
+    if (seen.has(key)) return false;
+    seen.add(key);
+    return true;
   });
 }
 
@@ -25,7 +74,16 @@ export async function GET(req: NextRequest) {
     const datasets = await listDurationTrainingDatasets(symbol);
     if (!symbol) return NextResponse.json({ success: true, datasets, durationSource: 'deriv-dynamic' }, { headers: noStore() });
     const discovery = await getSupportedDurationDiscovery(symbol);
-    return NextResponse.json({ success: true, datasets, durationSource: discovery.source, durationDiscovery: discovery, trainingHorizons: expandTrainingDurations(discovery.ranges) }, { headers: noStore() });
+    return NextResponse.json({
+      success: true,
+      datasets,
+      durationSource: discovery.source,
+      durationDiscovery: discovery,
+      trainingHorizons: expandTrainingHorizonLadder(discovery.ranges),
+      // Keep the exact broker ranges available to callers that need arbitrary
+      // valid durations, while the UI receives a bounded training ladder.
+      brokerTrainingHorizons: expandTrainingDurations(discovery.ranges),
+    }, { headers: noStore() });
   } catch (error) {
     return NextResponse.json({ success: false, error: error instanceof Error ? error.message : 'Unable to load training dataset operations.' }, { status: 503, headers: noStore() });
   }
