@@ -105,7 +105,7 @@ async function reconcileStaleTrainingRuns(sql: any): Promise<number> {
     SELECT run_id
     FROM ml_training_runs
     WHERE status='running'
-      AND COALESCE(heartbeat_at, updated_at, started_at, created_at) < NOW() - (${staleMs} * INTERVAL '1 millisecond')
+      AND COALESCE(heartbeat_at, updated_at, started_at, created_at) < NOW() - (${staleMs}::bigint * INTERVAL '1 millisecond')
   `;
   if (!staleRuns.length) return 0;
 
