@@ -3,6 +3,8 @@ import { neon } from '@neondatabase/serverless';
 import { verifySessionToken } from '../../auth/route';
 import { getDbConnectionString, initDbSchema } from '@/lib/db';
 import { ensureTrainingDurationSchema } from '@/lib/training-duration-schema';
+import { cancelAutoDatasetItemsForDataset } from '@/lib/auto-dataset-job-store';
+import type { DerivDurationUnit } from '@/lib/deriv-duration-registry';
 
 function isAuthenticated(req: NextRequest): boolean {
   const cookieToken = req.cookies.get('admin_session_token')?.value;
@@ -16,6 +18,10 @@ function noStore() {
 
 function validId(value: string): boolean {
   return /^[0-9a-fA-F-]{36}$/.test(value);
+}
+
+function validDurationUnit(value: unknown): value is DerivDurationUnit {
+  return value === 't' || value === 's' || value === 'm' || value === 'h' || value === 'd';
 }
 
 export async function DELETE(req: NextRequest, context: { params: Promise<{ id: string }> }) {
@@ -77,6 +83,17 @@ export async function DELETE(req: NextRequest, context: { params: Promise<{ id: 
       }, { status: 409, headers: noStore() });
     }
 
+    // AUTO builds are durable and can continue after the UI request that started them.
+    // Cancel the matching pending/running item before deletion so it cannot recreate
+    // the dataset after this DELETE succeeds. The worker also checks cancellation
+    // after a build completes to close the in-flight race window.
+    const durationValue = Number(dataset.duration_value);
+    const durationUnit = String(dataset.duration_unit ?? '');
+    let cancelledAutoItems = 0;
+    if (Number.isSafeInteger(durationValue) && durationValue > 0 && validDurationUnit(durationUnit)) {
+      cancelledAutoItems = await cancelAutoDatasetItemsForDataset(String(dataset.asset_symbol), durationValue, durationUnit);
+    }
+
     const deleted = await sql`
       DELETE FROM training_datasets
       WHERE id = ${id}::uuid
@@ -90,7 +107,8 @@ export async function DELETE(req: NextRequest, context: { params: Promise<{ id: 
     return NextResponse.json({
       success: true,
       deletedDataset: deleted[0],
-      message: 'Training dataset deleted. Persisted dataset samples were removed by the dataset foreign-key cascade.',
+      cancelledAutoItems,
+      message: 'Training dataset deleted. Persisted dataset samples were removed by the dataset foreign-key cascade, and matching AUTO build work was cancelled to prevent resurrection.',
     }, { headers: noStore() });
   } catch (error) {
     console.error('[Admin dataset delete] failed:', error);
