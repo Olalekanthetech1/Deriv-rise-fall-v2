@@ -5,6 +5,7 @@ interface PendingRequest {
   resolve: (data: any) => void;
   reject: (err: any) => void;
   timer: NodeJS.Timeout;
+  onProgress?: (data: any) => void;
 }
 
 type DaemonAction = 'predict' | 'predict_ensemble' | 'train' | 'train_partitioned' | 'list_models' | 'ping' | 'backtest';
@@ -74,6 +75,11 @@ class XGBoostDaemonManager {
             if (data.type === 'ready') {
               this.isReady = true;
               this.restartDelay = 1000;
+              continue;
+            }
+            if (data.type === 'progress' && data.id && this.pending.has(data.id)) {
+              const req = this.pending.get(data.id)!;
+              try { req.onProgress?.(data); } catch { /* diagnostics must never break training */ }
               continue;
             }
             if (data.id && this.pending.has(data.id)) {
@@ -149,7 +155,11 @@ class XGBoostDaemonManager {
     'backtest',
   ]);
 
-  public async sendCommand(action: DaemonAction, payload: Record<string, any> = {}): Promise<any> {
+  public async sendCommand(
+    action: DaemonAction,
+    payload: Record<string, any> = {},
+    options: { onProgress?: (data: any) => void } = {},
+  ): Promise<any> {
     if (!XGBoostDaemonManager.ALLOWED_ACTIONS.has(action)) throw new Error(`Unauthorized daemon action: ${action}`);
     this.ensureDaemonRunning();
     if (!this.child?.stdin?.writable) throw new Error('Python ML daemon unavailable');
@@ -194,6 +204,7 @@ class XGBoostDaemonManager {
         resolve: (data: any) => resolve(attachClientRoundTripTiming(data, Date.now() - roundTripStartedAt)),
         reject,
         timer,
+        onProgress: options.onProgress,
       });
 
       try {
