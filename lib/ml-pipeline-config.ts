@@ -16,6 +16,7 @@ export type FeatureWindowConfig = {
 
 export type FeaturePipelineConfig = {
   pipelineVersion: string;
+  /** Derived from featureWindows.macro; retained in persisted config/schema for lineage compatibility. */
   canonicalFeatureWindowTicks: number;
   defaultHorizonTicks: number;
   maxHorizonTicks: number;
@@ -100,6 +101,14 @@ function requiredStringArray(value: unknown, path: string): string[] {
   return result;
 }
 
+/**
+ * The effective observation window is derived from the configured feature-window topology.
+ * It is deliberately not a universal 300-tick constant.
+ */
+export function deriveCanonicalFeatureWindowTicks(featureWindows: FeatureWindowConfig): number {
+  return featureWindows.macro;
+}
+
 function canonicalizeConfig(source: UnknownRecord): FeaturePipelineConfig {
   const bootstrap = buildBootstrapMlPipelineConfig();
   const featureWindowsSource = asRecord(source.featureWindows ?? bootstrap.featureWindows, 'featureWindows');
@@ -112,17 +121,13 @@ function canonicalizeConfig(source: UnknownRecord): FeaturePipelineConfig {
     macro: requiredPositiveInteger(featureWindowsSource.macro, 'featureWindows.macro'),
   };
 
-  if (JSON.stringify(featureWindows) !== JSON.stringify(bootstrap.featureWindows)) {
-    throw new Error('[ML Config] featureWindows must match the canonical feature registry topology.');
+  if (!(featureWindows.micro <= featureWindows.short && featureWindows.short <= featureWindows.medium && featureWindows.medium <= featureWindows.macro)) {
+    throw new Error('[ML Config] featureWindows must be ordered micro <= short <= medium <= macro.');
   }
 
-  const canonicalFeatureWindowTicks = requiredPositiveInteger(
-    source.canonicalFeatureWindowTicks ?? bootstrap.canonicalFeatureWindowTicks,
-    'canonicalFeatureWindowTicks',
-  );
-  if (canonicalFeatureWindowTicks !== bootstrap.canonicalFeatureWindowTicks) {
-    throw new Error('[ML Config] canonicalFeatureWindowTicks must match the canonical 300-tick feature window.');
-  }
+  // Older persisted configs may still contain canonicalFeatureWindowTicks=300.
+  // Treat that field as lineage metadata and derive the effective value from the active topology.
+  const canonicalFeatureWindowTicks = deriveCanonicalFeatureWindowTicks(featureWindows);
 
   const defaultHorizonTicks = requiredPositiveInteger(source.defaultHorizonTicks ?? bootstrap.defaultHorizonTicks, 'defaultHorizonTicks');
   const maxHorizonTicks = requiredPositiveInteger(source.maxHorizonTicks ?? bootstrap.maxHorizonTicks, 'maxHorizonTicks');
@@ -174,7 +179,7 @@ function buildSchemaFingerprint(config: FeaturePipelineConfig, featureOrder: rea
     featureOrder: [...featureOrder],
     featureDefinitions,
     featureWindows: config.featureWindows,
-    canonicalFeatureWindowTicks: config.canonicalFeatureWindowTicks,
+    canonicalFeatureWindowTicks: deriveCanonicalFeatureWindowTicks(config.featureWindows),
     sequenceLength: config.featureWindows.short,
     defaultHorizonTicks: config.defaultHorizonTicks,
     regimeThreshold: config.regimeThreshold,
@@ -283,7 +288,7 @@ export function isSyntheticSymbol(symbol: string, config: FeaturePipelineConfig 
 }
 
 export function getCanonicalWindowTicks(config: FeaturePipelineConfig = getMlPipelineConfig()): number {
-  return config.canonicalFeatureWindowTicks;
+  return deriveCanonicalFeatureWindowTicks(config.featureWindows);
 }
 
 export function getDefaultHorizonTicks(config: FeaturePipelineConfig = getMlPipelineConfig()): number {
