@@ -7,6 +7,7 @@ from __future__ import annotations
 
 import json
 import sys
+import time
 
 import ml_native_runtime as runtime
 import ml_duration_training as duration_training
@@ -17,6 +18,30 @@ from ml_duration_runtime_adapter import install as install_duration_runtime_adap
 install_duration_runtime_adapter()
 
 ACTIONS = ("predict", "predict_ensemble", "train", "train_partitioned", "list_models", "ping", "backtest")
+
+
+def _attach_runtime_timing(output: dict, elapsed_ms: float) -> dict:
+    if not isinstance(output, dict):
+        return output
+
+    next_output = dict(output)
+    elapsed = round(float(elapsed_ms), 3)
+
+    metrics = next_output.get("metrics")
+    if isinstance(metrics, dict):
+      next_metrics = dict(metrics)
+      timings = next_metrics.get("timings") if isinstance(next_metrics.get("timings"), dict) else {}
+      timings = dict(timings)
+      timings["daemonDispatchMs"] = elapsed
+      next_metrics["timings"] = timings
+      next_output["metrics"] = next_metrics
+      return next_output
+
+    timings = next_output.get("timings") if isinstance(next_output.get("timings"), dict) else {}
+    timings = dict(timings)
+    timings["daemonDispatchMs"] = elapsed
+    next_output["timings"] = timings
+    return next_output
 
 
 def dispatch(request: dict) -> dict:
@@ -81,11 +106,16 @@ def main() -> None:
 
     for line in sys.stdin:
         request: dict = {}
+        started = time.perf_counter()
         try:
             request = json.loads(line)
             output = dispatch(request)
         except Exception as exc:
             output = {"success": False, "id": request.get("id") if isinstance(request, dict) else None, "error": str(exc)}
+        finally:
+            elapsed_ms = (time.perf_counter() - started) * 1000.0
+            if isinstance(output, dict):
+                output = _attach_runtime_timing(output, elapsed_ms)
         sys.stdout.write(json.dumps(output, default=str) + "\n")
         sys.stdout.flush()
 
