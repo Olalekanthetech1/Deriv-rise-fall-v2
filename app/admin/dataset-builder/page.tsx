@@ -2,7 +2,7 @@
 
 import Link from 'next/link';
 import { useEffect, useMemo, useState } from 'react';
-import { AlertTriangle, ArrowLeft, Beaker, CheckCircle2, Database, RefreshCw, ShieldCheck, Sparkles } from 'lucide-react';
+import { AlertTriangle, ArrowLeft, Beaker, CheckCircle2, Database, RefreshCw, ShieldCheck, Sparkles, Trash2, X } from 'lucide-react';
 
 type SymbolItem = { symbol: string; displayName: string; market: string; submarket: string; isOpen: boolean; isAvailable: boolean };
 type DurationUnit = 't' | 's' | 'm' | 'h' | 'd';
@@ -12,6 +12,7 @@ type DurationDiscovery = { symbol: string; ranges: DurationRange[]; fetchedAt: s
 type Dataset = { id: string; name: string; version: string; asset_symbol: string; horizon_ticks: number; duration_value: number | null; duration_unit: DurationUnit | null; duration_seconds: number | null; horizon_type: 'tick' | 'time' | null; contract_type: string | null; feature_schema_version: string; label_schema_version: string; sample_count: number; train_count: number; validation_count: number; test_count: number; status: string; leakage_check_passed: boolean; checksum: string | null; created_at: string; metadata?: { assetDisplayName?: string; qualityReport?: { status?: string } } | null };
 type ApiState = { datasets: Dataset[]; discovery: DurationDiscovery | null; horizons: TrainingHorizon[] };
 type AutoJob = { id: string; symbol: string; status: 'running' | 'completed' | 'failed'; requestedCount: number; completedCount: number; failedCount: number; failures?: Array<{ value: number; unit: DurationUnit; error: string }> };
+type DeleteDependency = { runningTrainingRuns: number; trainingRuns: number; registeredModels: number };
 
 const unitLabel: Record<DurationUnit, string> = { t: 'ticks', s: 'seconds', m: 'minutes', h: 'hours', d: 'days' };
 const units: Array<{ unit: DurationUnit; label: string }> = [{ unit: 't', label: 'TICKS' }, { unit: 's', label: 'SEC' }, { unit: 'm', label: 'MIN' }, { unit: 'h', label: 'HOUR' }, { unit: 'd', label: 'DAY' }];
@@ -37,6 +38,10 @@ export default function TrainingDatasetBuilderPage() {
   const [selectedHorizon, setSelectedHorizon] = useState('');
   const [error, setError] = useState<string | null>(null);
   const [success, setSuccess] = useState<string | null>(null);
+  const [deleteTarget, setDeleteTarget] = useState<Dataset | null>(null);
+  const [deletingId, setDeletingId] = useState<string | null>(null);
+  const [deleteDependencies, setDeleteDependencies] = useState<DeleteDependency | null>(null);
+  const [deleteError, setDeleteError] = useState<string | null>(null);
 
   const availableSymbols = useMemo(() => symbols.filter((item) => item.isAvailable), [symbols]);
   const selectedAsset = availableSymbols.find((item) => item.symbol === selectedSymbol);
@@ -140,6 +145,44 @@ export default function TrainingDatasetBuilderPage() {
     } catch (err) { setBuildingAll(false); setError(err instanceof Error ? err.message : 'Unable to start AUTO dataset build.'); }
   }
 
+  function openDeleteDialog(dataset: Dataset) {
+    setDeleteTarget(dataset);
+    setDeleteDependencies(null);
+    setDeleteError(null);
+  }
+
+  function closeDeleteDialog() {
+    if (deletingId) return;
+    setDeleteTarget(null);
+    setDeleteDependencies(null);
+    setDeleteError(null);
+  }
+
+  async function deleteDataset() {
+    if (!deleteTarget || deletingId) return;
+    const dataset = deleteTarget;
+    setDeletingId(dataset.id);
+    setDeleteError(null);
+    setDeleteDependencies(null);
+    try {
+      const response = await fetch(`/api/admin/datasets/${encodeURIComponent(dataset.id)}`, { method: 'DELETE', cache: 'no-store' });
+      const data = await readJson(response);
+      if (!response.ok || !data?.success) {
+        const dependencies = data?.dependencies as DeleteDependency | undefined;
+        if (dependencies) setDeleteDependencies(dependencies);
+        throw new Error(data?.message || data?.error || 'Unable to delete training dataset.');
+      }
+      setState((current) => ({ ...current, datasets: current.datasets.filter((item) => item.id !== dataset.id) }));
+      setDeleteTarget(null);
+      setDeleteDependencies(null);
+      setSuccess(`Deleted dataset ${dataset.name}.`);
+    } catch (err) {
+      setDeleteError(err instanceof Error ? err.message : 'Unable to delete training dataset.');
+    } finally {
+      setDeletingId(null);
+    }
+  }
+
   const progress = autoJob ? Math.min(100, Math.round(((autoJob.completedCount + autoJob.failedCount) / Math.max(1, autoJob.requestedCount)) * 100)) : 0;
 
   return <main className="min-h-screen bg-[#05070b] px-4 py-5 text-slate-100 sm:px-6 lg:px-8"><div className="mx-auto max-w-[1400px]">
@@ -156,6 +199,7 @@ export default function TrainingDatasetBuilderPage() {
       </article>
       <article className="rounded-3xl border border-white/10 bg-white/[0.025] p-5"><div className="mb-5 flex items-center gap-2 text-sm font-bold text-emerald-300"><ShieldCheck className="h-4 w-4" />Dynamic duration contract</div>{!state.discovery ? <p className="text-sm text-slate-500">Select an asset to query Deriv duration metadata.</p> : autoMode ? <div className="space-y-3">{state.discovery.ranges.map((range) => <div key={range.id} className="rounded-2xl border border-white/10 bg-black/20 p-3"><div className="flex items-center justify-between"><span className="font-semibold text-slate-200">{formatDuration(range.min, range.unit)}{range.min !== range.max ? ` – ${formatDuration(range.max, range.unit)}` : ''}</span><span className="text-[10px] uppercase text-emerald-300">Deriv</span></div>{range.tradeTypes.length > 0 && <p className="mt-1 text-[11px] text-slate-500">Trade type: {range.tradeTypes.join(', ')}</p>}</div>)}</div> : selectedUnitRange.length === 0 ? <p className="text-sm text-slate-500">Deriv did not advertise a {unitLabel[selectedUnit]} duration for this asset.</p> : <div className="space-y-3">{selectedUnitRange.map((range) => <div key={range.id} className="rounded-2xl border border-white/10 bg-black/20 p-3"><span className="font-semibold text-slate-200">{formatDuration(range.min, range.unit)}{range.min !== range.max ? ` – ${formatDuration(range.max, range.unit)}` : ''}</span><span className="ml-2 text-[10px] uppercase text-emerald-300">Deriv</span></div>)}</div>}<p className="mt-4 text-[11px] text-slate-500">Source: {state.discovery?.source || 'waiting for Deriv'}.</p></article>
     </section>
-    <section className="rounded-3xl border border-white/10 bg-white/[0.025] p-5"><div className="mb-4 flex items-end justify-between"><div><h2 className="text-lg font-bold">Built datasets</h2><p className="mt-1 text-xs text-slate-500">Each dataset records asset, duration value/unit, effective tick horizon and lineage.</p></div><span className="text-xs text-slate-500">{state.datasets.length} shown</span></div>{state.datasets.length === 0 ? <div className="rounded-2xl border border-dashed border-white/10 p-8 text-center text-sm text-slate-500">No duration-aware training datasets have been built for this asset.</div> : <div className="grid gap-3 lg:grid-cols-2">{state.datasets.map((dataset) => <article key={dataset.id} className="rounded-2xl border border-white/10 bg-black/20 p-4"><div className="flex items-start justify-between gap-3"><div><h3 className="font-bold text-slate-100">{dataset.name}</h3><p className="mt-1 text-xs text-slate-500">{dataset.metadata?.assetDisplayName || dataset.asset_symbol} · {dataset.duration_value && dataset.duration_unit ? formatDuration(Number(dataset.duration_value), dataset.duration_unit) : `${dataset.horizon_ticks} ticks`}</p></div><span className="rounded-full border border-emerald-400/20 bg-emerald-400/10 px-2.5 py-1 text-[10px] font-semibold text-emerald-300">{dataset.status.toUpperCase()}</span></div><div className="mt-4 grid grid-cols-2 gap-3 text-xs text-slate-400 sm:grid-cols-4"><div><span className="block text-slate-600">Samples</span>{Number(dataset.sample_count).toLocaleString()}</div><div><span className="block text-slate-600">Train</span>{Number(dataset.train_count).toLocaleString()}</div><div><span className="block text-slate-600">Validation</span>{Number(dataset.validation_count).toLocaleString()}</div><div><span className="block text-slate-600">Test</span>{Number(dataset.test_count).toLocaleString()}</div></div></article>)}</div>}</section>
+    <section className="rounded-3xl border border-white/10 bg-white/[0.025] p-5"><div className="mb-4 flex items-end justify-between"><div><h2 className="text-lg font-bold">Built datasets</h2><p className="mt-1 text-xs text-slate-500">Each dataset records asset, duration value/unit, effective tick horizon and lineage.</p></div><span className="text-xs text-slate-500">{state.datasets.length} shown</span></div>{state.datasets.length === 0 ? <div className="rounded-2xl border border-dashed border-white/10 p-8 text-center text-sm text-slate-500">No duration-aware training datasets have been built for this asset.</div> : <div className="grid gap-3 lg:grid-cols-2">{state.datasets.map((dataset) => <article key={dataset.id} className="rounded-2xl border border-white/10 bg-black/20 p-4"><div className="flex items-start justify-between gap-3"><div><h3 className="font-bold text-slate-100">{dataset.name}</h3><p className="mt-1 text-xs text-slate-500">{dataset.metadata?.assetDisplayName || dataset.asset_symbol} · {dataset.duration_value && dataset.duration_unit ? formatDuration(Number(dataset.duration_value), dataset.duration_unit) : `${dataset.horizon_ticks} ticks`}</p></div><div className="flex items-center gap-2"><span className="rounded-full border border-emerald-400/20 bg-emerald-400/10 px-2.5 py-1 text-[10px] font-semibold text-emerald-300">{dataset.status.toUpperCase()}</span><button type="button" onClick={() => openDeleteDialog(dataset)} disabled={Boolean(deletingId) || building || buildingAll} aria-label={`Delete dataset ${dataset.name}`} title="Delete dataset" className="inline-flex h-8 w-8 items-center justify-center rounded-lg border border-red-400/20 bg-red-400/5 text-red-300 transition hover:border-red-400/40 hover:bg-red-400/10 disabled:cursor-not-allowed disabled:opacity-40"><Trash2 className="h-4 w-4" /></button></div></div><div className="mt-4 grid grid-cols-2 gap-3 text-xs text-slate-400 sm:grid-cols-4"><div><span className="block text-slate-600">Samples</span>{Number(dataset.sample_count).toLocaleString()}</div><div><span className="block text-slate-600">Train</span>{Number(dataset.train_count).toLocaleString()}</div><div><span className="block text-slate-600">Validation</span>{Number(dataset.validation_count).toLocaleString()}</div><div><span className="block text-slate-600">Test</span>{Number(dataset.test_count).toLocaleString()}</div></div></article>)}</div>}</section>
+    {deleteTarget && <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/70 p-4 backdrop-blur-sm" role="presentation" onMouseDown={(event) => { if (event.target === event.currentTarget) closeDeleteDialog(); }}><section role="dialog" aria-modal="true" aria-labelledby="delete-dataset-title" className="w-full max-w-lg rounded-3xl border border-red-400/20 bg-[#0a0d13] p-5 shadow-2xl"><div className="flex items-start justify-between gap-4"><div className="flex items-start gap-3"><div className="rounded-xl border border-red-400/20 bg-red-400/10 p-2.5"><Trash2 className="h-5 w-5 text-red-300" /></div><div><h2 id="delete-dataset-title" className="text-lg font-black text-slate-100">Delete dataset?</h2><p className="mt-1 text-xs text-slate-500">This action permanently removes the dataset if the server confirms that it has no protected training or model lineage.</p></div></div><button type="button" onClick={closeDeleteDialog} disabled={Boolean(deletingId)} aria-label="Close delete dialog" className="rounded-lg p-2 text-slate-500 hover:bg-white/5 hover:text-slate-200 disabled:opacity-40"><X className="h-4 w-4" /></button></div><div className="mt-5 rounded-2xl border border-white/10 bg-white/[0.03] p-4"><p className="font-semibold text-slate-200">{deleteTarget.name}</p><p className="mt-1 text-xs text-slate-500">{deleteTarget.metadata?.assetDisplayName || deleteTarget.asset_symbol} · {deleteTarget.duration_value && deleteTarget.duration_unit ? formatDuration(Number(deleteTarget.duration_value), deleteTarget.duration_unit) : `${deleteTarget.horizon_ticks} ticks`} · {Number(deleteTarget.sample_count).toLocaleString()} samples</p></div>{deleteError && <div className="mt-4 rounded-2xl border border-amber-400/20 bg-amber-400/5 p-4 text-sm text-amber-200"><div className="flex items-start gap-2"><AlertTriangle className="mt-0.5 h-4 w-4 shrink-0" /><div><p className="font-semibold">Deletion blocked</p><p className="mt-1">{deleteError}</p>{deleteDependencies && <ul className="mt-2 space-y-1 text-xs text-amber-300/80"><li>Active training runs: {deleteDependencies.runningTrainingRuns}</li><li>Historical training runs: {deleteDependencies.trainingRuns}</li><li>Registered models: {deleteDependencies.registeredModels}</li></ul>}</div></div></div>}<div className="mt-5 flex flex-col-reverse gap-3 sm:flex-row sm:justify-end"><button type="button" onClick={closeDeleteDialog} disabled={Boolean(deletingId)} className="rounded-xl border border-white/10 bg-white/5 px-4 py-3 text-sm font-semibold text-slate-200 disabled:opacity-40">Cancel</button><button type="button" onClick={() => void deleteDataset()} disabled={Boolean(deletingId)} className="inline-flex items-center justify-center gap-2 rounded-xl bg-red-500 px-4 py-3 text-sm font-black text-white disabled:opacity-50">{deletingId ? <><RefreshCw className="h-4 w-4 animate-spin" />Deleting…</> : <><Trash2 className="h-4 w-4" />Delete Dataset</>}</button></div></section></div>}
   </div></main>;
 }
