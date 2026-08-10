@@ -8,7 +8,7 @@ export type DerivDurationDiscovery = { symbol: string; ranges: DerivDurationRang
 type RecordLike = Record<string, unknown>;
 type ContractCapability = { type: 'CALL' | 'PUT'; expiryType: string; probe: Record<string, unknown> };
 
-const MAX_PROBE: Record<DerivDurationUnit, number> = { t: 1000, ...DERIV_TIME_DURATION_BANDS };
+const MAX_PROBE: Record<DerivDurationUnit, number> = { t: 1000, s: DERIV_TIME_DURATION_BANDS.s.max, m: DERIV_TIME_DURATION_BANDS.m.max, h: DERIV_TIME_DURATION_BANDS.h.max, d: DERIV_TIME_DURATION_BANDS.d.max };
 const MIN_PROBE: Record<DerivDurationUnit, number> = { t: 1, s: DERIV_TIME_DURATION_BANDS.s.min, m: DERIV_TIME_DURATION_BANDS.m.min, h: DERIV_TIME_DURATION_BANDS.h.min, d: DERIV_TIME_DURATION_BANDS.d.min };
 const PROBE_SEEDS: Record<DerivDurationUnit, number[]> = {
   t: [1, 2, 3, 5, 10, 15, 20, 30, 60, 100, 200, 500, 1000],
