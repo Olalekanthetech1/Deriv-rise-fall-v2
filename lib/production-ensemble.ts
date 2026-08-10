@@ -52,7 +52,7 @@ function validationWeight(result: any): number | null {
 
 export async function evaluateProductionEnsemble(
   ticks: TickPoint[],
-  options: { symbol?: string; durationSecs?: number; assetCategory?: number; durationValue?: number; durationUnit?: 't' | 'm' | 'h'; assetClass?: string; marketType?: string; requiredContextTicks?: number } = {},
+  options: { symbol?: string; durationSecs?: number; assetCategory?: number; durationValue?: number; durationUnit?: 't' | 's' | 'm' | 'h' | 'd'; assetClass?: string; marketType?: string; requiredContextTicks?: number } = {},
 ): Promise<ProductionEnsembleResult> {
   const symbol = options.symbol?.trim();
   if (!symbol) throw new Error('SYMBOL_REQUIRED');
@@ -104,28 +104,14 @@ export async function evaluateProductionEnsemble(
       confidence: valid ? Math.max(up!, down!) : null,
       dynamicWeight,
       runtimeMode: valid ? 'Native Python trained model' : 'Unavailable — no synthetic fallback',
-      details: valid
-        ? `${String(result.engine || 'Native trained model')} · ${assetContext.assetLabel} · ${assetContext.duration.label}`
-        : String(result?.error || 'MODEL_UNAVAILABLE'),
+      details: valid ? `${String(result.engine || 'Native trained model')} · ${assetContext.assetLabel} · ${assetContext.duration.label}` : String(result?.error || 'MODEL_UNAVAILABLE'),
       validation: result?.validation || null,
     };
   });
 
   const available = evaluations
-    .filter((evaluation): evaluation is AvailableEvaluation =>
-      evaluation.status === 'AVAILABLE' &&
-      evaluation.probabilityUp !== null &&
-      evaluation.probabilityDown !== null &&
-      evaluation.dynamicWeight !== null &&
-      evaluation.signal !== null,
-    )
-    .map((evaluation) => ({
-      ...evaluation,
-      probabilityUp: evaluation.probabilityUp as number,
-      probabilityDown: evaluation.probabilityDown as number,
-      dynamicWeight: evaluation.dynamicWeight as number,
-      signal: evaluation.signal as Signal,
-    }));
+    .filter((evaluation): evaluation is AvailableEvaluation => evaluation.status === 'AVAILABLE' && evaluation.probabilityUp !== null && evaluation.probabilityDown !== null && evaluation.dynamicWeight !== null && evaluation.signal !== null)
+    .map((evaluation) => ({ ...evaluation, probabilityUp: evaluation.probabilityUp as number, probabilityDown: evaluation.probabilityDown as number, dynamicWeight: evaluation.dynamicWeight as number, signal: evaluation.signal as Signal }));
 
   if (available.length === 0) throw new Error('NO_VALIDATED_TRAINED_MODELS_AVAILABLE');
 
@@ -142,37 +128,20 @@ export async function evaluateProductionEnsemble(
   const isoAvailable = iso?.success === true;
   const marketRegime = hmmAvailable ? String(hmm.primaryRegime) : 'REGIME_UNAVAILABLE';
   const anomalyScore = isoAvailable ? finiteProbability(Number(iso.anomalyScore) * 100) : null;
-  const anomalyRisk = isoAvailable
-    ? (Number(iso.anomalyScore) >= 0.7 ? 'HIGH' : Number(iso.anomalyScore) >= 0.4 ? 'MODERATE' : 'LOW')
-    : 'UNKNOWN';
+  const anomalyRisk = isoAvailable ? (Number(iso.anomalyScore) >= 0.7 ? 'HIGH' : Number(iso.anomalyScore) >= 0.4 ? 'MODERATE' : 'LOW') : 'UNKNOWN';
 
-  const strategyGate = evaluateSignalStrategyGate(assetContext, confidence, available.length, anomalyRisk);
+  const strategyGate = evaluateSignalStrategyGate(assetContext, confidence, available.length, anomalyRisk, direction);
   const finalAction = strategyGate.accepted ? (direction === 'RISE' ? 'EXECUTE_CALL' : 'EXECUTE_PUT') : 'HOLD_NO_SIGNAL';
 
   const modelBreakdown: Record<string, any> = {};
   for (const evaluation of evaluations) {
-    modelBreakdown[evaluation.modelKey] = {
-      modelName: evaluation.modelName,
-      runtimeMode: evaluation.runtimeMode,
-      status: evaluation.status,
-      vote: evaluation.signal,
-      confidence: evaluation.confidence,
-      probabilityUp: evaluation.probabilityUp,
-      probabilityDown: evaluation.probabilityDown,
-      weight: evaluation.dynamicWeight,
-      details: evaluation.details,
-      validation: evaluation.validation,
-    };
+    modelBreakdown[evaluation.modelKey] = { modelName: evaluation.modelName, runtimeMode: evaluation.runtimeMode, status: evaluation.status, vote: evaluation.signal, confidence: evaluation.confidence, probabilityUp: evaluation.probabilityUp, probabilityDown: evaluation.probabilityDown, weight: evaluation.dynamicWeight, details: evaluation.details, validation: evaluation.validation };
   }
 
   const hmmDefinition = getMlModelDefinition('hmm');
   const isoDefinition = getMlModelDefinition('isolation_forest');
-  modelBreakdown.hmm = hmmAvailable
-    ? { modelName: hmmDefinition?.displayName || 'HMM', status: 'AVAILABLE', primaryRegime: hmm.primaryRegime, regimeState: hmm.regimeState, regimeProbabilities: hmm.regimeProbabilities, details: `${hmm.engine || 'Native trained GaussianHMM'} · ${assetContext.assetLabel}` }
-    : { modelName: hmmDefinition?.displayName || 'HMM', status: 'UNAVAILABLE', details: String(hmm?.error || 'MODEL_UNAVAILABLE') };
-  modelBreakdown.isolation_forest = isoAvailable
-    ? { modelName: isoDefinition?.displayName || 'Isolation Forest', status: 'AVAILABLE', anomalyScore: iso.anomalyScore, isAnomaly: Boolean(iso.isAnomaly), details: `${iso.engine || 'Native trained IsolationForest'} · ${assetContext.assetLabel}` }
-    : { modelName: isoDefinition?.displayName || 'Isolation Forest', status: 'UNAVAILABLE', details: String(iso?.error || 'MODEL_UNAVAILABLE') };
+  modelBreakdown.hmm = hmmAvailable ? { modelName: hmmDefinition?.displayName || 'HMM', status: 'AVAILABLE', primaryRegime: hmm.primaryRegime, regimeState: hmm.regimeState, regimeProbabilities: hmm.regimeProbabilities, details: `${hmm.engine || 'Native trained GaussianHMM'} · ${assetContext.assetLabel}` } : { modelName: hmmDefinition?.displayName || 'HMM', status: 'UNAVAILABLE', details: String(hmm?.error || 'MODEL_UNAVAILABLE') };
+  modelBreakdown.isolation_forest = isoAvailable ? { modelName: isoDefinition?.displayName || 'Isolation Forest', status: 'AVAILABLE', anomalyScore: iso.anomalyScore, isAnomaly: Boolean(iso.isAnomaly), details: `${iso.engine || 'Native trained IsolationForest'} · ${assetContext.assetLabel}` } : { modelName: isoDefinition?.displayName || 'Isolation Forest', status: 'UNAVAILABLE', details: String(iso?.error || 'MODEL_UNAVAILABLE') };
 
   const normalizedWeights = Object.fromEntries(available.map((evaluation) => [evaluation.modelKey, Number((evaluation.dynamicWeight / totalWeight).toFixed(6))]));
   const topPerformingModel = available.slice().sort((a, b) => b.dynamicWeight - a.dynamicWeight)[0]?.modelKey ?? null;
@@ -191,31 +160,9 @@ export async function evaluateProductionEnsemble(
     modelBreakdown,
     regime: hmmAvailable ? hmm : { status: 'UNAVAILABLE', error: hmm?.error || 'MODEL_UNAVAILABLE' },
     anomaly: isoAvailable ? iso : { status: 'UNAVAILABLE', error: iso?.error || 'MODEL_UNAVAILABLE' },
-    drift: {
-      modelWeights: normalizedWeights,
-      recentAccuracies: Object.fromEntries(available.map((evaluation) => [evaluation.modelKey, evaluation.validation?.accuracy ?? null])),
-      driftStatus: `Weights derived from persisted native-model validation metrics · ${strategyGate.accepted ? 'asset-aware gate passed' : 'asset-aware gate blocked'}`,
-      topPerformingModel,
-    },
-    calibration: {
-      rawProbability: direction === 'RISE' ? probUp : probDown,
-      calibratedProbability: null,
-      confidenceReductionPct: null,
-      plattScaledProbability: null,
-      isotonicProbability: null,
-      expectedCalibrationError: null,
-      method: 'UNAVAILABLE_UNTIL_TRAINED_CALIBRATION_DATA',
-    },
-    fusion: {
-      directionScore: Number(confidence.toFixed(2)),
-      direction,
-      regimeState: marketRegime,
-      anomalyRisk: isoAvailable ? (Number(iso.anomalyScore) >= 0.7 ? 'HIGH' : Number(iso.anomalyScore) >= 0.4 ? 'MODERATE' : 'LOW') : 'UNKNOWN',
-      finalCompositeScore: Number(confidence.toFixed(2)),
-      confidenceGateThreshold: strategyGate.confidenceGateThreshold,
-      gatePassed: strategyGate.accepted,
-      action: finalAction,
-    },
+    drift: { modelWeights: normalizedWeights, recentAccuracies: Object.fromEntries(available.map((evaluation) => [evaluation.modelKey, evaluation.validation?.accuracy ?? null])), driftStatus: `Weights derived from persisted native-model validation metrics · ${strategyGate.accepted ? 'asset-aware gate passed' : 'asset-aware gate blocked'}`, topPerformingModel },
+    calibration: { rawProbability: direction === 'RISE' ? probUp : probDown, calibratedProbability: null, confidenceReductionPct: null, plattScaledProbability: null, isotonicProbability: null, expectedCalibrationError: null, method: 'UNAVAILABLE_UNTIL_TRAINED_CALIBRATION_DATA' },
+    fusion: { directionScore: Number(confidence.toFixed(2)), direction, regimeState: marketRegime, anomalyRisk: isoAvailable ? (Number(iso.anomalyScore) >= 0.7 ? 'HIGH' : Number(iso.anomalyScore) >= 0.4 ? 'MODERATE' : 'LOW') : 'UNKNOWN', finalCompositeScore: Number(confidence.toFixed(2)), confidenceGateThreshold: strategyGate.confidenceGateThreshold, gatePassed: strategyGate.accepted, action: finalAction },
     timestamp: Date.now(),
   };
 }
