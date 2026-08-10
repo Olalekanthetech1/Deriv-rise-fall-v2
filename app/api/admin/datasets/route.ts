@@ -3,7 +3,7 @@ import { verifySessionToken } from '../auth/route';
 import { buildDurationTrainingDataset, listDurationTrainingDatasets } from '@/lib/training-dataset-builder-duration-v2';
 import { expandTrainingDurations, type DerivDurationRange, type DerivDurationUnit } from '@/lib/deriv-duration-registry';
 import { getCachedOrDiscoverDuration } from '@/lib/deriv-duration-cache';
-import { claimNextAutoDatasetJobItem, completeAutoDatasetJobItem, createAutoDatasetJob, failAutoDatasetJobItem, getAutoDatasetJob, refreshAutoDatasetJobStatus } from '@/lib/auto-dataset-job-store';
+import { claimNextAutoDatasetJobItem, completeAutoDatasetJobItem, createAutoDatasetJob, failAutoDatasetJobItem, getAutoDatasetJob, getLatestAutoDatasetJob, refreshAutoDatasetJobStatus } from '@/lib/auto-dataset-job-store';
 
 function isAuthenticated(req: NextRequest): boolean {
   const cookieToken = req.cookies.get('admin_session_token')?.value;
@@ -96,6 +96,13 @@ export async function GET(req: NextRequest) {
   try {
     const symbol = req.nextUrl.searchParams.get('symbol')?.trim().toUpperCase() || undefined;
     const autoJobId = req.nextUrl.searchParams.get('autoJobId')?.trim();
+    const latestAutoJob = req.nextUrl.searchParams.get('latestAutoJob') === '1';
+    if (latestAutoJob) {
+      const job = await getLatestAutoDatasetJob();
+      if (job?.status === 'running') resumeAutoDatasetJob(job.id);
+      const refreshed = job ? await refreshAutoDatasetJobStatus(job.id) : null;
+      return NextResponse.json({ success: true, job: refreshed ?? job ?? null }, { headers: noStore() });
+    }
     if (autoJobId) {
       const job = await getAutoDatasetJob(autoJobId);
       if (!job) return NextResponse.json({ success: false, error: 'AUTO dataset build job was not found. Start a new AUTO build.' }, { status: 404, headers: noStore() });
