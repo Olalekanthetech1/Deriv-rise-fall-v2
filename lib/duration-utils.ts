@@ -1,4 +1,5 @@
 import type { ContractInfo } from '@deriv/core';
+import { DERIV_TIME_DURATION_BANDS } from './deriv-duration-policy';
 
 export type DurationApiUnit = 't' | 's' | 'm' | 'd';
 export type DurationSelectUnit = 't' | 's' | 'm' | 'h' | 'd' | 'end-time';
@@ -65,28 +66,28 @@ export function getDurationOptions(contracts: ContractInfo[]): DurationOption[] 
       const minSec = parseDurationToSeconds(minStr);
       const maxSec = parseDurationToSeconds(maxStr);
 
-      if (maxSec >= 1 && !optMap.has('s')) {
-        const sMin = Math.max(1, minSec);
-        const sMax = Math.min(59, maxSec);
+      if (maxSec >= DERIV_TIME_DURATION_BANDS.s.min && !optMap.has('s')) {
+        const sMin = Math.max(DERIV_TIME_DURATION_BANDS.s.min, minSec);
+        const sMax = Math.min(DERIV_TIME_DURATION_BANDS.s.max, maxSec);
         if (sMin <= sMax) optMap.set('s', { unit: 's', label: DURATION_LABELS.s, min: sMin, max: sMax });
       }
 
       if (maxSec >= 60 && !optMap.has('m')) {
-        const mMin = Math.max(1, Math.ceil(minSec / 60));
-        const mMax = Math.floor(maxSec / 60);
+        const mMin = Math.max(DERIV_TIME_DURATION_BANDS.m.min, Math.ceil(minSec / 60));
+        const mMax = Math.min(DERIV_TIME_DURATION_BANDS.m.max, Math.floor(maxSec / 60));
         if (mMin <= mMax) optMap.set('m', { unit: 'm', label: DURATION_LABELS.m, min: mMin, max: mMax });
       }
 
       if (maxSec >= 3600 && !optMap.has('h')) {
-        const hMin = Math.max(1, Math.ceil(minSec / 3600));
-        const hMax = Math.floor(maxSec / 3600);
+        const hMin = Math.max(DERIV_TIME_DURATION_BANDS.h.min, Math.ceil(minSec / 3600));
+        const hMax = Math.min(DERIV_TIME_DURATION_BANDS.h.max, Math.floor(maxSec / 3600));
         if (hMin <= hMax) optMap.set('h', { unit: 'h', label: DURATION_LABELS.h, min: hMin, max: hMax });
       }
     } else if (expiryType === 'daily') {
-      const dMin = parseInt(minStr, 10);
-      const dMax = parseInt(maxStr, 10);
-      if (!optMap.has('d')) optMap.set('d', { unit: 'd', label: DURATION_LABELS.d, min: dMin, max: dMax });
-      if (!optMap.has('end-time')) optMap.set('end-time', { unit: 'end-time', label: DURATION_LABELS['end-time'], min: dMin, max: dMax });
+      const dMin = Math.max(DERIV_TIME_DURATION_BANDS.d.min, parseInt(minStr, 10));
+      const dMax = Math.min(DERIV_TIME_DURATION_BANDS.d.max, parseInt(maxStr, 10));
+      if (!optMap.has('d') && dMin <= dMax) optMap.set('d', { unit: 'd', label: DURATION_LABELS.d, min: dMin, max: dMax });
+      if (!optMap.has('end-time') && dMin <= dMax) optMap.set('end-time', { unit: 'end-time', label: DURATION_LABELS['end-time'], min: dMin, max: dMax });
     }
   }
 
