@@ -141,12 +141,13 @@ export default function AdminDashboardOverview() {
   const load = useCallback(async (showSpinner = false) => {
     setState((current) => ({ ...current, ...(showSpinner ? { refreshing: true } : {}), error: null }));
     try {
-      const responses = await Promise.all([
-        fetch('/api/admin/health', { cache: 'no-store' }),
-        fetch('/api/admin/stats', { cache: 'no-store' }),
-        fetch('/api/admin/datasets?eligibleForTraining=1', { cache: 'no-store' }),
-        fetch('/api/admin/model-training', { cache: 'no-store' }),
-      ]);
+      const requests = [
+        { name: 'health', promise: fetch('/api/admin/health', { cache: 'no-store' }) },
+        { name: 'stats', promise: fetch('/api/admin/stats', { cache: 'no-store' }) },
+        { name: 'datasets', promise: fetch('/api/admin/datasets?eligibleForTraining=1', { cache: 'no-store' }) },
+        { name: 'model training', promise: fetch('/api/admin/model-training', { cache: 'no-store' }) },
+      ];
+      const responses = await Promise.all(requests.map(({ promise }) => promise));
 
       if (responses.some((response) => response.status === 401)) {
         window.location.replace('/admin');
@@ -155,7 +156,10 @@ export default function AdminDashboardOverview() {
 
       const payloads = await Promise.all(responses.map((response) => response.json().catch(() => ({}))));
       const [health, stats, datasetPayload, trainingPayload] = payloads as [HealthResponse, StatsResponse, { datasets?: Dataset[]; error?: string }, { runs?: TrainingRun[]; error?: string }];
-      const endpointErrors = responses.filter((response) => !response.ok).map((response) => response.status);
+      const endpointErrors = responses
+        .map((response, index) => ({ response, name: requests[index].name }))
+        .filter(({ response }) => !response.ok)
+        .map(({ response, name }) => `${name}: HTTP ${response.status}`);
 
       setState({
         health,
@@ -164,7 +168,7 @@ export default function AdminDashboardOverview() {
         runs: Array.isArray(trainingPayload?.runs) ? trainingPayload.runs : [],
         loading: false,
         refreshing: false,
-        error: endpointErrors.length ? `One or more dashboard sources returned HTTP ${endpointErrors.join(', ')}.` : datasetPayload?.error || trainingPayload?.error || null,
+        error: endpointErrors.length ? `Dashboard source failure — ${endpointErrors.join('; ')}.` : datasetPayload?.error || trainingPayload?.error || null,
         refreshedAt: new Date().toISOString(),
       });
     } catch {
