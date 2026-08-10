@@ -25,7 +25,7 @@ async function ensureSchema(): Promise<void> {
     await sql`CREATE INDEX IF NOT EXISTS idx_ops_ml_dataset_jobs_symbol_started ON ops_ml_dataset_build_jobs (symbol, started_at DESC)`;
     await sql`CREATE UNIQUE INDEX IF NOT EXISTS uq_ops_ml_dataset_jobs_running_symbol ON ops_ml_dataset_build_jobs (symbol) WHERE status = 'running'`;
     await sql`CREATE TABLE IF NOT EXISTS ops_ml_dataset_build_job_items (id BIGSERIAL PRIMARY KEY, job_id UUID NOT NULL REFERENCES ops_ml_dataset_build_jobs(id) ON DELETE CASCADE, item_index INTEGER NOT NULL, duration_value INTEGER NOT NULL, duration_unit VARCHAR(1) NOT NULL, duration_range_id VARCHAR(160) NOT NULL, status VARCHAR(24) NOT NULL DEFAULT 'pending', attempts INTEGER NOT NULL DEFAULT 0, error_message TEXT, claimed_at TIMESTAMPTZ, completed_at TIMESTAMPTZ, UNIQUE (job_id, item_index))`;
-    await sql`CREATE INDEX IF NOT EXISTS idx_ops_ml_dataset_job_items_claim ON ops_ml_dataset_job_items (job_id, status, claimed_at, item_index)`;
+    await sql`CREATE INDEX IF NOT EXISTS idx_ops_ml_dataset_build_job_items_claim ON ops_ml_dataset_build_job_items (job_id, status, claimed_at, item_index)`;
   })();
   try { await schemaReady; } catch (error) { schemaReady = null; throw error; }
 }
