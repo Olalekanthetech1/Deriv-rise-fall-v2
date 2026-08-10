@@ -72,7 +72,7 @@ function buildSignalItems(ensemble: ProductionEnsembleResult, duration: ReturnTy
         maxExpirySeconds: duration.seconds,
         expiresAt: expiry,
         winRate: 'Native model probability',
-        description: evaluation.details,
+        description: `${evaluation.details} · Gate ${ensemble.strategyGate.accepted ? 'passed' : 'blocked'} (${ensemble.strategyGate.confidenceGateThreshold}%)`,
         timestamp: now,
       };
     });
@@ -105,6 +105,24 @@ export async function POST(req: NextRequest) {
     const symbol = typeof body?.symbol === 'string' && body.symbol.trim() ? body.symbol.trim() : 'R_100';
     const duration = normalizeDuration(body?.durationValue, body?.durationUnit);
 
+    let assetClass: string | undefined;
+    let marketType: string | undefined;
+    const sql = getDb();
+    if (sql) {
+      try {
+        const rows = await sql`
+          SELECT asset_class, market_type
+          FROM market_assets
+          WHERE symbol = ${symbol}
+          LIMIT 1
+        `;
+        assetClass = rows?.[0]?.asset_class ? String(rows[0].asset_class) : undefined;
+        marketType = rows?.[0]?.market_type ? String(rows[0].market_type) : undefined;
+      } catch (dbErr) {
+        console.warn('[Signal Asset Context Warning]:', dbErr);
+      }
+    }
+
     let tickList: TickPoint[] = Array.isArray(body?.ticks) && body.ticks.length > 0 ? body.ticks : [];
     if (tickList.length < 25) tickList = await ensureMinTicks(symbol, 100);
     if (tickList.length < 25) throw new Error(`Insufficient real ticks for signal generation on ${symbol}. Minimum 25 required.`);
@@ -118,7 +136,12 @@ export async function POST(req: NextRequest) {
     const ensemble = await evaluateProductionEnsemble(tickList, {
       symbol,
       durationSecs: duration.seconds,
+      durationValue: duration.value,
+      durationUnit: duration.unit,
       assetCategory: assetCategoryNum,
+      assetClass,
+      marketType,
+      requiredContextTicks: 100,
     });
 
     const now = Date.now();
@@ -132,7 +155,6 @@ export async function POST(req: NextRequest) {
     let totalVerified = 0;
     let winCount = 0;
     let accuracy = '0.0%';
-    const sql = getDb();
     if (sql) {
       try {
         const statsRes = await sql`
@@ -166,6 +188,8 @@ export async function POST(req: NextRequest) {
 
     return NextResponse.json({
       success: true,
+      assetContext: ensemble.assetContext,
+      strategyGate: ensemble.strategyGate,
       prediction: {
         signal: ensemble.direction === 'RISE' ? 'CALL' : 'PUT',
         confidence: ensemble.confidence,
@@ -185,7 +209,7 @@ export async function POST(req: NextRequest) {
       anomalyScore: ensemble.anomalyScore,
       modelBreakdown: ensemble.modelBreakdown,
       multiModelEnsemble: ensemble,
-    });
+    }, { headers: { 'Cache-Control': 'no-store' } });
   } catch (err: unknown) {
     console.error('[Signal Prediction Error]:', err);
     return NextResponse.json({ success: false, error: err instanceof Error ? err.message : 'Signal prediction failed' }, { status: 503 });
