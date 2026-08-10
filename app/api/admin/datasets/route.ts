@@ -1,9 +1,16 @@
-import crypto from 'crypto';
 import { NextRequest, NextResponse } from 'next/server';
 import { verifySessionToken } from '../auth/route';
 import { buildDurationTrainingDataset, listDurationTrainingDatasets } from '@/lib/training-dataset-builder-duration-v2';
 import { expandTrainingDurations, type DerivDurationRange, type DerivDurationUnit } from '@/lib/deriv-duration-registry';
 import { getCachedOrDiscoverDuration } from '@/lib/deriv-duration-cache';
+import {
+  claimNextAutoDatasetJobItem,
+  completeAutoDatasetJobItem,
+  createAutoDatasetJob,
+  failAutoDatasetJobItem,
+  getAutoDatasetJob,
+  refreshAutoDatasetJobStatus,
+} from '@/lib/auto-dataset-job-store';
 
 function isAuthenticated(req: NextRequest): boolean {
   const cookieToken = req.cookies.get('admin_session_token')?.value;
@@ -64,78 +71,47 @@ function expandTrainingHorizonLadder(ranges: DerivDurationRange[]): Array<{ valu
   });
 }
 
-type AutoJob = {
-  id: string;
-  symbol: string;
-  status: 'running' | 'completed' | 'failed';
-  requestedCount: number;
-  completedCount: number;
-  failedCount: number;
-  failures: Array<{ value: number; unit: DerivDurationUnit; error: string }>;
-  startedAt: string;
-  finishedAt?: string;
-};
+const activeLocalWorkers = new Set<string>();
 
-const autoJobs = new Map<string, AutoJob>();
-const activeAutoJobs = new Map<string, string>();
-
-async function runWithConcurrency<T>(items: T[], concurrency: number, worker: (item: T) => Promise<void>): Promise<void> {
-  let cursor = 0;
-  const workers = Array.from({ length: Math.min(concurrency, items.length) }, async () => {
+async function runAutoDatasetWorker(jobId: string): Promise<void> {
+  if (activeLocalWorkers.has(jobId)) return;
+  activeLocalWorkers.add(jobId);
+  try {
     while (true) {
-      const index = cursor++;
-      if (index >= items.length) return;
-      await worker(items[index]);
+      const job = await getAutoDatasetJob(jobId);
+      if (!job || job.status !== 'running') return;
+
+      const item = await claimNextAutoDatasetJobItem(jobId);
+      if (!item) {
+        await refreshAutoDatasetJobStatus(jobId);
+        return;
+      }
+
+      try {
+        await buildDurationTrainingDataset({
+          symbol: job.symbol,
+          durationValue: item.value,
+          durationUnit: item.unit,
+          durationRangeId: item.rangeId,
+        });
+        await completeAutoDatasetJobItem(jobId, item.id);
+      } catch (error) {
+        const message = error instanceof Error ? error.message : String(error);
+        await failAutoDatasetJobItem(jobId, item.id, message);
+      }
     }
-  });
-  await Promise.all(workers);
+  } catch (error) {
+    console.error('[AUTO dataset worker error]:', error);
+  } finally {
+    activeLocalWorkers.delete(jobId);
+  }
 }
 
-function startAutoBuild(symbol: string, discovery: Awaited<ReturnType<typeof getCachedOrDiscoverDuration>>['discovery']): AutoJob {
-  const existingId = activeAutoJobs.get(symbol);
-  if (existingId) {
-    const existing = autoJobs.get(existingId);
-    if (existing?.status === 'running') return existing;
-    activeAutoJobs.delete(symbol);
-  }
-
-  const durations = expandTrainingHorizonLadder(discovery.ranges);
-  const job: AutoJob = {
-    id: crypto.randomUUID(),
-    symbol,
-    status: 'running',
-    requestedCount: durations.length,
-    completedCount: 0,
-    failedCount: 0,
-    failures: [],
-    startedAt: new Date().toISOString(),
-  };
-  autoJobs.set(job.id, job);
-  activeAutoJobs.set(symbol, job.id);
-
+function resumeAutoDatasetJob(jobId: string): void {
   const concurrency = envPositiveInt('DERIV_AUTO_BUILD_CONCURRENCY', 2, 8);
-  void (async () => {
-    try {
-      await runWithConcurrency(durations, concurrency, async (duration) => {
-        try {
-          await buildDurationTrainingDataset({ symbol, durationValue: duration.value, durationUnit: duration.unit, durationRangeId: duration.rangeId });
-          job.completedCount += 1;
-        } catch (error) {
-          job.failedCount += 1;
-          job.failures.push({ value: duration.value, unit: duration.unit, error: error instanceof Error ? error.message : String(error) });
-        }
-      });
-      job.status = job.failedCount > 0 && job.completedCount === 0 ? 'failed' : 'completed';
-    } catch (error) {
-      job.status = 'failed';
-      job.failures.push({ value: 0, unit: 't', error: error instanceof Error ? error.message : String(error) });
-    } finally {
-      job.finishedAt = new Date().toISOString();
-      activeAutoJobs.delete(symbol);
-    }
-  })();
-
-  return job;
+  for (let index = 0; index < concurrency; index += 1) {
+    void runAutoDatasetWorker(jobId);
+  }
 }
 
 export async function GET(req: NextRequest) {
@@ -144,9 +120,11 @@ export async function GET(req: NextRequest) {
     const symbol = req.nextUrl.searchParams.get('symbol')?.trim().toUpperCase() || undefined;
     const autoJobId = req.nextUrl.searchParams.get('autoJobId')?.trim();
     if (autoJobId) {
-      const job = autoJobs.get(autoJobId);
-      if (!job) return NextResponse.json({ success: false, error: 'AUTO dataset build job was not found on this application instance. Start a new AUTO build.' }, { status: 404, headers: noStore() });
-      return NextResponse.json({ success: true, job }, { headers: noStore() });
+      const job = await getAutoDatasetJob(autoJobId);
+      if (!job) return NextResponse.json({ success: false, error: 'AUTO dataset build job was not found. Start a new AUTO build.' }, { status: 404, headers: noStore() });
+      if (job.status === 'running') resumeAutoDatasetJob(job.id);
+      const refreshed = await refreshAutoDatasetJobStatus(job.id);
+      return NextResponse.json({ success: true, job: refreshed ?? job }, { headers: noStore() });
     }
     const datasets = await listDurationTrainingDatasets(symbol);
     if (!symbol) return NextResponse.json({ success: true, datasets, durationSource: 'deriv-dynamic' }, { headers: noStore() });
@@ -173,11 +151,16 @@ export async function POST(req: NextRequest) {
     const symbol = typeof body?.symbol === 'string' ? body.symbol.trim().toUpperCase() : '';
     if (!symbol) return NextResponse.json({ success: false, error: 'A Deriv symbol is required.' }, { status: 400, headers: noStore() });
     const resolved = await getCachedOrDiscoverDuration(symbol);
+
     if (body?.buildAllSupportedHorizons === true) {
-      const job = startAutoBuild(symbol, resolved.discovery);
+      const durations = expandTrainingHorizonLadder(resolved.discovery.ranges);
+      if (!durations.length) return NextResponse.json({ success: false, error: 'Deriv returned no supported training horizons for this asset.' }, { status: 422, headers: noStore() });
+      const job = await createAutoDatasetJob(symbol, durations);
+      resumeAutoDatasetJob(job.id);
       const result = { status: job.status, jobId: job.id, requestedCount: job.requestedCount, completedCount: job.completedCount, failedCount: job.failedCount };
       return NextResponse.json({ success: true, accepted: true, dataSource: 'deriv-real-ticks', durationSource: resolved.source, durationRefreshing: resolved.refreshing, result, job, message: `AUTO dataset build started for ${job.requestedCount} dynamically derived training horizons.` }, { status: 202, headers: noStore() });
     }
+
     const legacyHorizon = body?.horizonTicks;
     const durationValue = legacyHorizon != null ? Number(legacyHorizon) : Number(body?.durationValue);
     const durationUnit = legacyHorizon != null ? 't' : body?.durationUnit;
