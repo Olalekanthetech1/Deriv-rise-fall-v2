@@ -28,6 +28,20 @@ export interface ProductionEnsembleResult {
   timestamp: number;
 }
 
+type AvailableEvaluation = {
+  modelKey: string;
+  modelName: string;
+  family: 'tabular' | 'sequential';
+  probabilityUp: number;
+  probabilityDown: number;
+  signal: Signal;
+  confidence: number;
+  dynamicWeight: number;
+  runtimeMode: string;
+  details: string;
+  validation: any;
+};
+
 function finiteProbability(value: unknown): number | null {
   const number = Number(value);
   return Number.isFinite(number) && number >= 0 && number <= 100 ? number : null;
@@ -102,9 +116,22 @@ export async function evaluateProductionEnsemble(
     };
   });
 
-  const available = evaluations.filter((evaluation): evaluation is typeof evaluations[number] & { probabilityUp: number; probabilityDown: number; dynamicWeight: number } =>
-    evaluation.status === 'AVAILABLE' && evaluation.probabilityUp !== null && evaluation.probabilityDown !== null && evaluation.dynamicWeight !== null,
-  );
+  const available = evaluations
+    .filter((evaluation): evaluation is AvailableEvaluation =>
+      evaluation.status === 'AVAILABLE' &&
+      evaluation.probabilityUp !== null &&
+      evaluation.probabilityDown !== null &&
+      evaluation.dynamicWeight !== null &&
+      evaluation.signal !== null,
+    )
+    .map((evaluation) => ({
+      ...evaluation,
+      probabilityUp: evaluation.probabilityUp as number,
+      probabilityDown: evaluation.probabilityDown as number,
+      dynamicWeight: evaluation.dynamicWeight as number,
+      signal: evaluation.signal as Signal,
+    }));
+
   if (available.length === 0) throw new Error('NO_VALIDATED_TRAINED_MODELS_AVAILABLE');
 
   const totalWeight = available.reduce((sum, evaluation) => sum + evaluation.dynamicWeight, 0);
