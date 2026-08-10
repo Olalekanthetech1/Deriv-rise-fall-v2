@@ -4,6 +4,7 @@ import { useEffect, useMemo, useState, type ReactNode } from 'react';
 import { AlertTriangle, CheckCircle2, Clock3, RefreshCw, ServerCrash, XCircle } from 'lucide-react';
 
 type TimingMap = Record<string, unknown>;
+type LiveDiagnostics = { phase?: string; elapsedMs?: number; message?: string | null; updatedAt?: string; source?: string };
 type TrainingModel = { model_type: string; status: string; metrics?: TimingMap; error?: string | null };
 type TrainingRun = { run_id: string; asset_symbol: string; duration_value: number; duration_unit: string; status: string; models?: TrainingModel[]; created_at: string };
 type AutoFailure = { value: number; unit: string; error: string };
@@ -11,6 +12,16 @@ type AutoJob = { id: string; symbol: string; status: string; requestedCount: num
 
 const modelLabels: Record<string, string> = { xgboost: 'XGBoost', lightgbm: 'LightGBM', catboost: 'CatBoost', tcn: 'TCN', lstm: 'LSTM / GRU', transformer: 'Transformer', hmm: 'HMM Regime', isolation_forest: 'Isolation Forest' };
 const unitLabels: Record<string, string> = { t: 'ticks', s: 'seconds', m: 'minutes', h: 'hours', d: 'days' };
+const phaseLabels: Record<string, string> = {
+  starting: 'Accepted by native runtime',
+  train_partition_validated: 'Training partition validated',
+  validation_partition_validated: 'Validation partition validated',
+  model_fit_start: 'Model fit running',
+  model_fit_complete: 'Model fit complete',
+  prediction_complete: 'Validation prediction complete',
+  artifact_save_start: 'Saving model artifact',
+  artifact_save_complete: 'Artifact saved',
+};
 
 function seconds(value: unknown): string {
   const n = Number(value);
@@ -22,6 +33,10 @@ function timing(metrics: TimingMap | undefined, key: string): number | null {
   const nested = metrics?.timings;
   const value = nested && typeof nested === 'object' ? Number((nested as Record<string, unknown>)[key]) : NaN;
   return Number.isFinite(value) ? value : null;
+}
+function liveDiagnostics(metrics: TimingMap | undefined): LiveDiagnostics | null {
+  const value = metrics?.liveDiagnostics;
+  return value && typeof value === 'object' ? value as LiveDiagnostics : null;
 }
 function classify(metrics: TimingMap | undefined): { label: string; tone: 'warn' | 'danger' | 'info' } | null {
   const roundTrip = timing(metrics, 'clientRoundTripMs');
@@ -75,7 +90,7 @@ export default function AdminMlDiagnostics({ children }: { children: ReactNode }
   useEffect(() => {
     if (!enabled) return;
     void refresh();
-    const timer = window.setInterval(() => void refresh(), isDatasetBuilder ? 2500 : 5000);
+    const timer = window.setInterval(() => void refresh(), isDatasetBuilder ? 2500 : 2500);
     return () => window.clearInterval(timer);
   }, [enabled, isTraining, isDatasetBuilder]);
 
@@ -90,7 +105,7 @@ export default function AdminMlDiagnostics({ children }: { children: ReactNode }
         <div className="flex flex-col gap-3 lg:flex-row lg:items-start lg:justify-between">
           <div>
             <div className="flex items-center gap-2 text-sm font-bold text-amber-200"><AlertTriangle className="h-4 w-4" />{isTraining ? 'Training Diagnostics' : 'Dataset Build Diagnostics'}</div>
-            <p className="mt-1 text-xs leading-5 text-slate-500">Live runtime evidence from the persisted training/build job state. This panel diagnoses failures; it does not suppress validation or convert failures into success.</p>
+            <p className="mt-1 text-xs leading-5 text-slate-500">Live runtime evidence from the native daemon and persisted training state. Exact errors remain visible; live phase telemetry never converts a running/failed job into success.</p>
           </div>
           <button onClick={() => void refresh()} disabled={loading} className="inline-flex items-center gap-2 rounded-lg border border-white/10 bg-white/5 px-3 py-2 text-xs font-semibold text-slate-300 disabled:opacity-50"><RefreshCw className={`h-3.5 w-3.5 ${loading ? 'animate-spin' : ''}`} />Refresh</button>
         </div>
@@ -100,6 +115,7 @@ export default function AdminMlDiagnostics({ children }: { children: ReactNode }
             <div className="flex flex-wrap items-center gap-2 text-xs"><span className="rounded-full border border-white/10 bg-white/5 px-2.5 py-1 font-bold">{latestRun.status.toUpperCase()}</span><span className="font-semibold text-slate-300">{latestRun.asset_symbol} · {latestRun.duration_value} {unitLabels[latestRun.duration_unit] || latestRun.duration_unit}</span><span className="font-mono text-[10px] text-slate-600">{latestRun.run_id}</span></div>
             {latestRun.models?.map((model) => {
               const metrics = model.metrics;
+              const live = liveDiagnostics(metrics);
               const roundTrip = timing(metrics, 'clientRoundTripMs');
               const dispatch = timing(metrics, 'daemonDispatchMs');
               const partition = timing(metrics, 'trainPartitionMs');
@@ -109,8 +125,10 @@ export default function AdminMlDiagnostics({ children }: { children: ReactNode }
               const artifact = timing(metrics, 'artifactSaveMs');
               const total = timing(metrics, 'totalMs');
               const diagnosis = classify(metrics);
+              const isRunning = model.status === 'running';
               return <div key={model.model_type} className="rounded-xl border border-white/10 bg-black/20 p-3">
                 <div className="flex flex-col gap-2 lg:flex-row lg:items-center lg:justify-between"><div className="flex items-center gap-2 text-xs font-bold"><span>{modelLabels[model.model_type] || model.model_type}</span><span className={model.status === 'completed' ? 'text-emerald-300' : model.status === 'failed' ? 'text-red-300' : 'text-cyan-300'}>{model.status}</span></div>{diagnosis && <span className={`inline-flex items-center gap-1 rounded-full border px-2 py-1 text-[10px] font-semibold ${diagnosis.tone === 'danger' ? 'border-red-400/20 bg-red-400/10 text-red-200' : diagnosis.tone === 'warn' ? 'border-amber-400/20 bg-amber-400/10 text-amber-200' : 'border-cyan-400/20 bg-cyan-400/10 text-cyan-200'}`}>{diagnosis.tone === 'danger' ? <ServerCrash className="h-3 w-3" /> : <AlertTriangle className="h-3 w-3" />}{diagnosis.label}</span>}</div>
+                {isRunning && live && <div className="mt-3 rounded-lg border border-cyan-400/15 bg-cyan-400/[0.03] px-3 py-2"><div className="flex flex-wrap items-center justify-between gap-2"><span className="text-[10px] font-bold uppercase tracking-wider text-cyan-200">Live phase: {phaseLabels[live.phase || ''] || live.phase || 'Running'}</span><span className="font-mono text-[10px] text-cyan-300">Elapsed {seconds(live.elapsedMs)}</span></div>{live.message && <p className="mt-1 text-[10px] leading-4 text-slate-400">{live.message}</p>}<p className="mt-1 text-[9px] text-slate-600">Native runtime source · updated {live.updatedAt ? new Date(live.updatedAt).toLocaleTimeString() : '—'}</p></div>}
                 {metrics ? <div className="mt-3 grid grid-cols-2 gap-2 sm:grid-cols-4 lg:grid-cols-8">{[['Round trip',roundTrip],['Daemon',dispatch],['Train partition',partition],['Validation',validation],['Model fit',fit],['Prediction',prediction],['Artifact',artifact],['Python total',total]].map(([label,value]) => <div key={String(label)} className="rounded-lg border border-white/5 bg-white/[0.02] p-2"><span className="block text-[9px] uppercase tracking-wider text-slate-600">{String(label)}</span><span className="mt-1 block text-xs font-bold text-slate-300">{seconds(value)}</span></div>)}</div> : <p className="mt-2 text-[10px] text-slate-600">No timing metrics persisted for this attempt.</p>}
                 {model.error && <ErrorBox message={model.error} />}
               </div>;
