@@ -3,7 +3,7 @@ import { PredictSchema } from '@/lib/validation-schemas';
 import { evaluateProductionEnsemble } from '@/lib/production-ensemble';
 import { ensureMinTicks } from '@/lib/ticks-helper';
 import { getMlRuntimeSchemaContract } from '@/lib/ml-runtime-schema';
-import { getDb, initDbSchema } from '@/lib/db';
+import { getDb } from '@/lib/db';
 
 export async function POST(req: NextRequest) {
   try {
