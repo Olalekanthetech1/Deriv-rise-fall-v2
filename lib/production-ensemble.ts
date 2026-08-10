@@ -1,6 +1,6 @@
 import { EngineeredTickFeatures, extractTickFeatures, featureObjToArray, TickPoint } from './ml-feature-extractor';
 import { buildFeatureSequence } from './ml-feature-dataset';
-import { getMlModelDefinition, getMlModelKeys, getPredictiveModelDefinitions } from './ml-model-registry';
+import { getMlModelDefinition, getMlModelKeys, getPredictiveModelDefinitions, type MlModelKey } from './ml-model-registry';
 import { xgboostDaemon } from './xgboost-daemon';
 import { evaluateSignalStrategyGate, resolveAssetAwareSignalContext, type AssetAwareSignalContext, type SignalStrategyGate } from './asset-context';
 
@@ -28,7 +28,8 @@ export interface ProductionEnsembleResult {
   timestamp: number;
 }
 
-type AvailableEvaluation = ProductionEnsembleResult['evaluations'][number] & {
+type AvailableEvaluation = Omit<ProductionEnsembleResult['evaluations'][number], 'modelKey' | 'probabilityUp' | 'probabilityDown' | 'signal' | 'confidence' | 'dynamicWeight'> & {
+  modelKey: MlModelKey;
   probabilityUp: number;
   probabilityDown: number;
   signal: Signal;
