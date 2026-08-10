@@ -1,7 +1,7 @@
 'use client';
 
-import { useEffect, useMemo, useState } from 'react';
-import { AlertTriangle, CheckCircle2, Clock3, Database, RefreshCw, ServerCrash, XCircle } from 'lucide-react';
+import { useEffect, useMemo, useState, type ReactNode } from 'react';
+import { AlertTriangle, CheckCircle2, Clock3, RefreshCw, ServerCrash, XCircle } from 'lucide-react';
 
 type TimingMap = Record<string, unknown>;
 type TrainingModel = { model_type: string; status: string; metrics?: TimingMap; error?: string | null };
@@ -41,7 +41,7 @@ function ErrorBox({ message }: { message: string }) {
   return <div className="mt-3 rounded-xl border border-red-400/20 bg-red-400/[0.05] p-3 text-xs leading-5 text-red-200"><div className="mb-1 flex items-center gap-2 font-bold"><XCircle className="h-3.5 w-3.5" />Exact error</div><pre className="whitespace-pre-wrap break-words font-sans">{message}</pre></div>;
 }
 
-export default function AdminMlDiagnostics({ children }: { children: React.ReactNode }) {
+export default function AdminMlDiagnostics({ children }: { children: ReactNode }) {
   const [path, setPath] = useState('');
   const [runs, setRuns] = useState<TrainingRun[]>([]);
   const [autoJob, setAutoJob] = useState<AutoJob | null>(null);
