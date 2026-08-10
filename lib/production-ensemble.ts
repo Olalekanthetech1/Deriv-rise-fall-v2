@@ -153,6 +153,7 @@ export async function evaluateProductionEnsemble(
     : { modelName: isoDefinition?.displayName || 'Isolation Forest', status: 'UNAVAILABLE', details: String(iso?.error || 'MODEL_UNAVAILABLE') };
 
   const normalizedWeights = Object.fromEntries(available.map((evaluation) => [evaluation.modelKey, Number((evaluation.dynamicWeight / totalWeight).toFixed(6))]));
+  const topPerformingModel = available.slice().sort((a, b) => b.dynamicWeight - a.dynamicWeight)[0]?.modelKey ?? null;
   return {
     symbol,
     direction,
@@ -172,7 +173,7 @@ export async function evaluateProductionEnsemble(
       modelWeights: normalizedWeights,
       recentAccuracies: Object.fromEntries(available.map((evaluation) => [evaluation.modelKey, evaluation.validation?.accuracy ?? null])),
       driftStatus: `Weights derived from persisted native-model validation metrics · ${strategyGate.accepted ? 'asset-aware gate passed' : 'asset-aware gate blocked'}`,
-      topPerformingModel: available.slice().sort((a, b) => b.dynamicWeight - a.dynamicWeight)[0].modelKey,
+      topPerformingModel,
     },
     calibration: {
       rawProbability: direction === 'RISE' ? probUp : probDown,
