@@ -29,18 +29,28 @@ def _attach_runtime_timing(output: dict, elapsed_ms: float) -> dict:
 
     metrics = next_output.get("metrics")
     if isinstance(metrics, dict):
-      next_metrics = dict(metrics)
-      timings = next_metrics.get("timings") if isinstance(next_metrics.get("timings"), dict) else {}
-      timings = dict(timings)
-      timings["daemonDispatchMs"] = elapsed
-      next_metrics["timings"] = timings
-      next_output["metrics"] = next_metrics
-      return next_output
+        next_metrics = dict(metrics)
+        timings = next_metrics.get("timings") if isinstance(next_metrics.get("timings"), dict) else {}
+        timings = dict(timings)
+        timings["daemonDispatchMs"] = elapsed
+        next_metrics["timings"] = timings
+        next_output["metrics"] = next_metrics
+        return next_output
 
     timings = next_output.get("timings") if isinstance(next_output.get("timings"), dict) else {}
     timings = dict(timings)
     timings["daemonDispatchMs"] = elapsed
     next_output["timings"] = timings
+    return next_output
+
+
+def _attach_request_context(output: dict, request: dict) -> dict:
+    """Normalize every successful daemon result to the Node request/response protocol."""
+    if not isinstance(output, dict):
+        return output
+    next_output = dict(output)
+    if "id" not in next_output:
+        next_output["id"] = request.get("id")
     return next_output
 
 
@@ -110,8 +120,13 @@ def main() -> None:
         try:
             request = json.loads(line)
             output = dispatch(request)
+            output = _attach_request_context(output, request)
         except Exception as exc:
-            output = {"success": False, "id": request.get("id") if isinstance(request, dict) else None, "error": str(exc)}
+            output = {
+                "success": False,
+                "id": request.get("id") if isinstance(request, dict) else None,
+                "error": str(exc),
+            }
         finally:
             elapsed_ms = (time.perf_counter() - started) * 1000.0
             if isinstance(output, dict):
