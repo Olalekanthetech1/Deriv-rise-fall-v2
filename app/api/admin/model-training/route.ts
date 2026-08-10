@@ -1,7 +1,7 @@
 import { NextRequest, NextResponse } from 'next/server';
 import { verifySessionToken } from '../auth/route';
 import { getMlModelKeys, type MlModelKey } from '@/lib/ml-model-registry';
-import { listTrainingRuns, trainDatasetModels } from '@/lib/ml-training-orchestrator';
+import { clearTrainingRunHistory, listTrainingRuns, trainDatasetModels } from '@/lib/ml-training-orchestrator';
 
 function isAdmin(req: NextRequest): boolean {
   const cookieToken = req.cookies.get('admin_session_token')?.value;
@@ -35,5 +35,35 @@ export async function POST(req: NextRequest) {
     const message = error instanceof Error ? error.message : 'Model training failed.';
     const status = /DATASET|INSUFFICIENT|INVALID_|SCHEMA|REQUIRED|NO_REGISTERED/i.test(message) ? 422 : /DATABASE/i.test(message) ? 503 : 500;
     return NextResponse.json({ success: false, error: message }, { status, headers: noStore() });
+  }
+}
+
+export async function DELETE(req: NextRequest) {
+  if (!isAdmin(req)) return NextResponse.json({ success: false, error: 'Unauthorized admin access.' }, { status: 401, headers: noStore() });
+
+  try {
+    const confirmation = req.headers.get('x-confirm-training-history-reset');
+    if (confirmation !== 'DELETE_TRAINING_HISTORY') {
+      return NextResponse.json({ success: false, error: 'Explicit confirmation is required to clear training history.' }, { status: 400, headers: noStore() });
+    }
+
+    const result = await clearTrainingRunHistory();
+    return NextResponse.json({
+      success: true,
+      message: 'Training history cleared. Datasets, dataset samples, registered models, artifacts, market data and configuration were not targeted.',
+      ...result,
+    }, { headers: noStore() });
+  } catch (error) {
+    const message = error instanceof Error ? error.message : 'Unable to clear training history.';
+    if (message === 'TRAINING_HISTORY_RESET_BLOCKED_BY_RUNNING_JOBS') {
+      const runningRuns = (error as Error & { runningRuns?: unknown[] }).runningRuns || [];
+      return NextResponse.json({
+        success: false,
+        error: 'Training history cannot be cleared while a training job is running. Let the active run finish first.',
+        code: message,
+        runningRuns,
+      }, { status: 409, headers: noStore() });
+    }
+    return NextResponse.json({ success: false, error: message }, { status: 503, headers: noStore() });
   }
 }
