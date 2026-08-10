@@ -125,7 +125,7 @@ async function reconcileStaleTrainingRuns(sql: any): Promise<number> {
           error='Training worker heartbeat expired; the run was reconciled as stale.',
           completed_at=COALESCE(completed_at, NOW()),
           heartbeat_at=NULL,
-          metadata=COALESCE(metadata,'{}'::jsonb) || jsonb_build_object('staleRecovery', jsonb_build_object('reconciledAt', NOW(), 'staleAfterMs', ${staleMs})),
+          metadata=COALESCE(metadata,'{}'::jsonb) || jsonb_build_object('staleRecovery', jsonb_build_object('reconciledAt', NOW(), 'staleAfterMs', (${staleMs}::bigint))),
           updated_at=NOW()
       WHERE run_id=${runId} AND status='running'
     `;
