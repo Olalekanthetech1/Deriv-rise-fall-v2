@@ -1,10 +1,37 @@
 """Small, trainable PyTorch sequence models used by ml_runtime_v4."""
+import math
+import os
+
 import numpy as np
 import torch
 import torch.nn as nn
 
 FEATURE_COUNT = 37
 SEQUENCE_LENGTH = 25
+
+
+def _configure_torch_threads():
+    raw_cpu = os.getenv("RENDER_CPU_COUNT", "").strip()
+    try:
+        cpu_count = float(raw_cpu) if raw_cpu else float(os.cpu_count() or 1)
+    except ValueError:
+        cpu_count = float(os.cpu_count() or 1)
+    raw_concurrency = os.getenv("ML_TRAINING_CONCURRENCY", "1").strip()
+    try:
+        concurrency = max(1, int(raw_concurrency))
+    except ValueError:
+        concurrency = 1
+    thread_budget = max(1, int(math.floor(max(0.25, cpu_count) / min(concurrency, 16))))
+    try:
+        torch.set_num_threads(thread_budget)
+        torch.set_num_interop_threads(1)
+    except RuntimeError:
+        # PyTorch may reject thread changes after parallel work has begun.
+        pass
+
+
+_configure_torch_threads()
+
 
 class TCN(nn.Module):
     def __init__(self):
@@ -16,10 +43,12 @@ class TCN(nn.Module):
         )
     def forward(self, x): return self.net(x.transpose(1, 2))
 
+
 class LSTM(nn.Module):
     def __init__(self):
         super().__init__(); self.rnn=nn.LSTM(FEATURE_COUNT,64,batch_first=True); self.head=nn.Linear(64,2)
     def forward(self,x): return self.head(self.rnn(x)[0][:,-1,:])
+
 
 class Transformer(nn.Module):
     def __init__(self):
@@ -28,11 +57,13 @@ class Transformer(nn.Module):
         self.encoder=nn.TransformerEncoder(layer,num_layers=2); self.head=nn.Linear(64,2)
     def forward(self,x): return self.head(self.encoder(self.proj(x))[:,-1,:])
 
+
 def make(kind):
     if kind=='tcn': return TCN()
     if kind=='lstm': return LSTM()
     if kind=='transformer': return Transformer()
     raise ValueError(kind)
+
 
 def train(kind,X,y,epochs=8,batch_size=64,lr=.001):
     torch.manual_seed(42); model=make(kind); opt=torch.optim.Adam(model.parameters(),lr=lr); loss_fn=nn.CrossEntropyLoss()
@@ -42,6 +73,7 @@ def train(kind,X,y,epochs=8,batch_size=64,lr=.001):
         for s in range(0,len(order),batch_size):
             idx=order[s:s+batch_size]; opt.zero_grad(set_to_none=True); loss=loss_fn(model(xt[idx]),yt[idx]); loss.backward(); nn.utils.clip_grad_norm_(model.parameters(),1.0); opt.step()
     return model
+
 
 def predict(kind,state_dict,X):
     model=make(kind); model.load_state_dict(state_dict); model.eval()
