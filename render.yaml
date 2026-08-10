@@ -11,5 +11,7 @@ services:
         value: "3000"
       - key: NODE_ENV
         value: "production"
+      - key: ML_TRAINING_CONCURRENCY
+        value: "1"
       - key: NEXT_PUBLIC_DERIV_APP_ID
         sync: false
