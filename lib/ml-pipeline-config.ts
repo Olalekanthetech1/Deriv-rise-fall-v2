@@ -1,5 +1,5 @@
 import crypto from 'crypto';
-import { assertFeatureOrder, getFeatureOrder, type FeatureKey } from './ml-feature-registry';
+import { assertFeatureOrder, getFeatureDefinitions, getFeatureOrder, type FeatureKey } from './ml-feature-registry';
 import { buildBootstrapMlPipelineConfig } from './ml-pipeline-registry';
 import {
   ensureBootstrapMlPipelineConfig,
@@ -112,9 +112,6 @@ function canonicalizeConfig(source: UnknownRecord): FeaturePipelineConfig {
     macro: requiredPositiveInteger(featureWindowsSource.macro, 'featureWindows.macro'),
   };
 
-  // These values define the feature schema topology and therefore cannot be
-  // changed through configuration. The registry owns the 5 → 25 → 100 → 300
-  // hierarchy and the canonical 300-tick training window.
   if (JSON.stringify(featureWindows) !== JSON.stringify(bootstrap.featureWindows)) {
     throw new Error('[ML Config] featureWindows must match the canonical feature registry topology.');
   }
@@ -170,13 +167,33 @@ function hashConfig(config: FeaturePipelineConfig): string {
   return crypto.createHash('sha256').update(JSON.stringify(config)).digest('hex');
 }
 
+function buildSchemaFingerprint(config: FeaturePipelineConfig, featureOrder: readonly string[] = config.featureOrder, pipelineVersion = config.pipelineVersion): string {
+  const featureDefinitions = getFeatureDefinitions().map(({ key, pillar }) => ({ key, pillar }));
+  const fingerprintPayload = {
+    pipelineVersion,
+    featureOrder: [...featureOrder],
+    featureDefinitions,
+    featureWindows: config.featureWindows,
+    canonicalFeatureWindowTicks: config.canonicalFeatureWindowTicks,
+    sequenceLength: config.featureWindows.short,
+    defaultHorizonTicks: config.defaultHorizonTicks,
+    regimeThreshold: config.regimeThreshold,
+    digitPrecision: config.digitPrecision,
+    syntheticSymbolPrefixes: config.syntheticSymbolPrefixes,
+    splitRatios: config.splitRatios,
+    normalizationMethod: config.normalizationMethod,
+    normalizationEpsilon: config.normalizationEpsilon,
+  };
+  return crypto.createHash('sha256').update(JSON.stringify(fingerprintPayload)).digest('hex');
+}
+
 function buildRuntime(config: FeaturePipelineConfig, stored?: StoredMlPipelineConfig | null): MlPipelineConfigRuntime {
   return {
     config,
     source: stored ? 'persistent-active' : 'bootstrap',
     version: stored?.version ?? null,
     configHash: stored?.configHash ?? hashConfig(config),
-    featureSchemaVersion: deriveFeatureSchemaVersion(config.featureOrder, config.pipelineVersion),
+    featureSchemaVersion: deriveFeatureSchemaVersion(config.featureOrder, config.pipelineVersion, config),
   };
 }
 
@@ -194,7 +211,7 @@ export async function initializeMlPipelineConfig(): Promise<MlPipelineConfigRunt
         return cachedRuntime;
       }
 
-      const featureSchemaVersion = deriveFeatureSchemaVersion(bootstrap.featureOrder, bootstrap.pipelineVersion);
+      const featureSchemaVersion = deriveFeatureSchemaVersion(bootstrap.featureOrder, bootstrap.pipelineVersion, bootstrap);
       const created = await ensureBootstrapMlPipelineConfig(bootstrap, featureSchemaVersion);
       if (created) {
         const validated = validateMlPipelineConfig(created.config);
@@ -232,13 +249,13 @@ export function getFeatureVectorSnapshot(config: FeaturePipelineConfig = getMlPi
   return {
     featureOrder: [...config.featureOrder],
     featureCount: config.featureOrder.length,
-    schemaVersion: deriveFeatureSchemaVersion(config.featureOrder, config.pipelineVersion),
+    schemaVersion: deriveFeatureSchemaVersion(config.featureOrder, config.pipelineVersion, config),
   };
 }
 
-export function deriveFeatureSchemaVersion(featureOrder: readonly string[], pipelineVersion = getMlPipelineConfig().pipelineVersion): string {
-  const digest = crypto.createHash('sha256').update(`${pipelineVersion}|${featureOrder.join('|')}`).digest('hex').slice(0, 12);
-  return `feature-schema-${featureOrder.length}-${digest}`;
+export function deriveFeatureSchemaVersion(featureOrder: readonly string[], pipelineVersion = getMlPipelineConfig().pipelineVersion, config: FeaturePipelineConfig = getMlPipelineConfig()): string {
+  const fingerprint = buildSchemaFingerprint(config, featureOrder, pipelineVersion);
+  return `feature-schema-${featureOrder.length}-${fingerprint.slice(0, 12)}`;
 }
 
 export function deriveLabelSchemaVersion(labelDeadZone: number, horizonTicks: number, config: FeaturePipelineConfig = getMlPipelineConfig()): string {
