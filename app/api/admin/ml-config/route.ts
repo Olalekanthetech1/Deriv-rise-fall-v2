@@ -9,6 +9,7 @@ import {
   reloadMlPipelineConfig,
   validateMlPipelineConfig,
 } from '@/lib/ml-pipeline-config';
+import { buildMlRuntimeSchemaContract } from '@/lib/ml-runtime-schema';
 import { buildBootstrapMlPipelineConfig } from '@/lib/ml-pipeline-registry';
 import {
   activateMlPipelineConfigVersion,
@@ -39,19 +40,28 @@ export async function GET(req: NextRequest) {
 
   try {
     const runtimeConfig = await initializeMlPipelineConfig();
+    const contract = buildMlRuntimeSchemaContract(runtimeConfig.config);
     const history = await listMlPipelineConfigs(25);
     return NextResponse.json({
       success: true,
       active: {
         ...runtimeConfig,
         config: runtimeConfig.config,
+        runtimeSchema: contract,
       },
       history,
       canonical: {
-        featureCount: runtimeConfig.config.featureOrder.length,
-        featureOrder: runtimeConfig.config.featureOrder,
-        featureWindows: runtimeConfig.config.featureWindows,
-        canonicalFeatureWindowTicks: runtimeConfig.config.canonicalFeatureWindowTicks,
+        featureCount: contract.featureCount,
+        featureOrder: contract.featureOrder,
+        featureDefinitions: contract.featureDefinitions,
+        featureWindows: contract.featureWindows,
+        canonicalFeatureWindowTicks: contract.canonicalFeatureWindowTicks,
+        sequenceLength: contract.sequenceLength,
+        splitRatios: contract.splitRatios,
+        normalizationMethod: contract.normalizationMethod,
+        normalizationEpsilon: contract.normalizationEpsilon,
+        schemaFingerprint: contract.schemaFingerprint,
+        featureSchemaVersion: contract.featureSchemaVersion,
       },
     }, { headers: noStore() });
   } catch (error) {
@@ -85,18 +95,18 @@ export async function POST(req: NextRequest) {
         },
       };
       const validated = validateMlPipelineConfig(merged);
-      const featureSchemaVersion = deriveFeatureSchemaVersion(validated.featureOrder, validated.pipelineVersion);
-      const created = await createMlPipelineConfigVersion(validated, featureSchemaVersion, 'admin');
+      const contract = buildMlRuntimeSchemaContract(validated);
+      const created = await createMlPipelineConfigVersion(validated, contract.featureSchemaVersion, 'admin');
       if (!created) return NextResponse.json({ success: false, error: 'Configuration generation failed.' }, { status: 500, headers: noStore() });
 
       void recordObservabilityEvent({
         category: 'ml', severity: 'info', service: 'ml-config', eventType: 'config_generated',
-        message: 'A new ML pipeline configuration version was generated from the canonical registries.',
+        message: 'A new ML pipeline configuration version was generated from the canonical runtime schema contract.',
         requestId: id,
-        metadata: { version: created.version, configHash: created.configHash, featureSchemaVersion },
+        metadata: { version: created.version, configHash: created.configHash, featureSchemaVersion: contract.featureSchemaVersion, schemaFingerprint: contract.schemaFingerprint },
       });
 
-      return NextResponse.json({ success: true, generated: created }, { headers: noStore() });
+      return NextResponse.json({ success: true, generated: { ...created, runtimeSchema: contract } }, { headers: noStore() });
     }
 
     if (action === 'activate') {
@@ -105,18 +115,28 @@ export async function POST(req: NextRequest) {
       const existing = await getMlPipelineConfigVersion(versionId);
       if (!existing) return NextResponse.json({ success: false, error: 'Configuration version was not found.' }, { status: 404, headers: noStore() });
       const validated = validateMlPipelineConfig(existing.config);
+      const contract = buildMlRuntimeSchemaContract(validated);
+      if (existing.featureSchemaVersion !== contract.featureSchemaVersion) {
+        return NextResponse.json({
+          success: false,
+          error: 'Configuration version has a stale feature schema fingerprint. Generate a new configuration version before activation.',
+          expectedFeatureSchemaVersion: contract.featureSchemaVersion,
+          storedFeatureSchemaVersion: existing.featureSchemaVersion,
+          schemaFingerprint: contract.schemaFingerprint,
+        }, { status: 409, headers: noStore() });
+      }
       const activated = await activateMlPipelineConfigVersion(versionId);
       if (!activated) return NextResponse.json({ success: false, error: 'Configuration activation failed.' }, { status: 500, headers: noStore() });
       await reloadMlPipelineConfig();
 
       void recordObservabilityEvent({
         category: 'ml', severity: 'info', service: 'ml-config', eventType: 'config_activated',
-        message: 'An ML pipeline configuration version was activated after validation.',
+        message: 'An ML pipeline configuration version was activated after runtime schema validation.',
         requestId: id,
-        metadata: { version: activated.version, configHash: activated.configHash, featureSchemaVersion: activated.featureSchemaVersion },
+        metadata: { version: activated.version, configHash: activated.configHash, featureSchemaVersion: contract.featureSchemaVersion, schemaFingerprint: contract.schemaFingerprint },
       });
 
-      return NextResponse.json({ success: true, activated: { ...activated, config: validated } }, { headers: noStore() });
+      return NextResponse.json({ success: true, activated: { ...activated, config: validated, runtimeSchema: contract } }, { headers: noStore() });
     }
 
     return NextResponse.json({ success: false, error: 'Unsupported configuration action.' }, { status: 400, headers: noStore() });
