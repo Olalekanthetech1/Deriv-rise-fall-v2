@@ -3,7 +3,7 @@ import { verifySessionToken } from '../auth/route';
 import { buildDurationTrainingDataset, listDurationTrainingDatasets } from '@/lib/training-dataset-builder-duration-v2';
 import { expandTrainingDurations, type DerivDurationRange, type DerivDurationUnit } from '@/lib/deriv-duration-registry';
 import { getCachedOrDiscoverDuration } from '@/lib/deriv-duration-cache';
-import { claimNextAutoDatasetJobItem, completeAutoDatasetJobItem, createAutoDatasetJob, failAutoDatasetJobItem, getAutoDatasetJob, getLatestAutoDatasetJob, refreshAutoDatasetJobStatus } from '@/lib/auto-dataset-job-store';
+import { claimNextAutoDatasetJobItem, completeAutoDatasetJobItem, createAutoDatasetJob, failAutoDatasetJobItem, getAutoDatasetJob, getAutoDatasetJobItemStatus, getLatestAutoDatasetJob, refreshAutoDatasetJobStatus, discardAutoDatasetBuild } from '@/lib/auto-dataset-job-store';
 
 function isAuthenticated(req: NextRequest): boolean {
   const cookieToken = req.cookies.get('admin_session_token')?.value;
@@ -60,6 +60,22 @@ function expandTrainingHorizonLadder(ranges: DerivDurationRange[]): Array<{ valu
   });
 }
 
+function trainingEligibleDatasets<T extends Record<string, any>>(datasets: T[]): T[] {
+  const eligible = datasets
+    .filter((dataset) => dataset?.status === 'completed' && dataset?.leakage_check_passed === true && Number(dataset?.sample_count ?? 0) > 0)
+    .sort((a, b) => new Date(String(b?.created_at ?? 0)).getTime() - new Date(String(a?.created_at ?? 0)).getTime());
+  const seen = new Set<string>();
+  return eligible.filter((dataset) => {
+    const symbol = String(dataset?.asset_symbol ?? '').trim().toUpperCase();
+    const unit = String(dataset?.duration_unit ?? '').trim();
+    const value = Number(dataset?.duration_value);
+    const identity = `${symbol}|${unit}|${value}`;
+    if (!symbol || !validUnit(unit) || !Number.isSafeInteger(value) || value <= 0 || seen.has(identity)) return false;
+    seen.add(identity);
+    return true;
+  });
+}
+
 const activeLocalWorkers = new Set<string>();
 async function runAutoDatasetWorker(jobId: string): Promise<void> {
   if (activeLocalWorkers.has(jobId)) return;
@@ -74,7 +90,14 @@ async function runAutoDatasetWorker(jobId: string): Promise<void> {
     }
     const memoryBefore = process.memoryUsage().rss;
     try {
-      await buildDurationTrainingDataset({ symbol: job.symbol, durationValue: item.value, durationUnit: item.unit, durationRangeId: item.rangeId });
+      const result = await buildDurationTrainingDataset({ symbol: job.symbol, durationValue: item.value, durationUnit: item.unit, durationRangeId: item.rangeId });
+      const itemStatus = await getAutoDatasetJobItemStatus(jobId, item.id);
+      if (itemStatus === 'cancelled') {
+        await discardAutoDatasetBuild(result.datasetId);
+        await refreshAutoDatasetJobStatus(jobId);
+        console.info('[AUTO dataset item discarded after cancellation]', JSON.stringify({ jobId, itemIndex: item.itemIndex, value: item.value, unit: item.unit, datasetId: result.datasetId }));
+        return;
+      }
       await completeAutoDatasetJobItem(jobId, item.id);
       const memoryAfter = process.memoryUsage().rss;
       console.info('[AUTO dataset item completed]', JSON.stringify({ jobId, itemIndex: item.itemIndex, value: item.value, unit: item.unit, memoryBeforeMb: Math.round(memoryBefore / 1048576), memoryAfterMb: Math.round(memoryAfter / 1048576) }));
@@ -97,6 +120,7 @@ export async function GET(req: NextRequest) {
     const symbol = req.nextUrl.searchParams.get('symbol')?.trim().toUpperCase() || undefined;
     const autoJobId = req.nextUrl.searchParams.get('autoJobId')?.trim();
     const latestAutoJob = req.nextUrl.searchParams.get('latestAutoJob') === '1';
+    const eligibleForTraining = req.nextUrl.searchParams.get('eligibleForTraining') === '1';
     if (latestAutoJob) {
       const job = await getLatestAutoDatasetJob();
       if (job?.status === 'running') resumeAutoDatasetJob(job.id);
@@ -111,9 +135,10 @@ export async function GET(req: NextRequest) {
       return NextResponse.json({ success: true, job: refreshed ?? job }, { headers: noStore() });
     }
     const datasets = await listDurationTrainingDatasets(symbol);
-    if (!symbol) return NextResponse.json({ success: true, datasets, durationSource: 'deriv-dynamic' }, { headers: noStore() });
+    const visibleDatasets = eligibleForTraining ? trainingEligibleDatasets(datasets as Array<Record<string, any>>) : datasets;
+    if (!symbol) return NextResponse.json({ success: true, datasets: visibleDatasets, durationSource: 'deriv-dynamic' }, { headers: noStore() });
     const resolved = await getCachedOrDiscoverDuration(symbol);
-    return NextResponse.json({ success: true, datasets, durationSource: resolved.source, durationRefreshing: resolved.refreshing, durationCachedAt: resolved.cachedAt, durationDiscovery: resolved.discovery, trainingHorizons: expandTrainingHorizonLadder(resolved.discovery.ranges), brokerTrainingHorizons: expandTrainingDurations(resolved.discovery.ranges) }, { headers: noStore() });
+    return NextResponse.json({ success: true, datasets: visibleDatasets, durationSource: resolved.source, durationRefreshing: resolved.refreshing, durationCachedAt: resolved.cachedAt, durationDiscovery: resolved.discovery, trainingHorizons: expandTrainingHorizonLadder(resolved.discovery.ranges), brokerTrainingHorizons: expandTrainingDurations(resolved.discovery.ranges) }, { headers: noStore() });
   } catch (error) {
     return NextResponse.json({ success: false, error: error instanceof Error ? error.message : 'Unable to load training dataset operations.' }, { status: 503, headers: noStore() });
   }

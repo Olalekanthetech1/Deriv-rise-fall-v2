@@ -32,13 +32,13 @@ export default function TrainingPipelinePage() {
   async function load() {
     setLoading(true); setError(null);
     try {
-      const [datasetResponse,runResponse] = await Promise.all([fetch('/api/admin/datasets',{cache:'no-store'}),fetch('/api/admin/model-training',{cache:'no-store'})]);
+      const [datasetResponse,runResponse] = await Promise.all([fetch('/api/admin/datasets?eligibleForTraining=1',{cache:'no-store'}),fetch('/api/admin/model-training',{cache:'no-store'})]);
       const datasetData = await datasetResponse.json().catch(()=>({})); const runData = await runResponse.json().catch(()=>({}));
       if (!datasetResponse.ok) throw new Error(datasetData?.error || 'Unable to load training datasets.');
       if (!runResponse.ok) throw new Error(runData?.error || 'Unable to load training runs.');
       const nextDatasets = Array.isArray(datasetData?.datasets) ? datasetData.datasets : [];
       setDatasets(nextDatasets); setRuns(Array.isArray(runData?.runs) ? runData.runs : []);
-      setSelectedDataset((current) => current || nextDatasets.find((d:Dataset)=>d.status==='completed' && d.leakage_check_passed)?.id || '');
+      setSelectedDataset((current) => current && nextDatasets.some((d:Dataset)=>d.id===current) ? current : nextDatasets[0]?.id || '');
     } catch (e) { setError(e instanceof Error ? e.message : 'Unable to load model training operations.'); }
     finally { setLoading(false); }
   }
