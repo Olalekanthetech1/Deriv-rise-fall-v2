@@ -41,11 +41,15 @@ interface SignalWinStats {
 
 interface SignalApiResponse {
   success: boolean;
+  error?: string;
   signals?: TradeSignal[];
   winStats?: SignalWinStats;
   consensus?: SignalConsensus;
   modeRecommendations?: SignalModeRecommendation[];
 }
+
+const MODEL_UNAVAILABLE_ERROR = 'NO_VALIDATED_TRAINED_MODELS_AVAILABLE';
+const MODEL_RETRY_COOLDOWN_MS = 15_000;
 
 export function useRealtimeSignals(
   activeSymbol: ActiveSymbol | null,
@@ -61,6 +65,8 @@ export function useRealtimeSignals(
   const [winStats, setWinStats] = useState<SignalWinStats>({ total: 0, winCount: 0, accuracy: '0.0%' });
   const lastTickQuoteRef = useRef<number | null>(null);
   const audioCtxRef = useRef<AudioContext | null>(null);
+  const predictionInFlightRef = useRef(false);
+  const modelRetryAfterRef = useRef(0);
 
   const playAlertSound = useCallback(() => {
     if (!soundEnabled || typeof window === 'undefined') return;
@@ -92,10 +98,14 @@ export function useRealtimeSignals(
     if (lastTickQuoteRef.current === currentQuote) return;
     lastTickQuoteRef.current = currentQuote;
 
+    const now = Date.now();
+    if (now < modelRetryAfterRef.current || predictionInFlightRef.current) return;
+
     const symbolKey = activeSymbol.underlying_symbol;
     const pipSize = activeSymbol.pip_size ?? 0.01;
     const tickObjects = prices.map((price, idx) => ({ price, timestamp: Date.now() - (prices.length - idx) * 1000 }));
     let isSubscribed = true;
+    predictionInFlightRef.current = true;
 
     async function fetchSignals() {
       try {
@@ -104,18 +114,33 @@ export function useRealtimeSignals(
           headers: { 'Content-Type': 'application/json' },
           body: JSON.stringify({ symbol: symbolKey, ticks: tickObjects, pipSize, durationValue, durationUnit }),
         });
+        const data = (await res.json().catch(() => ({}))) as SignalApiResponse;
+
+        if (data?.error === MODEL_UNAVAILABLE_ERROR) {
+          // Training/validation has not produced a production-eligible model yet.
+          // Stop per-tick prediction polling and retry periodically instead of
+          // flooding the API with an error that cannot succeed until model state changes.
+          modelRetryAfterRef.current = Date.now() + MODEL_RETRY_COOLDOWN_MS;
+          if (isSubscribed) {
+            setSignals([]);
+            setConsensus(null);
+            setModeRecommendations([]);
+          }
+          return;
+        }
+
         if (!res.ok) return;
-        const data = (await res.json()) as SignalApiResponse;
         if (!isSubscribed || !data.success || !Array.isArray(data.signals)) return;
 
+        modelRetryAfterRef.current = 0;
         if (data.winStats) setWinStats(data.winStats);
         if (data.consensus) setConsensus(data.consensus);
         if (Array.isArray(data.modeRecommendations)) setModeRecommendations(data.modeRecommendations);
 
-        const now = Date.now();
+        const responseNow = Date.now();
         setSignals((prev) => data.signals!.map((next) => {
           const existing = prev.find((s) => s.id === next.id);
-          if (existing && existing.expiresAt > now) return existing;
+          if (existing && existing.expiresAt > responseNow) return existing;
           return next;
         }));
 
@@ -130,11 +155,16 @@ export function useRealtimeSignals(
         }
       } catch (err) {
         console.warn('[Realtime Signal Fetch Warning]:', err);
+      } finally {
+        predictionInFlightRef.current = false;
       }
     }
 
     void fetchSignals();
-    return () => { isSubscribed = false; };
+    return () => {
+      isSubscribed = false;
+      predictionInFlightRef.current = false;
+    };
   }, [activeSymbol, currentTick, prices, durationValue, durationUnit, playAlertSound]);
 
   useEffect(() => {
