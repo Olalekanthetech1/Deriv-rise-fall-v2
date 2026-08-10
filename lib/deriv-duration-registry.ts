@@ -16,7 +16,14 @@ const PROBE_SEEDS: Record<DerivDurationUnit, number[]> = {
   d: [1, 2, 3, 5, 7, 14, 30, 60, 90, 180, 365],
 };
 const DISCOVERY_TTL_MS = 10 * 60 * 1000;
-const PROBE_INTERVAL_MS = 1000;
+// Proposal probing is deliberately throttled, but the previous 1s cadence
+// made first-time discovery take several minutes on symbols exposing many
+// duration units. Keep a conservative floor while allowing Render/operator
+// deployments to tune the cadence without changing the discovery algorithm.
+const configuredProbeInterval = Number(process.env.DERIV_DISCOVERY_PROBE_INTERVAL_MS);
+const PROBE_INTERVAL_MS = Number.isFinite(configuredProbeInterval)
+  ? Math.min(2000, Math.max(200, Math.floor(configuredProbeInterval)))
+  : 250;
 const MAX_RATE_LIMIT_RETRIES = 2;
 const STEP_DISCOVERY_WINDOW = 128;
 const PROBEABLE_TYPES = new Set(['CALL', 'PUT', 'CALLE', 'PUTE', 'UPORDOWN', 'MULTUP', 'MULTDOWN', 'TICKHIGH', 'TICKLOW', 'RESETCALL', 'RESETPUT']);
