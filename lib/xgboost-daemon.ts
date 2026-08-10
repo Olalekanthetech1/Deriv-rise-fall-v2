@@ -8,7 +8,7 @@ interface PendingRequest {
 }
 
 type DaemonAction = 'predict' | 'predict_ensemble' | 'train' | 'train_partitioned' | 'list_models' | 'ping' | 'backtest';
-const CANONICAL_RUNTIME_ENTRYPOINT = 'ml_runtime_entrypoint.py';
+const CANONICAL_RUNTIME_ENTRYPOINT = 'ml_runtime_entry.py';
 
 function attachClientRoundTripTiming(data: any, roundTripMs: number): any {
   if (!data || typeof data !== 'object') return data;
