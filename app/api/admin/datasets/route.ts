@@ -138,7 +138,20 @@ export async function GET(req: NextRequest) {
     const visibleDatasets = eligibleForTraining ? trainingEligibleDatasets(datasets as Array<Record<string, any>>) : datasets;
     if (!symbol) return NextResponse.json({ success: true, datasets: visibleDatasets, durationSource: 'deriv-dynamic' }, { headers: noStore() });
     const resolved = await getCachedOrDiscoverDuration(symbol);
-    return NextResponse.json({ success: true, datasets: visibleDatasets, durationSource: resolved.source, durationRefreshing: resolved.refreshing, durationCachedAt: resolved.cachedAt, durationDiscovery: resolved.discovery, trainingHorizons: expandTrainingHorizonLadder(resolved.discovery.ranges), brokerTrainingHorizons: expandTrainingDurations(resolved.discovery.ranges) }, { headers: noStore() });
+    const brokerTrainingHorizons = expandTrainingDurations(resolved.discovery.ranges);
+    return NextResponse.json({
+      success: true,
+      datasets: visibleDatasets,
+      durationSource: resolved.source,
+      durationRefreshing: resolved.refreshing,
+      durationCachedAt: resolved.cachedAt,
+      durationDiscovery: resolved.discovery,
+      // The selector must expose the complete broker-discovered duration domain.
+      // The bounded ladder remains available only for resource-controlled AUTO builds.
+      trainingHorizons: brokerTrainingHorizons,
+      brokerTrainingHorizons,
+      autoTrainingHorizons: expandTrainingHorizonLadder(resolved.discovery.ranges),
+    }, { headers: noStore() });
   } catch (error) {
     return NextResponse.json({ success: false, error: error instanceof Error ? error.message : 'Unable to load training dataset operations.' }, { status: 503, headers: noStore() });
   }
