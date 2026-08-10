@@ -28,18 +28,12 @@ export interface ProductionEnsembleResult {
   timestamp: number;
 }
 
-type AvailableEvaluation = {
-  modelKey: string;
-  modelName: string;
-  family: 'tabular' | 'sequential';
+type AvailableEvaluation = ProductionEnsembleResult['evaluations'][number] & {
   probabilityUp: number;
   probabilityDown: number;
   signal: Signal;
   confidence: number;
   dynamicWeight: number;
-  runtimeMode: string;
-  details: string;
-  validation: any;
 };
 
 function finiteProbability(value: unknown): number | null {
