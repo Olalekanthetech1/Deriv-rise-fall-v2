@@ -7,6 +7,36 @@
 
 export type MultiModelSignal = 'RISE' | 'FALL';
 
+export interface MultiModelAssetContextView {
+  symbol: string;
+  assetCategory: number;
+  assetClass: string;
+  marketType: string;
+  assetLabel: string;
+  duration: {
+    value: number;
+    unit: 't' | 'm' | 'h';
+    seconds: number;
+    label: string;
+    band: 'tick' | 'seconds' | 'minutes' | 'hours';
+  };
+  tickCount: number | null;
+  requiredContextTicks: number;
+  qualityScore: number;
+  confidenceGateThreshold: number;
+  strategyMode: 'CLASSIC' | 'PRO' | 'AI';
+  accepted: boolean;
+  rationale: string[];
+}
+
+export interface MultiModelStrategyGateView {
+  accepted: boolean;
+  confidenceGateThreshold: number;
+  riskTier: 'LOW' | 'MODERATE' | 'ELEVATED' | 'HIGH';
+  action: 'EXECUTE_CALL' | 'EXECUTE_PUT' | 'HOLD_NO_SIGNAL';
+  reasons: string[];
+}
+
 export interface MultiModelEvaluationView {
   modelKey: string;
   modelName: string;
@@ -75,6 +105,8 @@ export interface MultiModelEvaluationResult {
   confidence: number;
   marketRegime?: string;
   anomalyScore?: number | null;
+  assetContext?: MultiModelAssetContextView;
+  strategyGate?: MultiModelStrategyGateView;
   modelBreakdown?: Record<string, any>;
   evaluations: MultiModelEvaluationView[];
   regime?: MultiModelRegimeView;
