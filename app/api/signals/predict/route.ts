@@ -52,7 +52,8 @@ function buildSignalItems(ensemble: ProductionEnsembleResult, duration: ReturnTy
     .map((evaluation) => {
       const direction = evaluation.signal!;
       const confidence = evaluation.confidence!;
-      const expiry = now + duration.seconds * 1000;
+      const executable = ensemble.strategyGate.accepted;
+      const expiry = executable ? now + duration.seconds * 1000 : now;
       const durationPrediction: DurationPrediction = { value: duration.value, unit: duration.unit, label: duration.label, direction, confidence, winRate: 'Native model probability' };
       return {
         id: `sig-${evaluation.modelKey}-${ensemble.symbol}`,
@@ -60,17 +61,17 @@ function buildSignalItems(ensemble: ProductionEnsembleResult, duration: ReturnTy
         category: 'AI',
         direction,
         confidence,
-        strength: direction === 'RISE' ? 'Buy' : 'Sell',
+        strength: executable ? (direction === 'RISE' ? 'Buy' : 'Sell') : 'Neutral',
         recommendedDurationValue: duration.value,
         recommendedDurationUnit: duration.unit,
         recommendedDurationLabel: duration.label,
         durationMatrix: [durationPrediction],
-        expiresInSeconds: duration.seconds,
-        maxExpirySeconds: duration.seconds,
+        expiresInSeconds: executable ? duration.seconds : 0,
+        maxExpirySeconds: executable ? duration.seconds : 0,
         expiresAt: expiry,
         winRate: 'Native model probability',
-        description: `${evaluation.details} · Gate ${ensemble.strategyGate.accepted ? 'passed' : 'blocked'} (${ensemble.strategyGate.confidenceGateThreshold}%)`,
-        strategyGateAccepted: ensemble.strategyGate.accepted,
+        description: `${evaluation.details} · Gate ${executable ? 'passed' : 'blocked'} (${ensemble.strategyGate.confidenceGateThreshold}%)`,
+        strategyGateAccepted: executable,
         strategyGateThreshold: ensemble.strategyGate.confidenceGateThreshold,
         strategyGateRiskTier: ensemble.strategyGate.riskTier,
         strategyGateReasons: ensemble.strategyGate.reasons,
