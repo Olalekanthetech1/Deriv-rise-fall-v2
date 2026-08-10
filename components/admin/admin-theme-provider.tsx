@@ -1,13 +1,14 @@
 'use client';
 
 import { Moon, Sun } from 'lucide-react';
+import { usePathname } from 'next/navigation';
 import { ReactNode, useEffect, useState } from 'react';
 
 const STORAGE_KEY = 'admin-theme';
-
 type AdminTheme = 'light' | 'dark';
 
 export function AdminThemeProvider({ children }: { children: ReactNode }) {
+  const pathname = usePathname();
   const [theme, setTheme] = useState<AdminTheme>('dark');
   const [ready, setReady] = useState(false);
 
@@ -17,6 +18,17 @@ export function AdminThemeProvider({ children }: { children: ReactNode }) {
     setTheme(next);
     document.documentElement.classList.toggle('admin-theme-light', next === 'light');
     setReady(true);
+  }, [pathname]);
+
+  useEffect(() => {
+    const onStorage = (event: StorageEvent) => {
+      if (event.key !== STORAGE_KEY) return;
+      const next: AdminTheme = event.newValue === 'light' ? 'light' : 'dark';
+      setTheme(next);
+      document.documentElement.classList.toggle('admin-theme-light', next === 'light');
+    };
+    window.addEventListener('storage', onStorage);
+    return () => window.removeEventListener('storage', onStorage);
   }, []);
 
   const toggleTheme = () => {
@@ -28,10 +40,12 @@ export function AdminThemeProvider({ children }: { children: ReactNode }) {
     });
   };
 
+  const showGlobalToggle = pathname !== '/admin';
+
   return (
     <div className="admin-theme-surface min-h-screen">
       {children}
-      {ready && (
+      {ready && showGlobalToggle && (
         <button
           type="button"
           onClick={toggleTheme}
