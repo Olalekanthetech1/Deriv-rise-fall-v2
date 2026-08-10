@@ -5,8 +5,6 @@
 @layer base {
   :root {
     --radius: 0.5rem;
-    
-    /* Light mode colors from Figma tokens */
     --primary: 0 195 144;
     --accent: 246 247 248;
     --background: 255 255 255;
@@ -68,7 +66,6 @@
   }
 
   .dark {
-    /* Dark mode colors from Figma tokens */
     --primary: 0 195 144;
     --accent-foreground: 246 247 248;
     --background: 24 28 37;
@@ -127,10 +124,56 @@
 }
 
 @layer base {
-  * {
-    @apply border-border;
-  }
-  body {
-    @apply bg-background text-foreground;
-  }
+  * { @apply border-border; }
+  body { @apply bg-background text-foreground; }
+}
+
+/* Admin Operations Center theme surface. The dashboard currently uses a deliberate
+   dark utility palette, so light mode overrides that palette only inside the admin
+   shell instead of changing the rest of the trading application. */
+.admin-theme-light .admin-dashboard-surface {
+  background: #f4f7f9 !important;
+  color: #111827 !important;
+}
+.admin-theme-light .admin-dashboard-surface [class*="bg-[#05070b]"],
+.admin-theme-light .admin-dashboard-surface [class*="bg-black/30"],
+.admin-theme-light .admin-dashboard-surface [class*="bg-black/20"],
+.admin-theme-light .admin-dashboard-surface [class*="bg-white/[0.03]"],
+.admin-theme-light .admin-dashboard-surface [class*="bg-white/[0.035]"],
+.admin-theme-light .admin-dashboard-surface [class*="bg-white/[0.025]"] {
+  background-color: #ffffff !important;
+}
+.admin-theme-light .admin-dashboard-surface [class*="bg-white/5"],
+.admin-theme-light .admin-dashboard-surface [class*="bg-white/10"] {
+  background-color: #eef2f5 !important;
+}
+.admin-theme-light .admin-dashboard-surface [class*="text-slate-100"],
+.admin-theme-light .admin-dashboard-surface [class*="text-slate-200"],
+.admin-theme-light .admin-dashboard-surface [class*="text-slate-300"] {
+  color: #172033 !important;
+}
+.admin-theme-light .admin-dashboard-surface [class*="text-slate-400"],
+.admin-theme-light .admin-dashboard-surface [class*="text-slate-500"] {
+  color: #5d6878 !important;
+}
+.admin-theme-light .admin-dashboard-surface [class*="text-slate-600"] {
+  color: #6b7280 !important;
+}
+.admin-theme-light .admin-dashboard-surface [class*="border-white/10"] {
+  border-color: #d9e0e6 !important;
+}
+.admin-theme-light .admin-dashboard-surface [class*="border-white/5"] {
+  border-color: #e5e9ed !important;
+}
+.admin-theme-light .admin-dashboard-surface input {
+  background-color: #ffffff !important;
+  color: #111827 !important;
+  border-color: #d9e0e6 !important;
+}
+.admin-theme-light .admin-dashboard-surface input::placeholder {
+  color: #8a94a3 !important;
+}
+.admin-theme-light .admin-dashboard-surface .shadow-black\/20,
+.admin-theme-light .admin-dashboard-surface .shadow-black\/30 {
+  --tw-shadow-color: rgb(15 23 42 / 0.08) !important;
 }
