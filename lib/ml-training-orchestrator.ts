@@ -199,3 +199,27 @@ export async function listTrainingRuns(symbol?: string) {
     : await sql`SELECT r.*,COALESCE(json_agg(m ORDER BY m.created_at) FILTER(WHERE m.id IS NOT NULL),'[]'::json) AS models FROM ml_training_runs r LEFT JOIN ml_training_run_models m ON m.run_id=r.run_id GROUP BY r.run_id ORDER BY r.created_at DESC LIMIT 50`;
   return rows;
 }
+
+export async function clearTrainingRunHistory() {
+  const url = getDbConnectionString();
+  if (!url || !(await initDbSchema())) throw new Error('DATABASE_UNAVAILABLE');
+  const sql = neon(url);
+  await ensureTrainingDurationSchema(sql);
+
+  const running = await sql`SELECT run_id,asset_symbol,duration_value,duration_unit,created_at FROM ml_training_runs WHERE status='running' ORDER BY created_at DESC`;
+  if (running.length) {
+    const error = new Error('TRAINING_HISTORY_RESET_BLOCKED_BY_RUNNING_JOBS');
+    (error as Error & { runningRuns?: unknown[] }).runningRuns = running;
+    throw error;
+  }
+
+  const modelRows = await sql`SELECT COUNT(*)::int AS count FROM ml_training_run_models`;
+  const runRows = await sql`SELECT COUNT(*)::int AS count FROM ml_training_runs`;
+  const modelCount = Number(modelRows[0]?.count || 0);
+  const runCount = Number(runRows[0]?.count || 0);
+
+  await sql`DELETE FROM ml_training_run_models`;
+  await sql`DELETE FROM ml_training_runs`;
+
+  return { deletedRuns: runCount, deletedRunModels: modelCount };
+}
