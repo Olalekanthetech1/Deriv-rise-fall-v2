@@ -39,6 +39,7 @@ function attachClientRoundTripTiming(data: any, roundTripMs: number): any {
 class XGBoostDaemonManager {
   private child: ChildProcess | null = null;
   private pending = new Map<string, PendingRequest>();
+  private liveTrainingDiagnostics = new Map<string, any>();
   private reqIdCounter = 0;
   private isReady = false;
   private buffer = '';
@@ -79,6 +80,17 @@ class XGBoostDaemonManager {
             }
             if (data.type === 'progress' && data.id && this.pending.has(data.id)) {
               const req = this.pending.get(data.id)!;
+              const trainingRunId = typeof data.trainingRunId === 'string' ? data.trainingRunId : '';
+              const modelType = typeof data.modelType === 'string' ? data.modelType : '';
+              if (trainingRunId && modelType) {
+                this.liveTrainingDiagnostics.set(`${trainingRunId}:${modelType}`, {
+                  phase: data.phase || 'running',
+                  elapsedMs: Number(data.elapsedMs) || 0,
+                  timings: data.timings && typeof data.timings === 'object' ? data.timings : {},
+                  message: typeof data.message === 'string' ? data.message : null,
+                  updatedAt: new Date().toISOString(),
+                });
+              }
               try { req.onProgress?.(data); } catch { /* diagnostics must never break training */ }
               continue;
             }
@@ -86,6 +98,9 @@ class XGBoostDaemonManager {
               const req = this.pending.get(data.id)!;
               clearTimeout(req.timer);
               this.pending.delete(data.id);
+              const requestRunId = typeof data.trainingRunId === 'string' ? data.trainingRunId : '';
+              const requestModelType = typeof data.modelType === 'string' ? data.modelType : '';
+              if (requestRunId && requestModelType) this.liveTrainingDiagnostics.delete(`${requestRunId}:${requestModelType}`);
               req.resolve(data);
             }
           } catch {
@@ -97,6 +112,7 @@ class XGBoostDaemonManager {
         this.child = null;
         this.isReady = false;
         this.buffer = '';
+        this.liveTrainingDiagnostics.clear();
         for (const req of this.pending.values()) {
           clearTimeout(req.timer);
           req.reject(new Error('Python ML daemon exited unexpectedly'));
@@ -118,6 +134,7 @@ class XGBoostDaemonManager {
     this.child = null;
     this.isReady = false;
     this.buffer = '';
+    this.liveTrainingDiagnostics.clear();
     if (!child) return;
     try {
       child.kill('SIGTERM');
@@ -215,6 +232,10 @@ class XGBoostDaemonManager {
         reject(err);
       }
     });
+  }
+
+  public getLiveTrainingDiagnostic(trainingRunId: string, modelType: string) {
+    return this.liveTrainingDiagnostics.get(`${trainingRunId}:${modelType}`) || null;
   }
 
   public isAvailable() {
