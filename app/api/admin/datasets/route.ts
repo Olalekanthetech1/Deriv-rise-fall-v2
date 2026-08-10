@@ -120,12 +120,19 @@ export async function POST(req: NextRequest) {
     if (!symbol) return NextResponse.json({ success: false, error: 'A Deriv symbol is required.' }, { status: 400, headers: noStore() });
     const resolved = await getCachedOrDiscoverDuration(symbol);
     if (body?.buildAllSupportedHorizons === true) {
-      const durations = expandTrainingHorizonLadder(resolved.discovery.ranges);
-      if (!durations.length) return NextResponse.json({ success: false, error: 'Deriv returned no supported training horizons for this asset.' }, { status: 422, headers: noStore() });
+      const requestedUnit = body?.durationUnit == null || body?.durationUnit === '' ? undefined : body.durationUnit;
+      if (requestedUnit !== undefined && !validUnit(requestedUnit)) return NextResponse.json({ success: false, error: 'A valid Deriv duration unit is required when filtering AUTO horizons.' }, { status: 400, headers: noStore() });
+      const sourceRanges = requestedUnit ? resolved.discovery.ranges.filter((range) => range.unit === requestedUnit) : resolved.discovery.ranges;
+      const durations = expandTrainingHorizonLadder(sourceRanges);
+      if (!durations.length) {
+        const scope = requestedUnit ? ` for ${requestedUnit}` : '';
+        return NextResponse.json({ success: false, error: `Deriv returned no supported training horizons${scope} for this asset.` }, { status: 422, headers: noStore() });
+      }
       const job = await createAutoDatasetJob(symbol, durations);
       resumeAutoDatasetJob(job.id);
       const result = { status: job.status, jobId: job.id, requestedCount: job.requestedCount, completedCount: job.completedCount, failedCount: job.failedCount };
-      return NextResponse.json({ success: true, accepted: true, dataSource: 'deriv-real-ticks', durationSource: resolved.source, durationRefreshing: resolved.refreshing, result, job, message: `AUTO dataset build started for ${job.requestedCount} dynamically derived horizon samples.` }, { status: 202, headers: noStore() });
+      const scope = requestedUnit ? ` for ${requestedUnit}` : '';
+      return NextResponse.json({ success: true, accepted: true, dataSource: 'deriv-real-ticks', durationSource: resolved.source, durationRefreshing: resolved.refreshing, result, job, message: `AUTO dataset build started for ${job.requestedCount} dynamically derived horizon samples${scope}.` }, { status: 202, headers: noStore() });
     }
     const legacyHorizon = body?.horizonTicks;
     const durationValue = legacyHorizon != null ? Number(legacyHorizon) : Number(body?.durationValue);
