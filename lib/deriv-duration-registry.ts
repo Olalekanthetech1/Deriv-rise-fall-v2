@@ -5,7 +5,7 @@ export type DerivDurationUnit = 't' | 's' | 'm' | 'h' | 'd';
 export type DerivDurationRange = { id: string; unit: DerivDurationUnit; min: number; max: number; step: number; tradeTypes: string[]; source: 'deriv-proposal-probe' };
 export type DerivDurationDiscovery = { symbol: string; ranges: DerivDurationRange[]; fetchedAt: string; source: 'deriv-proposal-probe' };
 type RecordLike = Record<string, unknown>;
-type ContractCapability = { type: string; expiryType: string; probe: Record<string, unknown> };
+type ContractCapability = { type: 'CALL' | 'PUT'; expiryType: string; probe: Record<string, unknown> };
 
 const MAX_PROBE: Record<DerivDurationUnit, number> = { t: 1000, s: 86400, m: 1440, h: 168, d: 365 };
 const PROBE_SEEDS: Record<DerivDurationUnit, number[]> = {
@@ -16,17 +16,16 @@ const PROBE_SEEDS: Record<DerivDurationUnit, number[]> = {
   d: [1, 2, 3, 5, 7, 14, 30, 60, 90, 180, 365],
 };
 const DISCOVERY_TTL_MS = 10 * 60 * 1000;
-// Proposal probing is deliberately throttled, but the previous 1s cadence
-// made first-time discovery take several minutes on symbols exposing many
-// duration units. Keep a conservative floor while allowing Render/operator
-// deployments to tune the cadence without changing the discovery algorithm.
 const configuredProbeInterval = Number(process.env.DERIV_DISCOVERY_PROBE_INTERVAL_MS);
 const PROBE_INTERVAL_MS = Number.isFinite(configuredProbeInterval)
   ? Math.min(2000, Math.max(200, Math.floor(configuredProbeInterval)))
   : 250;
 const MAX_RATE_LIMIT_RETRIES = 2;
 const STEP_DISCOVERY_WINDOW = 128;
-const PROBEABLE_TYPES = new Set(['CALL', 'PUT', 'CALLE', 'PUTE', 'UPORDOWN', 'MULTUP', 'MULTDOWN', 'TICKHIGH', 'TICKLOW', 'RESETCALL', 'RESETPUT']);
+
+// Rise/Fall only. CALL and PUT are the canonical Deriv Rise/Fall contract types.
+// Do not probe MULTUP, MULTDOWN, UPORDOWN, digits, barriers, resets, etc.
+const RISE_FALL_TYPES = new Set(['CALL', 'PUT']);
 const ALL_DURATION_UNITS: DerivDurationUnit[] = ['t', 's', 'm', 'h', 'd'];
 const cache = new Map<string, { value: DerivDurationDiscovery; expiresAt: number }>();
 const inFlight = new Map<string, Promise<DerivDurationDiscovery>>();
@@ -39,12 +38,14 @@ class DerivDiscoverySession {
   private ws: WebSocket | null = null;
   private sequence = 0;
   private lastProposalAt = 0;
+
   async connect(timeoutMs = 10000): Promise<void> { this.ws = await openDerivPublicWebSocket(timeoutMs); }
   close(): void { try { this.ws?.close(); } catch {} this.ws = null; }
 
   async request(request: RecordLike, expected: string, timeoutMs = 10000): Promise<RecordLike> {
     if (!this.ws) throw new Error('Deriv discovery session is not connected.');
-    const ws = this.ws; const reqId = ++this.sequence;
+    const ws = this.ws;
+    const reqId = ++this.sequence;
     return new Promise((resolve, reject) => {
       let done = false;
       const finish = (fn: (value: any) => void, value: any) => { if (done) return; done = true; clearTimeout(timer); ws.off('message', onMessage); fn(value); };
@@ -54,12 +55,19 @@ class DerivDiscoverySession {
           const response = JSON.parse(data.toString()) as RecordLike;
           if (Number(response.req_id) !== reqId) return;
           const error = asRecord(response.error);
-          if (error) { const code = String(error.code ?? ''); finish(reject, new Error(`Deriv ${expected} discovery failed${code ? ` (${code})` : ''}: ${String(error.message ?? 'Unknown Deriv error')}`)); return; }
+          if (error) {
+            const code = String(error.code ?? '');
+            finish(reject, new Error(`Deriv ${expected} discovery failed${code ? ` (${code})` : ''}: ${String(error.message ?? 'Unknown Deriv error')}`));
+            return;
+          }
           if (response.msg_type === expected) finish(resolve, response);
-        } catch (error) { finish(reject, error instanceof Error ? error : new Error(`Invalid Deriv ${expected} response.`)); }
+        } catch (error) {
+          finish(reject, error instanceof Error ? error : new Error(`Invalid Deriv ${expected} response.`));
+        }
       };
       ws.on('message', onMessage);
-      try { ws.send(JSON.stringify({ ...request, req_id: reqId })); } catch (error) { finish(reject, error instanceof Error ? error : new Error(`Unable to request Deriv ${expected}.`)); }
+      try { ws.send(JSON.stringify({ ...request, req_id: reqId })); }
+      catch (error) { finish(reject, error instanceof Error ? error : new Error(`Unable to request Deriv ${expected}.`)); }
     });
   }
 
@@ -69,7 +77,17 @@ class DerivDiscoverySession {
     for (let attempt = 0; attempt <= MAX_RATE_LIMIT_RETRIES; attempt += 1) {
       this.lastProposalAt = Date.now();
       try {
-        await this.request({ proposal: 1, amount: 1, basis: 'stake', contract_type: capability.type, currency: process.env.DERIV_DISCOVERY_CURRENCY?.trim().toUpperCase() || 'USD', duration: value, duration_unit: unit, underlying_symbol: symbol, ...capability.probe }, 'proposal', 8000);
+        await this.request({
+          proposal: 1,
+          amount: 1,
+          basis: 'stake',
+          contract_type: capability.type,
+          currency: process.env.DERIV_DISCOVERY_CURRENCY?.trim().toUpperCase() || 'USD',
+          duration: value,
+          duration_unit: unit,
+          underlying_symbol: symbol,
+          ...capability.probe,
+        }, 'proposal', 8000);
         return true;
       } catch (error) {
         if (!isRateLimited(error) || attempt === MAX_RATE_LIMIT_RETRIES) return false;
@@ -80,34 +98,26 @@ class DerivDiscoverySession {
   }
 }
 
-function probeParams(type: string): Record<string, unknown> {
-  switch (type) {
-    case 'MULTUP': case 'MULTDOWN': return { multiplier: 10 };
-    case 'TICKHIGH': case 'TICKLOW': return { selected_tick: 1 };
-    default: return {};
-  }
-}
-
 function contractCapabilities(response: RecordLike): ContractCapability[] {
-  const contractsFor = asRecord(response.contracts_for); const available = contractsFor?.available;
+  const contractsFor = asRecord(response.contracts_for);
+  const available = contractsFor?.available;
   if (!Array.isArray(available)) return [];
+
   const byType = new Map<string, ContractCapability>();
   for (const item of available) {
-    const contract = asRecord(item); if (!contract) continue;
-    const type = String(contract.contract_type ?? contract.trade_type ?? '').trim().toUpperCase();
-    if (!type || !PROBEABLE_TYPES.has(type) || byType.has(type)) continue;
+    const contract = asRecord(item);
+    if (!contract) continue;
+    const type = String(contract.contract_type ?? '').trim().toUpperCase();
+    if (!RISE_FALL_TYPES.has(type) || byType.has(type)) continue;
     const expiryType = String(contract.expiry_type ?? '').trim().toLowerCase();
-    byType.set(type, { type, expiryType, probe: probeParams(type) });
+    byType.set(type, { type: type as 'CALL' | 'PUT', expiryType, probe: {} });
   }
-  return Array.from(byType.values());
+  return Array.from(byType.values()).sort((a, b) => (a.type === 'CALL' ? -1 : 1) - (b.type === 'CALL' ? -1 : 1));
 }
 
+// Proposal duration units supported by Deriv. The broker still decides the
+// actual range; this function does not invent or advertise unsupported values.
 function unitsForExpiryType(expiryType: string): DerivDurationUnit[] { void expiryType; return ALL_DURATION_UNITS; }
-function capabilityPriority(capability: ContractCapability): number {
-  if (capability.type === 'MULTUP' || capability.type === 'MULTDOWN') return 0;
-  if (['CALL', 'PUT', 'CALLE', 'PUTE', 'UPORDOWN'].includes(capability.type)) return 1;
-  return 2;
-}
 
 async function findValidSeed(session: DerivDiscoverySession, symbol: string, capability: ContractCapability, unit: DerivDurationUnit): Promise<number | null> {
   for (const seed of PROBE_SEEDS[unit]) {
@@ -126,8 +136,7 @@ async function findStep(session: DerivDiscoverySession, symbol: string, capabili
 }
 
 async function discoverUnit(session: DerivDiscoverySession, symbol: string, capabilities: ContractCapability[], unit: DerivDurationUnit): Promise<{ range: { min: number; max: number; step: number }; capability: ContractCapability } | null> {
-  const ordered = [...capabilities].sort((a, b) => capabilityPriority(a) - capabilityPriority(b));
-  for (const capability of ordered) {
+  for (const capability of capabilities) {
     if (!unitsForExpiryType(capability.expiryType).includes(unit)) continue;
     const seed = await findValidSeed(session, symbol, capability, unit);
     if (seed === null) continue;
@@ -145,11 +154,8 @@ async function discoverUnit(session: DerivDiscoverySession, symbol: string, capa
     const maxMultiplier = Math.floor((max - validMin) / step);
     let lastValidMultiplier = 0;
     let invalidMultiplier: number | null = null;
-
-    // Probe the duration progression exponentially instead of walking every
-    // supported value. This keeps discovery fast even when a broker exposes
-    // thousands of valid durations such as 15s..86400s in 15s increments.
     let multiplier = 1;
+
     while (multiplier <= maxMultiplier) {
       const candidate = validMin + multiplier * step;
       if (await session.proposal(symbol, capability, candidate, unit)) {
@@ -162,13 +168,8 @@ async function discoverUnit(session: DerivDiscoverySession, symbol: string, capa
     }
 
     if (invalidMultiplier === null) {
-      // Always probe the broker's configured upper bound. The old algorithm
-      // could incorrectly stop at 61440s because it never tested 86400s.
-      if (await session.proposal(symbol, capability, max, unit)) {
-        lastValidMultiplier = maxMultiplier;
-      } else {
-        invalidMultiplier = maxMultiplier;
-      }
+      if (await session.proposal(symbol, capability, max, unit)) lastValidMultiplier = maxMultiplier;
+      else invalidMultiplier = maxMultiplier;
     }
 
     if (invalidMultiplier !== null) {
@@ -192,17 +193,30 @@ async function discover(symbol: string): Promise<DerivDurationDiscovery> {
   const session = new DerivDiscoverySession();
   try {
     await session.connect();
+
+    // contracts_for is used only to identify whether CALL/PUT (Rise/Fall)
+    // exists for this symbol. No other contract family is eligible for probing.
     const contracts = await session.request({ contracts_for: symbol }, 'contracts_for');
     const capabilities = contractCapabilities(contracts);
-    if (!capabilities.length) throw new Error(`Deriv returned no duration-probeable contracts for ${symbol}.`);
+    if (!capabilities.length) throw new Error(`Deriv returned no Rise/Fall (CALL/PUT) contracts for ${symbol}.`);
+
     const units = ALL_DURATION_UNITS.filter(unit => capabilities.some(c => unitsForExpiryType(c.expiryType).includes(unit)));
     const ranges: DerivDurationRange[] = [];
     for (const unit of units) {
       const result = await discoverUnit(session, symbol, capabilities, unit);
       if (!result) continue;
-      ranges.push({ id: `${symbol}:${result.capability.type}:${unit}:${result.range.min}-${result.range.max}:${result.range.step}`, unit, min: result.range.min, max: result.range.max, step: result.range.step, tradeTypes: [result.capability.type], source: 'deriv-proposal-probe' });
+      ranges.push({
+        id: `${symbol}:${result.capability.type}:${unit}:${result.range.min}-${result.range.max}:${result.range.step}`,
+        unit,
+        min: result.range.min,
+        max: result.range.max,
+        step: result.range.step,
+        tradeTypes: [result.capability.type],
+        source: 'deriv-proposal-probe',
+      });
     }
-    if (!ranges.length) throw new Error(`Deriv proposal capability probing found no supported durations for ${symbol}.`);
+
+    if (!ranges.length) throw new Error(`Deriv Rise/Fall proposal probing found no supported durations for ${symbol}.`);
     return { symbol, ranges, fetchedAt: new Date().toISOString(), source: 'deriv-proposal-probe' };
   } finally { session.close(); }
 }
@@ -210,10 +224,15 @@ async function discover(symbol: string): Promise<DerivDurationDiscovery> {
 export async function getDerivDurationDiscovery(symbol: string): Promise<DerivDurationDiscovery> {
   const normalized = String(symbol ?? '').trim().toUpperCase();
   if (!normalized) throw new Error('A Deriv symbol is required for duration discovery.');
-  const cached = cache.get(normalized); if (cached && cached.expiresAt > Date.now()) return cached.value;
-  const existing = inFlight.get(normalized); if (existing) return existing;
-  const promise = discover(normalized).then(value => { cache.set(normalized, { value, expiresAt: Date.now() + DISCOVERY_TTL_MS }); return value; }).finally(() => { inFlight.delete(normalized); });
-  inFlight.set(normalized, promise); return promise;
+  const cached = cache.get(normalized);
+  if (cached && cached.expiresAt > Date.now()) return cached.value;
+  const existing = inFlight.get(normalized);
+  if (existing) return existing;
+  const promise = discover(normalized)
+    .then(value => { cache.set(normalized, { value, expiresAt: Date.now() + DISCOVERY_TTL_MS }); return value; })
+    .finally(() => { inFlight.delete(normalized); });
+  inFlight.set(normalized, promise);
+  return promise;
 }
 
 export function durationToSeconds(value: number, unit: DerivDurationUnit): number | null {
