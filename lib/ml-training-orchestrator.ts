@@ -88,7 +88,7 @@ export async function trainDatasetModels(request: TrainingRequest) {
   if (!url || !(await initDbSchema())) throw new Error('DATABASE_UNAVAILABLE');
   const sql = neon(url);
   await ensureTrainingDurationSchema(sql);
-  const schema = await getMlRuntimeSchemaContract();
+
   const rows = await sql`SELECT id,name,asset_symbol,duration_value,duration_unit,duration_seconds,horizon_type,horizon_ticks,status,leakage_check_passed,feature_schema_version,sample_count,train_count,validation_count,test_count,metadata FROM training_datasets WHERE id=${datasetId} LIMIT 1`;
   const dataset = rows[0] as any;
   if (!dataset) throw new Error('TRAINING_DATASET_NOT_FOUND');
@@ -102,6 +102,7 @@ export async function trainDatasetModels(request: TrainingRequest) {
     throw new Error('INVALID_DATASET_DURATION_METADATA');
   }
 
+  const schema = await getMlRuntimeSchemaContract({ durationValue, durationUnit });
   const datasetSchemaVersion = String(dataset.feature_schema_version ?? '');
   const currentSchemaVersion = String(schema.featureSchemaVersion);
   const schemaCompatible = datasetSchemaVersion === currentSchemaVersion || isStructurallyCompatibleDataset(dataset, schema);
@@ -130,12 +131,13 @@ export async function trainDatasetModels(request: TrainingRequest) {
   const definitions = getMlModelDefinitions().filter((d) => !request.modelTypes?.length || request.modelTypes.includes(d.key));
   if (!definitions.length) throw new Error('NO_REGISTERED_MODELS_SELECTED');
   const strategy = resolveAssetAwareModelStrategy({ assetClass, marketType, durationValue, durationUnit, durationSeconds, effectiveHorizonTicks, sampleCount: Number(dataset.sample_count) || samples.length }, definitions);
-  const sequence = sequencePartitions(samples, strategy.sequenceLength, schema);
+  const sequenceLength = schema.sequenceLength;
+  const sequence = sequencePartitions(samples, sequenceLength, schema);
   if (sequence.train.featureSequences.length < 2 || new Set(sequence.train.labels).size < 2 || sequence.validation.featureSequences.length < 2 || new Set(sequence.validation.labels).size < 2) throw new Error('INSUFFICIENT_TWO_CLASS_SEQUENCE_DATA');
 
   const runId = crypto.randomUUID();
-  const strategyMetadata = { ...strategy, assetMetadata };
-  await sql`INSERT INTO ml_training_runs (run_id,dataset_id,asset_symbol,duration_value,duration_unit,duration_seconds,horizon_ticks,status,requested_models,started_at,metadata,strategy_key,strategy_version,strategy_metadata) VALUES (${runId},${datasetId},${String(dataset.asset_symbol)},${durationValue},${durationUnit},${durationSeconds},${effectiveHorizonTicks},'running',${JSON.stringify(definitions.map((d) => d.key))}::jsonb,NOW(),${JSON.stringify({featureSchemaVersion:schema.featureSchemaVersion,schemaFingerprint:schema.schemaFingerprint,datasetFeatureSchemaVersion: datasetSchemaVersion, datasetSchemaCompatibility: schemaCompatible ? 'compatible' : 'exact'})}::jsonb,${strategy.key},${strategy.version},${JSON.stringify(strategyMetadata)}::jsonb)`;
+  const strategyMetadata = { ...strategy, sequenceLength, featureTopology: schema.featureWindows, featureSchemaVersion: schema.featureSchemaVersion, schemaFingerprint: schema.schemaFingerprint, assetMetadata };
+  await sql`INSERT INTO ml_training_runs (run_id,dataset_id,asset_symbol,duration_value,duration_unit,duration_seconds,horizon_ticks,status,requested_models,started_at,metadata,strategy_key,strategy_version,strategy_metadata) VALUES (${runId},${datasetId},${String(dataset.asset_symbol)},${durationValue},${durationUnit},${durationSeconds},${effectiveHorizonTicks},'running',${JSON.stringify(definitions.map((d) => d.key))}::jsonb,NOW(),${JSON.stringify({featureSchemaVersion:schema.featureSchemaVersion,schemaFingerprint:schema.schemaFingerprint,datasetFeatureSchemaVersion: datasetSchemaVersion,datasetSchemaCompatibility: schemaCompatible ? 'compatible' : 'exact',featureTopology:schema.featureWindows,sequenceLength})}::jsonb,${strategy.key},${strategy.version},${JSON.stringify(strategyMetadata)}::jsonb)`;
   for (const d of definitions) await sql`INSERT INTO ml_training_run_models(run_id,model_type,status) VALUES(${runId},${d.key},'queued')`;
 
   const results: any[] = [];
@@ -145,26 +147,27 @@ export async function trainDatasetModels(request: TrainingRequest) {
     await sql`UPDATE ml_training_run_models SET status='running',started_at=NOW() WHERE run_id=${runId} AND model_type=${definition.key}`;
     try {
       const sequenceModel = definition.family === 'sequential';
-      const configuredHyperparameters = { ...strategy.hyperparameters[definition.key] };
+      const configuredHyperparameters = { ...strategy.hyperparameters[definition.key] } as Record<string, number>;
+      if (sequenceModel) configuredHyperparameters.sequenceLength = sequenceLength;
       const result = await xgboostDaemon.sendCommand('train_partitioned', {
         symbol: String(dataset.asset_symbol), modelType: definition.key, durationValue, durationUnit, durationSeconds,
-        effectiveHorizonTicks, datasetId, trainingRunId: runId,
+        effectiveHorizonTicks, datasetId, trainingRunId: runId, schemaContract: schema,
         trainTabularDataset: sequenceModel ? undefined : partitions.train,
         validationTabularDataset: sequenceModel ? undefined : partitions.validation,
         trainSequenceDataset: sequenceModel ? sequence.train : undefined,
         validationSequenceDataset: sequenceModel ? sequence.validation : undefined,
         hyperparams: configuredHyperparameters,
-        assetAwareStrategy: { key: strategy.key, version: strategy.version, assetClass: strategy.assetClass, marketType: strategy.marketType, sequenceLength: strategy.sequenceLength, minimumSamples: strategy.minimumSamples[definition.key] },
+        assetAwareStrategy: { key: strategy.key, version: strategy.version, assetClass: strategy.assetClass, marketType: strategy.marketType, sequenceLength, minimumSamples: strategy.minimumSamples[definition.key] },
       });
       if (!result?.success) throw new Error(result?.error || 'Native training failed.');
       const modelId = String(result.modelId);
-      const metrics = { ...(result.metrics || {}), engine: result.engine, samplesCount: result.samplesCount, validationSamples: result.validationSamples, artifactPath: result.artifactPath || null, assetAwareStrategy: strategy.key, assetAwareStrategyVersion: strategy.version };
+      const metrics = { ...(result.metrics || {}), engine: result.engine, samplesCount: result.samplesCount, validationSamples: result.validationSamples, artifactPath: result.artifactPath || null, assetAwareStrategy: strategy.key, assetAwareStrategyVersion: strategy.version, featureTopology: schema.featureWindows, featureSchemaVersion: schema.featureSchemaVersion };
       await registerDurationModel({
         modelId, modelFamily: definition.family, version: `${schema.featureSchemaVersion}-${runId.slice(0, 8)}`,
         symbol: String(dataset.asset_symbol), assetClass, durationValue, durationUnit, durationSeconds, effectiveHorizonTicks,
         datasetId, format: sequenceModel ? 'PT_STATE' : 'PKL', status: 'candidate', featureSchemaVersion: String(schema.featureSchemaVersion),
         framework: sequenceModel ? 'pytorch' : definition.key, trainingRunId: runId, strategyKey: strategy.key, strategyVersion: strategy.version,
-        strategyMetadata: { sequenceLength: strategy.sequenceLength, minimumSamples: strategy.minimumSamples[definition.key], assetClass: strategy.assetClass, marketType: strategy.marketType },
+        strategyMetadata: { sequenceLength, featureTopology: schema.featureWindows, minimumSamples: strategy.minimumSamples[definition.key], assetClass: strategy.assetClass, marketType: strategy.marketType },
         metrics, hyperparameters: configuredHyperparameters,
       });
       await sql`UPDATE ml_training_run_models SET status='completed',model_id=${modelId},metrics=${JSON.stringify(metrics)}::jsonb,completed_at=NOW() WHERE run_id=${runId} AND model_type=${definition.key}`;
@@ -179,10 +182,11 @@ export async function trainDatasetModels(request: TrainingRequest) {
     const done = completed + failed;
     await updateRun(sql, runId, done === definitions.length ? (failed === 0 ? 'completed' : completed > 0 ? 'partial' : 'failed') : 'running', completed, failed, done === definitions.length ? new Date().toISOString() : null, {
       progress: { completed, failed, total: definitions.length }, featureSchemaVersion: schema.featureSchemaVersion, schemaFingerprint: schema.schemaFingerprint,
-      strategy: { key: strategy.key, version: strategy.version, assetClass: strategy.assetClass, marketType: strategy.marketType, sequenceLength: strategy.sequenceLength },
+      featureTopology: schema.featureWindows, sequenceLength,
+      strategy: { key: strategy.key, version: strategy.version, assetClass: strategy.assetClass, marketType: strategy.marketType, sequenceLength },
     });
   }
-  return { runId, status: failed === 0 ? 'completed' : completed > 0 ? 'partial' : 'failed', completedModels: completed, failedModels: failed, totalModels: definitions.length, strategy: { key: strategy.key, version: strategy.version, sequenceLength: strategy.sequenceLength }, dataset: { id: datasetId, symbol: dataset.asset_symbol, durationValue, durationUnit, durationSeconds, effectiveHorizonTicks }, results };
+  return { runId, status: failed === 0 ? 'completed' : completed > 0 ? 'partial' : 'failed', completedModels: completed, failedModels: failed, totalModels: definitions.length, strategy: { key: strategy.key, version: strategy.version, sequenceLength, featureTopology: schema.featureWindows }, dataset: { id: datasetId, symbol: dataset.asset_symbol, durationValue, durationUnit, durationSeconds, effectiveHorizonTicks }, results };
 }
 
 export async function listTrainingRuns(symbol?: string) {

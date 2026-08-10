@@ -32,28 +32,29 @@ type StoredConfig = {
   activatedAt: string | null;
 };
 
+type DurationFeaturePolicy = {
+  mode: string;
+  baselineTopology: PipelineConfig['featureWindows'];
+  examples: Array<{ value: number; unit: 't' | 's' | 'm' | 'h' | 'd'; durationSeconds: number | null; featureWindows: PipelineConfig['featureWindows'] }>;
+};
+
 type ApiResponse = {
   success?: boolean;
   active?: { config: PipelineConfig; source: string; version: number | null; configHash: string; featureSchemaVersion: string };
   history?: StoredConfig[];
+  durationFeaturePolicy?: DurationFeaturePolicy;
   canonical?: { featureCount: number; featureOrder: string[]; featureWindows: PipelineConfig['featureWindows']; canonicalFeatureWindowTicks: number };
   error?: string;
 };
 
-function numberValue(value: string, fallback = 0) {
-  const parsed = Number(value);
-  return Number.isFinite(parsed) ? parsed : fallback;
-}
-
-function formatDate(value: string | null) {
-  if (!value) return '—';
-  const date = new Date(value);
-  return Number.isNaN(date.getTime()) ? '—' : date.toLocaleString();
-}
+function numberValue(value: string, fallback = 0) { const parsed = Number(value); return Number.isFinite(parsed) ? parsed : fallback; }
+function formatDate(value: string | null) { if (!value) return '—'; const date = new Date(value); return Number.isNaN(date.getTime()) ? '—' : date.toLocaleString(); }
+function durationLabel(value: number, unit: DurationFeaturePolicy['examples'][number]['unit']) { return `${value} ${unit === 't' ? 'tick' : unit === 's' ? 'seconds' : unit === 'm' ? 'minute' : unit === 'h' ? 'hour' : 'day'}${value === 1 ? '' : unit === 't' ? 's' : 's'}`; }
 
 export default function MlConfigPage() {
   const [config, setConfig] = useState<PipelineConfig | null>(null);
   const [history, setHistory] = useState<StoredConfig[]>([]);
+  const [policy, setPolicy] = useState<DurationFeaturePolicy | null>(null);
   const [source, setSource] = useState<string>('');
   const [version, setVersion] = useState<number | null>(null);
   const [hash, setHash] = useState('');
@@ -64,40 +65,28 @@ export default function MlConfigPage() {
   const [message, setMessage] = useState<string | null>(null);
 
   const load = useCallback(async () => {
-    setLoading(true);
-    setError(null);
+    setLoading(true); setError(null);
     try {
       const response = await fetch('/api/admin/ml-config', { cache: 'no-store' });
       const data: ApiResponse = await response.json().catch(() => ({}));
       if (response.status === 401) { window.location.replace('/admin'); return; }
       if (!response.ok || data.success === false || !data.active?.config) throw new Error(data.error || 'Unable to load ML configuration.');
-      setConfig(data.active.config);
-      setHistory(Array.isArray(data.history) ? data.history : []);
-      setSource(data.active.source || '');
-      setVersion(data.active.version ?? null);
-      setHash(data.active.configHash || '');
-      setSchemaVersion(data.active.featureSchemaVersion || '');
-    } catch (err) {
-      setError(err instanceof Error ? err.message : 'Unable to load ML configuration.');
-    } finally { setLoading(false); }
+      setConfig(data.active.config); setHistory(Array.isArray(data.history) ? data.history : []); setPolicy(data.durationFeaturePolicy ?? null);
+      setSource(data.active.source || ''); setVersion(data.active.version ?? null); setHash(data.active.configHash || ''); setSchemaVersion(data.active.featureSchemaVersion || '');
+    } catch (err) { setError(err instanceof Error ? err.message : 'Unable to load ML configuration.'); }
+    finally { setLoading(false); }
   }, []);
 
   useEffect(() => { void load(); }, [load]);
 
   const generate = async () => {
-    if (!config) return;
-    setBusy(true); setError(null); setMessage(null);
+    if (!config) return; setBusy(true); setError(null); setMessage(null);
     try {
-      const response = await fetch('/api/admin/ml-config', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ action: 'generate', config }),
-      });
+      const response = await fetch('/api/admin/ml-config', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ action: 'generate', config }) });
       const data = await response.json().catch(() => ({}));
       if (response.status === 401) { window.location.replace('/admin'); return; }
       if (!response.ok || !data.success) throw new Error(data.error || 'Configuration generation failed.');
-      setMessage(`Generated version ${data.generated?.version ?? '—'} and stored it as a draft. Activate it from the version history.`);
-      await load();
+      setMessage(`Generated version ${data.generated?.version ?? '—'} and stored it as a draft. Activate it from the version history.`); await load();
     } catch (err) { setError(err instanceof Error ? err.message : 'Configuration generation failed.'); }
     finally { setBusy(false); }
   };
@@ -106,14 +95,11 @@ export default function MlConfigPage() {
     if (!window.confirm('Activate this ML pipeline configuration? The current active version will be archived.')) return;
     setBusy(true); setError(null); setMessage(null);
     try {
-      const response = await fetch('/api/admin/ml-config', {
-        method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ action: 'activate', id }),
-      });
+      const response = await fetch('/api/admin/ml-config', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ action: 'activate', id }) });
       const data = await response.json().catch(() => ({}));
       if (response.status === 401) { window.location.replace('/admin'); return; }
       if (!response.ok || !data.success) throw new Error(data.error || 'Configuration activation failed.');
-      setMessage(`Activated configuration version ${data.activated?.version ?? '—'}. Runtime cache was reloaded.`);
-      await load();
+      setMessage(`Activated configuration version ${data.activated?.version ?? '—'}. Runtime cache was reloaded.`); await load();
     } catch (err) { setError(err instanceof Error ? err.message : 'Configuration activation failed.'); }
     finally { setBusy(false); }
   };
@@ -127,21 +113,21 @@ export default function MlConfigPage() {
         <div className="flex items-center gap-3"><div className="rounded-2xl border border-cyan-400/20 bg-cyan-400/10 p-3"><SlidersHorizontal className="h-6 w-6 text-cyan-300" /></div><div><p className="text-[11px] font-semibold uppercase tracking-[0.22em] text-cyan-300">Operations Center · ML</p><h1 className="text-2xl font-black tracking-tight sm:text-3xl">ML Pipeline Configuration</h1><p className="mt-1 text-xs text-slate-500">Generate, validate, version and activate the effective ML pipeline configuration without manual environment JSON.</p></div></div>
         <div className="flex flex-wrap gap-2"><Link href="/admin" className="inline-flex items-center gap-2 rounded-xl border border-white/10 bg-white/5 px-3 py-2 text-xs font-semibold text-slate-300 hover:bg-white/10"><ArrowLeft className="h-4 w-4" />Operations Center</Link><button onClick={() => load()} disabled={loading || busy} className="inline-flex items-center gap-2 rounded-xl border border-cyan-400/20 bg-cyan-400/5 px-3 py-2 text-xs font-semibold text-cyan-200 hover:bg-cyan-400/10 disabled:opacity-60"><RefreshCw className={`h-4 w-4 ${loading ? 'animate-spin' : ''}`} />Refresh</button></div>
       </header>
-
       {error && <div className="mb-5 flex items-start gap-3 rounded-2xl border border-red-400/20 bg-red-400/[0.06] px-4 py-3 text-sm text-red-200"><AlertTriangle className="mt-0.5 h-4 w-4 shrink-0" />{error}</div>}
       {message && <div className="mb-5 flex items-start gap-3 rounded-2xl border border-emerald-400/20 bg-emerald-400/[0.06] px-4 py-3 text-sm text-emerald-200"><CheckCircle2 className="mt-0.5 h-4 w-4 shrink-0" />{message}</div>}
-
       {loading || !config ? <div className="flex items-center justify-center py-20 text-sm text-slate-500"><RefreshCw className="mr-2 h-4 w-4 animate-spin" />Loading persistent configuration…</div> : <>
         <section className="mb-6 grid gap-4 sm:grid-cols-2 xl:grid-cols-4">
           <article className="rounded-2xl border border-white/10 bg-white/[0.025] p-5"><p className="text-xs uppercase tracking-wider text-slate-500">Active version</p><p className="mt-1 text-2xl font-black">{version ?? '—'}</p><p className="mt-2 text-[11px] text-slate-500">Source: {source || '—'}</p></article>
           <article className="rounded-2xl border border-white/10 bg-white/[0.025] p-5"><p className="text-xs uppercase tracking-wider text-slate-500">Feature schema</p><p className="mt-1 text-2xl font-black">{config.featureOrder.length}</p><p className="mt-2 font-mono text-[10px] text-slate-500 break-all">{schemaVersion}</p></article>
-          <article className="rounded-2xl border border-white/10 bg-white/[0.025] p-5"><p className="text-xs uppercase tracking-wider text-slate-500">Canonical window</p><p className="mt-1 text-2xl font-black">{config.canonicalFeatureWindowTicks} ticks</p><p className="mt-2 text-[11px] text-slate-500">5 → 25 → 100 → 300 topology is registry-owned.</p></article>
+          <article className="rounded-2xl border border-white/10 bg-white/[0.025] p-5"><p className="text-xs uppercase tracking-wider text-slate-500">Base topology</p><p className="mt-1 text-2xl font-black">5 → 25 → 100 → 300</p><p className="mt-2 text-[11px] text-slate-500">Baseline only. Training resolves the actual topology from the Deriv duration.</p></article>
           <article className="rounded-2xl border border-white/10 bg-white/[0.025] p-5"><p className="text-xs uppercase tracking-wider text-slate-500">Configuration fingerprint</p><p className="mt-1 font-mono text-xs break-all text-cyan-200">{hash || '—'}</p><p className="mt-2 text-[11px] text-slate-500">Used for reproducibility and lineage.</p></article>
         </section>
 
+        {policy && <section className="mb-6 rounded-2xl border border-cyan-400/10 bg-cyan-400/[0.025] p-5"><div className="flex flex-col gap-1 sm:flex-row sm:items-end sm:justify-between"><div><h2 className="text-base font-bold">Resolved duration-aware feature topology</h2><p className="mt-1 text-xs leading-5 text-slate-500">The 300-tick value is no longer treated as universal. The resolver scales the four feature windows deterministically from the selected Deriv duration and persists the resolved topology with each dataset/model lineage.</p></div><span className="font-mono text-[10px] text-cyan-300">{policy.mode}</span></div><div className="mt-4 grid gap-3 sm:grid-cols-2 lg:grid-cols-3 xl:grid-cols-6">{policy.examples.map((example) => <div key={`${example.value}${example.unit}`} className="rounded-xl border border-white/10 bg-black/20 p-3"><p className="text-[11px] font-semibold text-slate-300">{durationLabel(example.value, example.unit)}</p><p className="mt-2 font-mono text-xs text-cyan-200">{example.featureWindows.micro} → {example.featureWindows.short} → {example.featureWindows.medium} → {example.featureWindows.macro}</p><p className="mt-1 text-[9px] text-slate-600">micro · short · medium · macro</p></div>)}</div></section>}
+
         <div className="grid gap-6 xl:grid-cols-[1.25fr_0.75fr]">
           <section className="rounded-2xl border border-white/10 bg-white/[0.025] p-5">
-            <div className="mb-5 flex items-center justify-between"><div><h2 className="text-base font-bold">Operational Controls</h2><p className="mt-1 text-xs text-slate-500">Only operational parameters are editable. Feature definitions, ordering and canonical windows remain code-registry controlled.</p></div><ShieldCheck className="h-5 w-5 text-emerald-300" /></div>
+            <div className="mb-5 flex items-center justify-between"><div><h2 className="text-base font-bold">Operational Controls</h2><p className="mt-1 text-xs text-slate-500">Only operational parameters are editable. Feature definitions, ordering and duration-aware feature topology remain code-registry controlled.</p></div><ShieldCheck className="h-5 w-5 text-emerald-300" /></div>
             <div className="grid gap-4 sm:grid-cols-2">
               <label className="text-xs text-slate-400">Default horizon (ticks)<input type="number" min="1" value={config.defaultHorizonTicks} onChange={(e) => update({ defaultHorizonTicks: numberValue(e.target.value, config.defaultHorizonTicks) })} className="mt-2 w-full rounded-xl border border-white/10 bg-black/30 px-3 py-2.5 text-sm text-slate-100 outline-none focus:border-cyan-400/40" /></label>
               <label className="text-xs text-slate-400">Maximum horizon (ticks)<input type="number" min={config.defaultHorizonTicks} value={config.maxHorizonTicks} onChange={(e) => update({ maxHorizonTicks: numberValue(e.target.value, config.maxHorizonTicks) })} className="mt-2 w-full rounded-xl border border-white/10 bg-black/30 px-3 py-2.5 text-sm text-slate-100 outline-none focus:border-cyan-400/40" /></label>
@@ -150,22 +136,14 @@ export default function MlConfigPage() {
               <label className="text-xs text-slate-400">Split gap multiplier<input type="number" min="1" value={config.splitGapMultiplier} onChange={(e) => update({ splitGapMultiplier: numberValue(e.target.value, config.splitGapMultiplier) })} className="mt-2 w-full rounded-xl border border-white/10 bg-black/30 px-3 py-2.5 text-sm text-slate-100 outline-none focus:border-cyan-400/40" /></label>
               <label className="text-xs text-slate-400">Normalization epsilon<input type="number" step="any" min="0.000000000001" value={config.normalizationEpsilon} onChange={(e) => update({ normalizationEpsilon: numberValue(e.target.value, config.normalizationEpsilon) })} className="mt-2 w-full rounded-xl border border-white/10 bg-black/30 px-3 py-2.5 text-sm text-slate-100 outline-none focus:border-cyan-400/40" /></label>
             </div>
-
             <div className="mt-6 rounded-xl border border-white/10 bg-black/20 p-4"><p className="text-xs font-semibold text-slate-300">Chronological split ratios</p><div className="mt-3 grid gap-3 sm:grid-cols-3"><label className="text-[11px] text-slate-500">Train<input type="number" step="0.01" min="0.01" max="0.99" value={config.splitRatios.train} onChange={(e) => updateSplit('train', e.target.value)} className="mt-1 w-full rounded-lg border border-white/10 bg-black/30 px-2.5 py-2 text-xs text-slate-100" /></label><label className="text-[11px] text-slate-500">Validation<input type="number" step="0.01" min="0.01" max="0.99" value={config.splitRatios.validation} onChange={(e) => updateSplit('validation', e.target.value)} className="mt-1 w-full rounded-lg border border-white/10 bg-black/30 px-2.5 py-2 text-xs text-slate-100" /></label><label className="text-[11px] text-slate-500">Test<input type="number" step="0.01" min="0.01" max="0.99" value={config.splitRatios.test} onChange={(e) => updateSplit('test', e.target.value)} className="mt-1 w-full rounded-lg border border-white/10 bg-black/30 px-2.5 py-2 text-xs text-slate-100" /></label></div></div>
-
             <div className="mt-6 rounded-xl border border-white/10 bg-black/20 p-4"><p className="text-xs font-semibold text-slate-300">Synthetic symbol prefixes</p><input value={config.syntheticSymbolPrefixes.join(', ')} onChange={(e) => update({ syntheticSymbolPrefixes: e.target.value.split(',').map((value) => value.trim()).filter(Boolean) })} className="mt-3 w-full rounded-lg border border-white/10 bg-black/30 px-3 py-2.5 text-xs text-slate-100" /><p className="mt-2 text-[10px] text-slate-600">Comma-separated. These are operational routing rules, not feature definitions.</p></div>
-
-            <div className="mt-6 grid gap-3 sm:grid-cols-2"><div className="rounded-xl border border-white/10 bg-black/20 p-4"><p className="text-[10px] uppercase tracking-wider text-slate-500">Registry-owned windows</p><p className="mt-2 font-mono text-sm text-cyan-200">micro={config.featureWindows.micro} · short={config.featureWindows.short} · medium={config.featureWindows.medium} · macro={config.featureWindows.macro}</p></div><div className="rounded-xl border border-white/10 bg-black/20 p-4"><p className="text-[10px] uppercase tracking-wider text-slate-500">Normalization</p><p className="mt-2 text-sm font-semibold text-emerald-300">{config.normalizationMethod.toUpperCase()}</p></div></div>
-
+            <div className="mt-6 grid gap-3 sm:grid-cols-2"><div className="rounded-xl border border-white/10 bg-black/20 p-4"><p className="text-[10px] uppercase tracking-wider text-slate-500">Active config baseline</p><p className="mt-2 font-mono text-sm text-cyan-200">micro={config.featureWindows.micro} · short={config.featureWindows.short} · medium={config.featureWindows.medium} · macro={config.featureWindows.macro}</p><p className="mt-1 text-[10px] text-slate-600">This is the persisted base config; duration datasets carry their resolved topology separately.</p></div><div className="rounded-xl border border-white/10 bg-black/20 p-4"><p className="text-[10px] uppercase tracking-wider text-slate-500">Normalization</p><p className="mt-2 text-sm font-semibold text-emerald-300">{config.normalizationMethod.toUpperCase()}</p></div></div>
             <div className="mt-6 flex flex-wrap gap-2"><button onClick={() => void generate()} disabled={busy} className="inline-flex items-center gap-2 rounded-xl bg-cyan-400 px-4 py-2.5 text-xs font-bold text-slate-950 hover:bg-cyan-300 disabled:opacity-60"><Save className="h-4 w-4" />{busy ? 'Processing…' : 'Generate Draft Configuration'}</button></div>
           </section>
-
-          <section className="rounded-2xl border border-white/10 bg-white/[0.025] p-5"><div className="mb-5 flex items-center gap-2"><History className="h-5 w-5 text-cyan-300" /><div><h2 className="text-base font-bold">Version History</h2><p className="mt-1 text-xs text-slate-500">Every generated configuration is immutable. Activation changes only the active pointer.</p></div></div>
-            <div className="space-y-3">{history.length === 0 ? <div className="rounded-xl border border-dashed border-white/10 px-4 py-10 text-center text-xs text-slate-600">No persisted versions yet.</div> : history.map((item) => <article key={item.id} className="rounded-xl border border-white/10 bg-black/20 p-4"><div className="flex items-start justify-between gap-3"><div><p className="text-sm font-bold">Version {item.version}</p><p className="mt-1 font-mono text-[10px] text-slate-600 break-all">{item.configHash}</p></div><span className={`rounded-full border px-2 py-1 text-[9px] font-bold tracking-wider ${item.status === 'active' ? 'border-emerald-400/20 bg-emerald-400/10 text-emerald-300' : item.status === 'draft' ? 'border-cyan-400/20 bg-cyan-400/10 text-cyan-200' : 'border-white/10 bg-white/5 text-slate-500'}`}>{item.status.toUpperCase()}</span></div><div className="mt-3 grid grid-cols-2 gap-2 text-[10px] text-slate-500"><span>Created: {formatDate(item.createdAt)}</span><span>Activated: {formatDate(item.activatedAt)}</span><span>Schema: {item.featureSchemaVersion}</span><span>By: {item.createdBy || '—'}</span></div>{item.status !== 'active' && <button onClick={() => void activate(item.id)} disabled={busy} className="mt-4 inline-flex items-center gap-2 rounded-lg border border-emerald-400/20 bg-emerald-400/5 px-3 py-2 text-[10px] font-bold text-emerald-300 hover:bg-emerald-400/10 disabled:opacity-50"><GitBranch className="h-3.5 w-3.5" />Activate Version</button>}</article>)}</div>
-          </section>
+          <section className="rounded-2xl border border-white/10 bg-white/[0.025] p-5"><div className="mb-5 flex items-center gap-2"><History className="h-5 w-5 text-cyan-300" /><div><h2 className="text-base font-bold">Version History</h2><p className="mt-1 text-xs text-slate-500">Every generated configuration is immutable. Activation changes only the active pointer.</p></div></div><div className="space-y-3">{history.length === 0 ? <div className="rounded-xl border border-dashed border-white/10 px-4 py-10 text-center text-xs text-slate-600">No persisted versions yet.</div> : history.map((item) => <article key={item.id} className="rounded-xl border border-white/10 bg-black/20 p-4"><div className="flex items-start justify-between gap-3"><div><p className="text-sm font-bold">Version {item.version}</p><p className="mt-1 font-mono text-[10px] text-slate-600 break-all">{item.configHash}</p></div><span className={`rounded-full border px-2 py-1 text-[9px] font-bold tracking-wider ${item.status === 'active' ? 'border-emerald-400/20 bg-emerald-400/10 text-emerald-300' : item.status === 'draft' ? 'border-cyan-400/20 bg-cyan-400/10 text-cyan-200' : 'border-white/10 bg-white/5 text-slate-500'}`}>{item.status.toUpperCase()}</span></div><div className="mt-3 grid grid-cols-2 gap-2 text-[10px] text-slate-500"><span>Created: {formatDate(item.createdAt)}</span><span>Activated: {formatDate(item.activatedAt)}</span><span>Schema: {item.featureSchemaVersion}</span><span>By: {item.createdBy || '—'}</span></div>{item.status !== 'active' && <button onClick={() => void activate(item.id)} disabled={busy} className="mt-4 inline-flex items-center gap-2 rounded-lg border border-emerald-400/20 bg-emerald-400/5 px-3 py-2 text-[10px] font-bold text-emerald-300 hover:bg-emerald-400/10 disabled:opacity-50"><GitBranch className="h-3.5 w-3.5" />Activate Version</button>}</article>)}</div></section>
         </div>
-
-        <section className="mt-6 rounded-2xl border border-white/10 bg-white/[0.025] p-5"><div className="flex items-start gap-3"><Database className="mt-0.5 h-5 w-5 text-cyan-300" /><div><h2 className="text-sm font-bold">Deterministic schema boundary</h2><p className="mt-1 text-xs leading-5 text-slate-500">The dashboard cannot edit the 37 feature definitions or their order. Those remain owned by the canonical feature-definition registry. The active configuration only controls validated operational parameters, and every version receives a fingerprint for model/dataset lineage.</p></div></div></section>
+        <section className="mt-6 rounded-2xl border border-white/10 bg-white/[0.025] p-5"><div className="flex items-start gap-3"><Database className="mt-0.5 h-5 w-5 text-cyan-300" /><div><h2 className="text-sm font-bold">Deterministic schema boundary</h2><p className="mt-1 text-xs leading-5 text-slate-500">The dashboard cannot edit the 37 feature definitions or their order. Those remain owned by the canonical feature-definition registry. Duration-aware windows are resolved by a single code-owned policy and included in dataset/training lineage, while the active configuration controls validated operational parameters.</p></div></div></section>
       </>}
     </div>
   </main>;

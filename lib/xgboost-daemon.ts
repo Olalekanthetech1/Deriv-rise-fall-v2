@@ -1,5 +1,5 @@
 import { spawn, ChildProcess } from 'child_process';
-import { getMlRuntimeSchemaContract } from './ml-runtime-schema';
+import { getMlRuntimeSchemaContract, type MlRuntimeSchemaContract } from './ml-runtime-schema';
 
 interface PendingRequest {
   resolve: (data: any) => void;
@@ -123,7 +123,11 @@ class XGBoostDaemonManager {
     this.ensureDaemonRunning();
     if (!this.child?.stdin?.writable) throw new Error('Python ML daemon unavailable');
 
-    const schemaContract = await getMlRuntimeSchemaContract();
+    const requestedSchema = payload.schemaContract as MlRuntimeSchemaContract | undefined;
+    const schemaContract = requestedSchema ?? await getMlRuntimeSchemaContract();
+    if (!schemaContract || typeof schemaContract !== 'object' || typeof schemaContract.schemaFingerprint !== 'string') {
+      throw new Error('Invalid ML schema contract.');
+    }
     const sanitized: Record<string, unknown> = { ...payload, schemaContract };
     if (typeof sanitized.symbol === 'string') sanitized.symbol = sanitized.symbol.replace(/[^A-Za-z0-9_]/g, '');
     if (sanitized.ticks !== undefined && !Array.isArray(sanitized.ticks)) throw new Error('ticks must be an array');
