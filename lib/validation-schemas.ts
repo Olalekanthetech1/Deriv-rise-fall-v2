@@ -3,10 +3,10 @@ import { z } from 'zod';
 export const PredictSchema = z.object({
   symbol: z.string().regex(/^[A-Za-z0-9_]+$/).max(50),
   ticks: z.array(z.object({ price: z.number().finite(), timestamp: z.number().int().positive().optional() })).optional().default([]),
-  durationSecs: z.number().int().min(1).max(3600),
-  durationValue: z.number().int().min(1).max(3600).optional(),
-  durationUnit: z.enum(['t', 'm', 'h']).optional(),
-  assetCategory: z.number().int().min(0).max(2).optional(),
+  durationSecs: z.number().int().min(1).max(31_536_000),
+  durationValue: z.number().int().min(1).max(365).optional(),
+  durationUnit: z.enum(['t', 's', 'm', 'h', 'd']).optional(),
+  assetCategory: z.number().int().min(0).max(3).optional(),
 });
 
 export const TrainSchema = z.object({
