@@ -30,10 +30,11 @@ export async function POST(req: NextRequest) {
     const requested = Array.isArray(body?.modelTypes) ? body.modelTypes.filter((value: unknown): value is MlModelKey => typeof value === 'string' && getMlModelKeys().includes(value as MlModelKey)) : undefined;
     if (Array.isArray(body?.modelTypes) && body.modelTypes.length > 0 && (!requested || requested.length !== body.modelTypes.length)) return NextResponse.json({ success: false, error: 'One or more requested model types are not registered.' }, { status: 400, headers: noStore() });
     const result = await trainDatasetModels({ datasetId, modelTypes: requested });
-    return NextResponse.json({ success: result.status !== 'failed', dataSource: 'persisted-real-tick-dataset', ...result }, { status: 201, headers: noStore() });
+    const terminalSuccess = result.status === 'completed' || result.status === 'partial';
+    return NextResponse.json({ success: terminalSuccess, dataSource: 'persisted-real-tick-dataset', ...result }, { status: terminalSuccess ? 201 : 504, headers: noStore() });
   } catch (error) {
     const message = error instanceof Error ? error.message : 'Model training failed.';
-    const status = /DATASET|INSUFFICIENT|INVALID_|SCHEMA|REQUIRED|NO_REGISTERED/i.test(message) ? 422 : /DATABASE/i.test(message) ? 503 : 500;
+    const status = /TRAINING_ALREADY_RUNNING/i.test(message) ? 409 : /DATASET|INSUFFICIENT|INVALID_|SCHEMA|REQUIRED|NO_REGISTERED/i.test(message) ? 422 : /DATABASE/i.test(message) ? 503 : 500;
     return NextResponse.json({ success: false, error: message }, { status, headers: noStore() });
   }
 }
