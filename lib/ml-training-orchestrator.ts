@@ -10,7 +10,50 @@ import { xgboostDaemon } from './xgboost-daemon';
 
 type DurationUnit = 't' | 's' | 'm' | 'h' | 'd';
 type TrainingRequest = { datasetId: string; modelTypes?: MlModelKey[] };
-function normalizeId(value: unknown): string { return typeof value === 'string' && /^[A-Za-z0-9_-]+$/.test(value) ? value : ''; }
+
+function normalizeId(value: unknown): string {
+  return typeof value === 'string' && /^[A-Za-z0-9_-]+$/.test(value) ? value : '';
+}
+
+function asRecord(value: unknown): Record<string, unknown> | null {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) return null;
+  return value as Record<string, unknown>;
+}
+
+function sameFeatureWindows(a: Record<string, unknown>, b: Record<string, unknown>): boolean {
+  return ['micro', 'short', 'medium', 'macro'].every((key) => Number(a[key]) === Number(b[key]));
+}
+
+function sameSplitRatios(a: Record<string, unknown>, b: Record<string, unknown>): boolean {
+  return ['train', 'validation', 'test'].every((key) => Number(a[key]) === Number(b[key]));
+}
+
+function isStructurallyCompatibleDataset(dataset: any, schema: any): boolean {
+  const metadata = asRecord(dataset?.metadata);
+  const pipelineConfig = asRecord(metadata?.pipelineConfig);
+  if (!pipelineConfig) return false;
+
+  const featureOrder = Array.isArray(pipelineConfig.featureOrder)
+    ? pipelineConfig.featureOrder.map((value) => String(value))
+    : [];
+  if (featureOrder.length !== schema.featureCount) return false;
+  if (featureOrder.join('|') !== schema.featureOrder.join('|')) return false;
+
+  if (Number(pipelineConfig.canonicalFeatureWindowTicks) !== Number(schema.canonicalFeatureWindowTicks)) return false;
+  if (Number(pipelineConfig.sequenceLength ?? pipelineConfig.featureWindows?.short) !== Number(schema.sequenceLength)) return false;
+
+  const featureWindows = asRecord(pipelineConfig.featureWindows);
+  if (!featureWindows || !sameFeatureWindows(featureWindows, schema.featureWindows)) return false;
+
+  const splitRatios = asRecord(pipelineConfig.splitRatios);
+  if (!splitRatios || !sameSplitRatios(splitRatios, schema.splitRatios)) return false;
+
+  if (String(pipelineConfig.normalizationMethod ?? '') !== String(schema.normalizationMethod)) return false;
+  if (Number(pipelineConfig.normalizationEpsilon ?? NaN) !== Number(schema.normalizationEpsilon)) return false;
+
+  return true;
+}
+
 function sequencePartitions(rows: any[], sequenceLength: number, schema: any) {
   const result: Record<string, any> = {};
   for (const split of ['train', 'validation', 'test']) {
@@ -28,6 +71,7 @@ function sequencePartitions(rows: any[], sequenceLength: number, schema: any) {
   }
   return result;
 }
+
 async function updateRun(sql: any, runId: string, status: string, completedModels: number, failedModels: number, completedAt: string | null = null, metadata: Record<string, unknown> = {}) {
   await sql`UPDATE ml_training_runs SET status=${status},completed_models=${completedModels},failed_models=${failedModels},completed_at=${completedAt},metadata=${JSON.stringify(metadata)}::jsonb,updated_at=NOW() WHERE run_id=${runId}`;
 }
@@ -44,16 +88,27 @@ export async function trainDatasetModels(request: TrainingRequest) {
   const dataset = rows[0] as any;
   if (!dataset) throw new Error('TRAINING_DATASET_NOT_FOUND');
   if (dataset.status !== 'completed' || dataset.leakage_check_passed !== true) throw new Error('DATASET_NOT_READY_FOR_TRAINING');
+
   const durationValue = Number(dataset.duration_value);
   const durationUnit = dataset.duration_unit as DurationUnit;
   const durationSeconds = dataset.duration_seconds == null ? null : Number(dataset.duration_seconds);
   const effectiveHorizonTicks = Number(dataset.horizon_ticks);
-  if (!Number.isSafeInteger(durationValue) || durationValue <= 0 || !['t','s','m','h','d'].includes(durationUnit) || !Number.isSafeInteger(effectiveHorizonTicks) || effectiveHorizonTicks <= 0) throw new Error('INVALID_DATASET_DURATION_METADATA');
-  if (String(dataset.feature_schema_version) !== String(schema.featureSchemaVersion)) throw new Error('DATASET_FEATURE_SCHEMA_VERSION_MISMATCH');
+  if (!Number.isSafeInteger(durationValue) || durationValue <= 0 || !['t', 's', 'm', 'h', 'd'].includes(durationUnit) || !Number.isSafeInteger(effectiveHorizonTicks) || effectiveHorizonTicks <= 0) {
+    throw new Error('INVALID_DATASET_DURATION_METADATA');
+  }
+
+  const datasetSchemaVersion = String(dataset.feature_schema_version ?? '');
+  const currentSchemaVersion = String(schema.featureSchemaVersion);
+  const schemaCompatible = datasetSchemaVersion === currentSchemaVersion || isStructurallyCompatibleDataset(dataset, schema);
+  if (!schemaCompatible) {
+    throw new Error(`DATASET_FEATURE_SCHEMA_VERSION_MISMATCH: dataset=${datasetSchemaVersion || 'unknown'} current=${currentSchemaVersion}`);
+  }
+
   const running = await sql`SELECT run_id FROM ml_training_runs WHERE dataset_id=${datasetId} AND status='running' ORDER BY created_at DESC LIMIT 1`;
   if (running.length) throw new Error('TRAINING_ALREADY_RUNNING_FOR_DATASET');
   const samples = await sql`SELECT sample_index,split,label,feature_vector FROM training_dataset_samples WHERE dataset_id=${datasetId} ORDER BY sample_index ASC`;
   if (!samples.length) throw new Error('DATASET_CONTAINS_NO_SAMPLES');
+
   const partitions: Record<string, any> = {};
   for (const split of ['train', 'validation', 'test']) {
     const splitRows = samples.filter((row: any) => row.split === split);
@@ -75,7 +130,7 @@ export async function trainDatasetModels(request: TrainingRequest) {
 
   const runId = crypto.randomUUID();
   const strategyMetadata = { ...strategy, assetMetadata };
-  await sql`INSERT INTO ml_training_runs (run_id,dataset_id,asset_symbol,duration_value,duration_unit,duration_seconds,horizon_ticks,status,requested_models,started_at,metadata,strategy_key,strategy_version,strategy_metadata) VALUES (${runId},${datasetId},${String(dataset.asset_symbol)},${durationValue},${durationUnit},${durationSeconds},${effectiveHorizonTicks},'running',${JSON.stringify(definitions.map((d) => d.key))}::jsonb,NOW(),${JSON.stringify({featureSchemaVersion:schema.featureSchemaVersion,schemaFingerprint:schema.schemaFingerprint})}::jsonb,${strategy.key},${strategy.version},${JSON.stringify(strategyMetadata)}::jsonb)`;
+  await sql`INSERT INTO ml_training_runs (run_id,dataset_id,asset_symbol,duration_value,duration_unit,duration_seconds,horizon_ticks,status,requested_models,started_at,metadata,strategy_key,strategy_version,strategy_metadata) VALUES (${runId},${datasetId},${String(dataset.asset_symbol)},${durationValue},${durationUnit},${durationSeconds},${effectiveHorizonTicks},'running',${JSON.stringify(definitions.map((d) => d.key))}::jsonb,NOW(),${JSON.stringify({featureSchemaVersion:schema.featureSchemaVersion,schemaFingerprint:schema.schemaFingerprint,datasetFeatureSchemaVersion: datasetSchemaVersion, datasetSchemaCompatibility: schemaCompatible ? 'compatible' : 'exact'})}::jsonb,${strategy.key},${strategy.version},${JSON.stringify(strategyMetadata)}::jsonb)`;
   for (const d of definitions) await sql`INSERT INTO ml_training_run_models(run_id,model_type,status) VALUES(${runId},${d.key},'queued')`;
 
   const results: any[] = [];
