@@ -1,7 +1,8 @@
-import type { DerivDurationDiscovery } from './deriv-duration-registry';
 import { getDb, initDbSchema } from './db';
+import { getDerivDurationDiscovery, type DerivDurationDiscovery } from './deriv-duration-registry';
 
 const CACHE_KEY = 'derivDurationDiscovery';
+const FRESH_TTL_MS = 10 * 60 * 1000;
 
 export type CachedDurationDiscovery = {
   discovery: DerivDurationDiscovery;
@@ -49,4 +50,36 @@ export async function writeCachedDurationDiscovery(discovery: DerivDurationDisco
   } catch (error) {
     console.warn(`[DerivDurationCache] write failed for ${normalized}:`, error);
   }
+}
+
+async function refreshDurationDiscovery(symbol: string): Promise<DerivDurationDiscovery> {
+  const discovery = await getDerivDurationDiscovery(symbol);
+  await writeCachedDurationDiscovery(discovery);
+  return discovery;
+}
+
+export async function getCachedOrDiscoverDuration(symbol: string): Promise<{
+  discovery: DerivDurationDiscovery;
+  source: 'persistent-cache' | 'persistent-stale-cache' | 'deriv-live';
+  refreshing: boolean;
+  cachedAt?: string;
+}> {
+  const normalized = String(symbol ?? '').trim().toUpperCase();
+  if (!normalized) throw new Error('A Deriv symbol is required for duration discovery.');
+
+  const cached = await readCachedDurationDiscovery(normalized);
+  if (cached) {
+    const ageMs = Date.now() - Date.parse(cached.cachedAt || cached.discovery.fetchedAt);
+    if (Number.isFinite(ageMs) && ageMs < FRESH_TTL_MS) {
+      return { discovery: cached.discovery, source: 'persistent-cache', refreshing: false, cachedAt: cached.cachedAt };
+    }
+
+    void refreshDurationDiscovery(normalized).catch(error => {
+      console.warn(`[DerivDurationCache] background refresh failed for ${normalized}:`, error);
+    });
+    return { discovery: cached.discovery, source: 'persistent-stale-cache', refreshing: true, cachedAt: cached.cachedAt };
+  }
+
+  const discovery = await refreshDurationDiscovery(normalized);
+  return { discovery, source: 'deriv-live', refreshing: false };
 }
