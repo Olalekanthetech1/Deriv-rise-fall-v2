@@ -142,6 +142,11 @@ export function AiTraderControls({
         throw new Error(typeof data?.error === 'string' ? data.error : `AI signal request failed (${res.status})`);
       }
 
+      const strategyGate = data?.strategyGate as { accepted?: boolean; confidenceGateThreshold?: number; reasons?: string[] } | undefined;
+      if (strategyGate && strategyGate.accepted === false) {
+        throw new Error(`Asset-aware strategy gate blocked auto trade${strategyGate.reasons?.[0] ? `: ${strategyGate.reasons[0]}` : ''}`);
+      }
+
       const candidates = data.signals.filter((signal: any) =>
         (signal?.direction === 'RISE' || signal?.direction === 'FALL') && Number.isFinite(Number(signal?.confidence)),
       );
