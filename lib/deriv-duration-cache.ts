@@ -1,7 +1,9 @@
 import { getDb, initDbSchema } from './db';
 import { getDerivDurationDiscovery, type DerivDurationDiscovery } from './deriv-duration-registry';
 
-const CACHE_KEY = 'derivDurationDiscovery';
+// Bump the persistent cache namespace whenever duration semantics change so
+// old cross-unit ranges (for example seconds > 60) cannot survive a deploy.
+const CACHE_KEY = 'derivDurationDiscoveryV2';
 const FRESH_TTL_MS = 10 * 60 * 1000;
 
 export type CachedDurationDiscovery = {
