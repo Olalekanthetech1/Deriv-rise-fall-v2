@@ -15,10 +15,10 @@ export interface MultiModelAssetContextView {
   assetLabel: string;
   duration: {
     value: number;
-    unit: 't' | 'm' | 'h';
+    unit: 't' | 's' | 'm' | 'h' | 'd';
     seconds: number;
     label: string;
-    band: 'tick' | 'seconds' | 'minutes' | 'hours';
+    band: 'tick' | 'seconds' | 'minutes' | 'hours' | 'days';
   };
   tickCount: number | null;
   requiredContextTicks: number;
