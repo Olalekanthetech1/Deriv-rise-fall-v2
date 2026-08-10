@@ -35,6 +35,9 @@ function mapJob(row: any): AutoDatasetJob {
 export async function getAutoDatasetJob(jobId: string): Promise<AutoDatasetJob | null> {
   await ensureSchema(); const sql = getDbOrThrow(); const rows = await sql`SELECT * FROM ops_ml_dataset_build_jobs WHERE id = ${jobId} LIMIT 1`; return rows.length ? mapJob(rows[0]) : null;
 }
+export async function getLatestAutoDatasetJob(): Promise<AutoDatasetJob | null> {
+  await ensureSchema(); const sql = getDbOrThrow(); const rows = await sql`SELECT * FROM ops_ml_dataset_build_jobs ORDER BY started_at DESC LIMIT 1`; return rows.length ? mapJob(rows[0]) : null;
+}
 
 async function runningJobMatches(sql: any, jobId: string, durations: Array<{ value: number; unit: DerivDurationUnit; rangeId: string }>): Promise<boolean> {
   const rows = await sql`SELECT item_index, duration_value, duration_unit, duration_range_id FROM ops_ml_dataset_build_job_items WHERE job_id = ${jobId} ORDER BY item_index`;
