@@ -1,6 +1,8 @@
 """Partition-aware native training for duration-specific persisted datasets."""
 from __future__ import annotations
 
+import math
+import os
 import time
 from typing import Any
 
@@ -42,6 +44,38 @@ try:
 except Exception:
     train_deep = None
     predict_deep = None
+
+
+def _runtime_resource_budget() -> dict[str, int]:
+    """Derive a conservative per-training CPU budget from the deployment runtime."""
+    raw_cpu = os.getenv("RENDER_CPU_COUNT", "").strip()
+    try:
+        cpu_count = float(raw_cpu) if raw_cpu else float(os.cpu_count() or 1)
+    except ValueError:
+        cpu_count = float(os.cpu_count() or 1)
+    cpu_count = max(0.25, cpu_count)
+
+    raw_concurrency = os.getenv("ML_TRAINING_CONCURRENCY", "1").strip()
+    try:
+        concurrency = int(raw_concurrency)
+    except ValueError:
+        concurrency = 1
+    concurrency = max(1, min(concurrency, 16))
+
+    thread_budget = max(1, int(math.floor(cpu_count / concurrency)))
+    return {
+        "cpuCountMilli": int(round(cpu_count * 1000)),
+        "trainingConcurrency": concurrency,
+        "threadBudget": thread_budget,
+    }
+
+
+def _bounded_threads(requested: Any, budget: int) -> int:
+    try:
+        requested_int = int(requested)
+    except (TypeError, ValueError):
+        requested_int = budget
+    return max(1, min(requested_int, budget))
 
 
 def _elapsed_ms(start: float) -> float:
@@ -89,6 +123,8 @@ def train_partitioned(kind: str, payload: dict[str, Any]) -> dict[str, Any]:
     duration_unit = str(payload.get("durationUnit") or "")
     duration_seconds = payload.get("durationSeconds")
     training_run_id = payload.get("trainingRunId")
+    resource_budget = _runtime_resource_budget()
+    thread_budget = resource_budget["threadBudget"]
 
     if not symbol:
         raise ValueError("SYMBOL_REQUIRED")
@@ -173,7 +209,7 @@ def train_partitioned(kind: str, payload: dict[str, Any]) -> dict[str, Any]:
                 n_estimators=int(hyper.get("numEstimators", 100)),
                 subsample=float(hyper.get("subsample", 0.8)),
                 eval_metric="logloss",
-                n_jobs=int(hyper.get("nJobs", 2)),
+                n_jobs=_bounded_threads(hyper.get("nJobs", thread_budget), thread_budget),
             ).fit(Xt, yt)
             timings["fitMs"] = _elapsed_ms(fit_started)
             engine = "Trained native Python XGBoost from persisted duration partition"
@@ -187,7 +223,7 @@ def train_partitioned(kind: str, payload: dict[str, Any]) -> dict[str, Any]:
                 num_leaves=int(hyper.get("numLeaves", 31)),
                 random_state=int(hyper.get("randomState", 42)),
                 verbosity=-1,
-                n_jobs=int(hyper.get("nJobs", 2)),
+                n_jobs=_bounded_threads(hyper.get("nJobs", thread_budget), thread_budget),
             ).fit(Xt, yt)
             timings["fitMs"] = _elapsed_ms(fit_started)
             engine = "Trained native Python LightGBM from persisted duration partition"
@@ -201,6 +237,7 @@ def train_partitioned(kind: str, payload: dict[str, Any]) -> dict[str, Any]:
                 learning_rate=float(hyper.get("learningRate", 0.05)),
                 verbose=False,
                 random_seed=int(hyper.get("randomState", 42)),
+                thread_count=_bounded_threads(hyper.get("threadCount", thread_budget), thread_budget),
             ).fit(Xt, yt)
             timings["fitMs"] = _elapsed_ms(fit_started)
             engine = "Trained native Python CatBoost from persisted duration partition"
@@ -224,7 +261,7 @@ def train_partitioned(kind: str, payload: dict[str, Any]) -> dict[str, Any]:
                 n_estimators=int(hyper.get("numEstimators", 200)),
                 contamination="auto",
                 random_state=int(hyper.get("randomState", 42)),
-                n_jobs=int(hyper.get("nJobs", 2)),
+                n_jobs=_bounded_threads(hyper.get("nJobs", thread_budget), thread_budget),
             ).fit(Xt, yt)
             timings["fitMs"] = _elapsed_ms(fit_started)
             engine = "Trained native scikit-learn IsolationForest from persisted duration partition"
@@ -258,6 +295,7 @@ def train_partitioned(kind: str, payload: dict[str, Any]) -> dict[str, Any]:
 
     metrics = dict(metrics)
     metrics["timings"] = dict(timings)
+    metrics["resourceBudget"] = resource_budget
 
     lineage = str(training_run_id)[:12] if training_run_id else "legacy"
     model_id = f"{symbol}_{duration_unit}{duration_value}_{kind}_{lineage}"
@@ -276,6 +314,7 @@ def train_partitioned(kind: str, payload: dict[str, Any]) -> dict[str, Any]:
         "sequenceLength": schema["sequenceLength"],
         "metrics": metrics,
         "timings": dict(timings),
+        "resourceBudget": resource_budget,
         "accuracy": metrics.get("accuracy"),
         "schemaVersion": schema["featureSchemaVersion"],
         "schemaFingerprint": schema["schemaFingerprint"],
