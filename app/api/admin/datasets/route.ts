@@ -19,45 +19,16 @@ function matchingRanges(discovery: Awaited<ReturnType<typeof getCachedOrDiscover
     return (value - range.min) % step === 0;
   });
 }
-function envPositiveInt(name: string, fallback: number, max: number): number {
-  const parsed = Number(process.env[name]);
-  return Number.isSafeInteger(parsed) && parsed > 0 ? Math.min(parsed, max) : fallback;
-}
+
+/**
+ * Expand the exact broker-discovered duration domain for AUTO builds.
+ *
+ * The training selector already uses expandTrainingDurations(). AUTO must use
+ * the same registry-derived set so that "Build all seconds/minutes/hours/days"
+ * means every supported value, not a sampled subset of the range.
+ */
 function expandTrainingHorizonLadder(ranges: DerivDurationRange[]): Array<{ value: number; unit: DerivDurationUnit; rangeId: string }> {
-  const maxPerRange = envPositiveInt('DERIV_AUTO_HORIZONS_PER_RANGE', 48, 256);
-  const maxTotal = envPositiveInt('DERIV_AUTO_HORIZON_TOTAL', 192, 512);
-  const result: Array<{ value: number; unit: DerivDurationUnit; rangeId: string }> = [];
-  for (const range of ranges) {
-    if (result.length >= maxTotal) break;
-    const step = Number.isSafeInteger(range.step) && range.step > 0 ? range.step : 1;
-    const min = range.min;
-    const max = range.max;
-    if (min > max) continue;
-    const values: number[] = [min];
-    if (max !== min) values.push(max);
-    const count = Math.min(maxPerRange, Math.max(2, maxPerRange));
-    if (count > 2) {
-      const span = max - min;
-      for (let i = 1; i < count - 1; i += 1) {
-        const ratio = i / (count - 1);
-        const raw = min + span * (Math.exp(ratio * Math.log1p(span)) - 1) / Math.expm1(Math.log1p(span));
-        const stepped = min + Math.round((raw - min) / step) * step;
-        if (stepped >= min && stepped <= max) values.push(stepped);
-      }
-    }
-    const unique = Array.from(new Set(values)).sort((a, b) => a - b);
-    for (const value of unique) {
-      if (result.length >= maxTotal) break;
-      result.push({ value, unit: range.unit, rangeId: range.id });
-    }
-  }
-  const seen = new Set<string>();
-  return result.filter((item) => {
-    const key = `${item.value}:${item.unit}`;
-    if (seen.has(key)) return false;
-    seen.add(key);
-    return true;
-  });
+  return expandTrainingDurations(ranges, 10000);
 }
 
 function trainingEligibleDatasets<T extends Record<string, any>>(datasets: T[]): T[] {
@@ -147,7 +118,7 @@ export async function GET(req: NextRequest) {
       durationCachedAt: resolved.cachedAt,
       durationDiscovery: resolved.discovery,
       // The selector must expose the complete broker-discovered duration domain.
-      // The bounded ladder remains available only for resource-controlled AUTO builds.
+      // The same exact domain is used by AUTO builds below.
       trainingHorizons: brokerTrainingHorizons,
       brokerTrainingHorizons,
       autoTrainingHorizons: expandTrainingHorizonLadder(resolved.discovery.ranges),
@@ -177,7 +148,9 @@ export async function POST(req: NextRequest) {
       resumeAutoDatasetJob(job.id);
       const result = { status: job.status, jobId: job.id, requestedCount: job.requestedCount, completedCount: job.completedCount, failedCount: job.failedCount };
       const scope = requestedUnit ? ` for ${requestedUnit}` : '';
-      return NextResponse.json({ success: true, accepted: true, dataSource: 'deriv-real-ticks', durationSource: resolved.source, durationRefreshing: resolved.refreshing, result, job, message: `AUTO dataset build started for ${job.requestedCount} dynamically derived horizon samples${scope}.` }, { status: 202, headers: noStore() });
+      // Keep jobId/counts at the top level as the stable API contract consumed by
+      // the admin UI, while retaining the result envelope for compatibility.
+      return NextResponse.json({ success: true, accepted: true, jobId: job.id, requestedCount: job.requestedCount, completedCount: job.completedCount, failedCount: job.failedCount, dataSource: 'deriv-real-ticks', durationSource: resolved.source, durationRefreshing: resolved.refreshing, result, job, message: `AUTO dataset build started for all ${job.requestedCount} dynamically derived horizon samples${scope}.` }, { status: 202, headers: noStore() });
     }
     const legacyHorizon = body?.horizonTicks;
     const durationValue = legacyHorizon != null ? Number(legacyHorizon) : Number(body?.durationValue);
