@@ -6,6 +6,8 @@ interface PendingRequest {
   reject: (err: any) => void;
   timer: NodeJS.Timeout;
   onProgress?: (data: any) => void;
+  trainingRunId?: string;
+  modelType?: string;
 }
 
 type DaemonAction = 'predict' | 'predict_ensemble' | 'train' | 'train_partitioned' | 'list_models' | 'ping' | 'backtest';
@@ -80,8 +82,8 @@ class XGBoostDaemonManager {
             }
             if (data.type === 'progress' && data.id && this.pending.has(data.id)) {
               const req = this.pending.get(data.id)!;
-              const trainingRunId = typeof data.trainingRunId === 'string' ? data.trainingRunId : '';
-              const modelType = typeof data.modelType === 'string' ? data.modelType : '';
+              const trainingRunId = typeof data.trainingRunId === 'string' ? data.trainingRunId : req.trainingRunId || '';
+              const modelType = typeof data.modelType === 'string' ? data.modelType : req.modelType || '';
               if (trainingRunId && modelType) {
                 this.liveTrainingDiagnostics.set(`${trainingRunId}:${modelType}`, {
                   phase: data.phase || 'running',
@@ -98,9 +100,7 @@ class XGBoostDaemonManager {
               const req = this.pending.get(data.id)!;
               clearTimeout(req.timer);
               this.pending.delete(data.id);
-              const requestRunId = typeof data.trainingRunId === 'string' ? data.trainingRunId : '';
-              const requestModelType = typeof data.modelType === 'string' ? data.modelType : '';
-              if (requestRunId && requestModelType) this.liveTrainingDiagnostics.delete(`${requestRunId}:${requestModelType}`);
+              if (req.trainingRunId && req.modelType) this.liveTrainingDiagnostics.delete(`${req.trainingRunId}:${req.modelType}`);
               req.resolve(data);
             }
           } catch {
@@ -193,6 +193,8 @@ class XGBoostDaemonManager {
     const id = `req_${Date.now()}_${++this.reqIdCounter}`;
     const packet = JSON.stringify({ action, id, ...sanitized }) + '\n';
     const roundTripStartedAt = Date.now();
+    const trainingRunId = typeof payload.trainingRunId === 'string' ? payload.trainingRunId : '';
+    const modelType = typeof payload.modelType === 'string' ? payload.modelType : '';
 
     return new Promise((resolve, reject) => {
       const defaultTimeoutMs = action === 'train' || action === 'train_partitioned'
@@ -209,6 +211,7 @@ class XGBoostDaemonManager {
       const timer = setTimeout(() => {
         if (!this.pending.has(id)) return;
         this.pending.delete(id);
+        if (trainingRunId && modelType) this.liveTrainingDiagnostics.delete(`${trainingRunId}:${modelType}`);
         if (action === 'train' || action === 'train_partitioned') {
           this.terminateTrainingDaemon();
           reject(new Error(`DAEMON_TRAINING_TIMEOUT: ${action} exceeded ${timeoutMs}ms; native worker was terminated and will restart cleanly.`));
@@ -222,6 +225,8 @@ class XGBoostDaemonManager {
         reject,
         timer,
         onProgress: options.onProgress,
+        trainingRunId,
+        modelType,
       });
 
       try {
@@ -229,6 +234,7 @@ class XGBoostDaemonManager {
       } catch (err) {
         clearTimeout(timer);
         this.pending.delete(id);
+        if (trainingRunId && modelType) this.liveTrainingDiagnostics.delete(`${trainingRunId}:${modelType}`);
         reject(err);
       }
     });
