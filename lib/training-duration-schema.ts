@@ -64,15 +64,20 @@ export async function ensureTrainingDurationSchema(sql: Sql): Promise<void> {
     strategy_key VARCHAR(160),
     strategy_version VARCHAR(32),
     strategy_metadata JSONB NOT NULL DEFAULT '{}'::jsonb,
+    heartbeat_at TIMESTAMPTZ,
+    worker_id VARCHAR(128),
     created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
     updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
   )`;
   await sql`ALTER TABLE ml_training_runs ADD COLUMN IF NOT EXISTS strategy_key VARCHAR(160)`;
   await sql`ALTER TABLE ml_training_runs ADD COLUMN IF NOT EXISTS strategy_version VARCHAR(32)`;
   await sql`ALTER TABLE ml_training_runs ADD COLUMN IF NOT EXISTS strategy_metadata JSONB NOT NULL DEFAULT '{}'::jsonb`;
+  await sql`ALTER TABLE ml_training_runs ADD COLUMN IF NOT EXISTS heartbeat_at TIMESTAMPTZ`;
+  await sql`ALTER TABLE ml_training_runs ADD COLUMN IF NOT EXISTS worker_id VARCHAR(128)`;
   await sql`CREATE INDEX IF NOT EXISTS idx_ml_training_runs_asset_created ON ml_training_runs (asset_symbol, created_at DESC)`;
   await sql`CREATE INDEX IF NOT EXISTS idx_ml_training_runs_dataset_created ON ml_training_runs (dataset_id, created_at DESC)`;
   await sql`CREATE INDEX IF NOT EXISTS idx_ml_training_runs_strategy ON ml_training_runs (strategy_key, strategy_version, created_at DESC)`;
+  await sql`CREATE INDEX IF NOT EXISTS idx_ml_training_runs_running_heartbeat ON ml_training_runs (status, heartbeat_at) WHERE status = 'running'`;
 
   await sql`CREATE TABLE IF NOT EXISTS ml_training_run_models (
     id BIGSERIAL PRIMARY KEY,
@@ -84,8 +89,11 @@ export async function ensureTrainingDurationSchema(sql: Sql): Promise<void> {
     error TEXT,
     started_at TIMESTAMPTZ,
     completed_at TIMESTAMPTZ,
+    heartbeat_at TIMESTAMPTZ,
     created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
     UNIQUE (run_id, model_type)
   )`;
+  await sql`ALTER TABLE ml_training_run_models ADD COLUMN IF NOT EXISTS heartbeat_at TIMESTAMPTZ`;
   await sql`CREATE INDEX IF NOT EXISTS idx_ml_training_run_models_run ON ml_training_run_models (run_id, created_at)`;
+  await sql`CREATE INDEX IF NOT EXISTS idx_ml_training_run_models_running_heartbeat ON ml_training_run_models (status, heartbeat_at) WHERE status = 'running'`;
 }
