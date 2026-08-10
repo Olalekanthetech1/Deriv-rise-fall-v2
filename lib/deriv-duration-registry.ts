@@ -1,5 +1,6 @@
 import WebSocket from 'ws';
 import { openDerivPublicWebSocket } from './deriv-public-websocket';
+import { DERIV_TIME_DURATION_BANDS, type DerivTimeDurationUnit } from './deriv-duration-policy';
 
 export type DerivDurationUnit = 't' | 's' | 'm' | 'h' | 'd';
 export type DerivDurationRange = { id: string; unit: DerivDurationUnit; min: number; max: number; step: number; tradeTypes: string[]; source: 'deriv-proposal-probe' };
@@ -7,12 +8,13 @@ export type DerivDurationDiscovery = { symbol: string; ranges: DerivDurationRang
 type RecordLike = Record<string, unknown>;
 type ContractCapability = { type: 'CALL' | 'PUT'; expiryType: string; probe: Record<string, unknown> };
 
-const MAX_PROBE: Record<DerivDurationUnit, number> = { t: 1000, s: 86400, m: 1440, h: 168, d: 365 };
+const MAX_PROBE: Record<DerivDurationUnit, number> = { t: 1000, ...DERIV_TIME_DURATION_BANDS };
+const MIN_PROBE: Record<DerivDurationUnit, number> = { t: 1, s: DERIV_TIME_DURATION_BANDS.s.min, m: DERIV_TIME_DURATION_BANDS.m.min, h: DERIV_TIME_DURATION_BANDS.h.min, d: DERIV_TIME_DURATION_BANDS.d.min };
 const PROBE_SEEDS: Record<DerivDurationUnit, number[]> = {
   t: [1, 2, 3, 5, 10, 15, 20, 30, 60, 100, 200, 500, 1000],
-  s: [1, 2, 5, 10, 15, 20, 30, 60, 120, 300, 600, 900, 1800, 3600, 7200, 14400, 28800, 43200, 86400],
-  m: [1, 2, 5, 10, 15, 30, 60, 120, 240, 480, 720, 1440],
-  h: [1, 2, 4, 6, 12, 24, 48, 72, 120, 168],
+  s: [15, 20, 30, 60],
+  m: [1, 2, 5, 10, 15, 30, 60],
+  h: [1, 2, 4, 6, 12, 24],
   d: [1, 2, 3, 5, 7, 14, 30, 60, 90, 180, 365],
 };
 const DISCOVERY_TTL_MS = 10 * 60 * 1000;
@@ -116,12 +118,12 @@ function contractCapabilities(response: RecordLike): ContractCapability[] {
 }
 
 // Proposal duration units supported by Deriv. The broker still decides the
-// actual range; this function does not invent or advertise unsupported values.
+// actual range inside each canonical unit band.
 function unitsForExpiryType(expiryType: string): DerivDurationUnit[] { void expiryType; return ALL_DURATION_UNITS; }
 
 async function findValidSeed(session: DerivDiscoverySession, symbol: string, capability: ContractCapability, unit: DerivDurationUnit): Promise<number | null> {
   for (const seed of PROBE_SEEDS[unit]) {
-    if (seed <= MAX_PROBE[unit] && await session.proposal(symbol, capability, seed, unit)) return seed;
+    if (seed >= MIN_PROBE[unit] && seed <= MAX_PROBE[unit] && await session.proposal(symbol, capability, seed, unit)) return seed;
   }
   return null;
 }
@@ -142,7 +144,7 @@ async function discoverUnit(session: DerivDiscoverySession, symbol: string, capa
     if (seed === null) continue;
 
     let validMin = seed;
-    for (let value = seed - 1; value >= 1; value -= 1) {
+    for (let value = seed - 1; value >= MIN_PROBE[unit]; value -= 1) {
       if (await session.proposal(symbol, capability, value, unit)) validMin = value;
       else break;
     }
