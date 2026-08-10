@@ -1,5 +1,5 @@
 import { NextRequest, NextResponse } from 'next/server';
-import { extract37TickFeatures, TickPoint } from '@/lib/ml-feature-extractor';
+import { TickPoint } from '@/lib/ml-feature-extractor';
 import { evaluateProductionEnsemble, ProductionEnsembleResult } from '@/lib/production-ensemble';
 import { initDbSchema, getDb } from '@/lib/db';
 import { ensureMinTicks } from '@/lib/ticks-helper';
@@ -31,6 +31,10 @@ export interface SignalResponseItem {
   expiresAt: number;
   winRate: string;
   description: string;
+  strategyGateAccepted: boolean;
+  strategyGateThreshold: number;
+  strategyGateRiskTier: 'LOW' | 'MODERATE' | 'ELEVATED' | 'HIGH';
+  strategyGateReasons: string[];
   timestamp: number;
 }
 
@@ -48,31 +52,29 @@ function buildSignalItems(ensemble: ProductionEnsembleResult, duration: ReturnTy
     .map((evaluation) => {
       const direction = evaluation.signal!;
       const confidence = evaluation.confidence!;
-      const expiry = now + duration.seconds * 1000;
-      const durationPrediction: DurationPrediction = {
-        value: duration.value,
-        unit: duration.unit,
-        label: duration.label,
-        direction,
-        confidence,
-        winRate: 'Native model probability',
-      };
+      const executable = ensemble.strategyGate.accepted;
+      const expiry = executable ? now + duration.seconds * 1000 : now;
+      const durationPrediction: DurationPrediction = { value: duration.value, unit: duration.unit, label: duration.label, direction, confidence, winRate: 'Native model probability' };
       return {
         id: `sig-${evaluation.modelKey}-${ensemble.symbol}`,
         name: evaluation.modelName,
         category: 'AI',
         direction,
         confidence,
-        strength: direction === 'RISE' ? 'Buy' : 'Sell',
+        strength: executable ? (direction === 'RISE' ? 'Buy' : 'Sell') : 'Neutral',
         recommendedDurationValue: duration.value,
         recommendedDurationUnit: duration.unit,
         recommendedDurationLabel: duration.label,
         durationMatrix: [durationPrediction],
-        expiresInSeconds: duration.seconds,
-        maxExpirySeconds: duration.seconds,
+        expiresInSeconds: executable ? duration.seconds : 0,
+        maxExpirySeconds: executable ? duration.seconds : 0,
         expiresAt: expiry,
         winRate: 'Native model probability',
-        description: evaluation.details,
+        description: `${evaluation.details} · Gate ${executable ? 'passed' : 'blocked'} (${ensemble.strategyGate.confidenceGateThreshold}%)`,
+        strategyGateAccepted: executable,
+        strategyGateThreshold: ensemble.strategyGate.confidenceGateThreshold,
+        strategyGateRiskTier: ensemble.strategyGate.riskTier,
+        strategyGateReasons: ensemble.strategyGate.reasons,
         timestamp: now,
       };
     });
@@ -102,45 +104,60 @@ export async function POST(req: NextRequest) {
   try {
     await initDbSchema();
     const body = await req.json().catch(() => ({}));
+    const assetCategoryNum = Number.isFinite(Number(body?.assetCategory)) ? Number(body.assetCategory) : undefined;
     const symbol = typeof body?.symbol === 'string' && body.symbol.trim() ? body.symbol.trim() : 'R_100';
     const duration = normalizeDuration(body?.durationValue, body?.durationUnit);
+
+    let assetClass: string | undefined;
+    let marketType: string | undefined;
+    const sql = getDb();
+    if (sql) {
+      try {
+        const rows = await sql`SELECT asset_class, market_type FROM market_assets WHERE symbol = ${symbol} LIMIT 1`;
+        assetClass = rows?.[0]?.asset_class ? String(rows[0].asset_class) : undefined;
+        marketType = rows?.[0]?.market_type ? String(rows[0].market_type) : undefined;
+      } catch (dbErr) {
+        console.warn('[Signal Asset Context Warning]:', dbErr);
+      }
+    }
 
     let tickList: TickPoint[] = Array.isArray(body?.ticks) && body.ticks.length > 0 ? body.ticks : [];
     if (tickList.length < 25) tickList = await ensureMinTicks(symbol, 100);
     if (tickList.length < 25) throw new Error(`Insufficient real ticks for signal generation on ${symbol}. Minimum 25 required.`);
 
-    const assetCategoryNum = symbol.startsWith('FRX') || symbol.includes('USD') || symbol.includes('EUR') ? 1 : symbol.startsWith('CWM') || symbol.includes('XAU') || symbol.includes('OIL') ? 2 : 0;
-    const features = extract37TickFeatures(tickList, {
-      symbol,
-      contractDurationSecs: duration.seconds,
-      assetCategoryNum,
-    });
     const ensemble = await evaluateProductionEnsemble(tickList, {
       symbol,
       durationSecs: duration.seconds,
+      durationValue: duration.value,
+      durationUnit: duration.unit,
       assetCategory: assetCategoryNum,
+      assetClass,
+      marketType,
+      requiredContextTicks: 100,
     });
 
     const now = Date.now();
     const generatedSignals = buildSignalItems(ensemble, duration, now);
     if (!generatedSignals.length) throw new Error('NO_NATIVE_MODEL_SIGNALS_AVAILABLE');
 
-    const modeRecommendations = buildModeRecommendations(generatedSignals);
+    const modeRecommendations = ensemble.strategyGate.accepted ? buildModeRecommendations(generatedSignals) : [];
     const consensusBase = buildConsensus(generatedSignals, now);
-    const consensus = { ...consensusBase, modeRecommendations };
+    const consensus = ensemble.strategyGate.accepted ? { ...consensusBase, modeRecommendations } : {
+      ...consensusBase,
+      direction: 'WAIT' as const,
+      confidence: ensemble.confidence,
+      status: 'WAIT' as const,
+      expiresAt: now,
+      expiresInSeconds: 0,
+      modeRecommendations: [],
+    };
 
     let totalVerified = 0;
     let winCount = 0;
     let accuracy = '0.0%';
-    const sql = getDb();
     if (sql) {
       try {
-        const statsRes = await sql`
-          SELECT COUNT(*)::int AS total,
-                 COUNT(CASE WHEN status = 'WON' THEN 1 END)::int AS wins
-          FROM trades
-          WHERE status IN ('WON', 'LOST')
-        `;
+        const statsRes = await sql`SELECT COUNT(*)::int AS total, COUNT(CASE WHEN status = 'WON' THEN 1 END)::int AS wins FROM trades WHERE status IN ('WON', 'LOST')`;
         if (statsRes?.length && statsRes[0].total > 0) {
           totalVerified = statsRes[0].total;
           winCount = statsRes[0].wins;
@@ -153,12 +170,9 @@ export async function POST(req: NextRequest) {
 
     const winStats = { total: totalVerified, winCount, accuracy };
     const primary = generatedSignals[0];
-    if (sql) {
+    if (sql && ensemble.strategyGate.accepted) {
       try {
-        await sql`
-          INSERT INTO trades (symbol, contract_type, stake, status, prediction_confidence, strategy)
-          VALUES (${symbol}, ${primary.direction}, 10, 'PREDICTED', ${primary.confidence}, 'Native Production Ensemble Signal')
-        `;
+        await sql`INSERT INTO trades (symbol, contract_type, stake, status, prediction_confidence, strategy) VALUES (${symbol}, ${primary.direction}, 10, 'PREDICTED', ${primary.confidence}, 'Native Production Ensemble Signal · Asset-Aware Gate')`;
       } catch (dbErr) {
         console.warn('[Signal Prediction Log Warning]:', dbErr);
       }
@@ -166,16 +180,9 @@ export async function POST(req: NextRequest) {
 
     return NextResponse.json({
       success: true,
-      prediction: {
-        signal: ensemble.direction === 'RISE' ? 'CALL' : 'PUT',
-        confidence: ensemble.confidence,
-        probabilityUp: ensemble.probUp,
-        probabilityDown: ensemble.probDown,
-        symbol,
-        features,
-        timestamp: now,
-        modelVersion: 'native-production-ensemble',
-      },
+      assetContext: ensemble.assetContext,
+      strategyGate: ensemble.strategyGate,
+      prediction: { signal: ensemble.direction === 'RISE' ? 'CALL' : 'PUT', confidence: ensemble.confidence, probabilityUp: ensemble.probUp, probabilityDown: ensemble.probDown, symbol, features: ensemble.features, timestamp: now, modelVersion: 'native-production-ensemble' },
       signals: generatedSignals,
       winStats,
       consensus,
@@ -185,7 +192,7 @@ export async function POST(req: NextRequest) {
       anomalyScore: ensemble.anomalyScore,
       modelBreakdown: ensemble.modelBreakdown,
       multiModelEnsemble: ensemble,
-    });
+    }, { headers: { 'Cache-Control': 'no-store' } });
   } catch (err: unknown) {
     console.error('[Signal Prediction Error]:', err);
     return NextResponse.json({ success: false, error: err instanceof Error ? err.message : 'Signal prediction failed' }, { status: 503 });

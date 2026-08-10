@@ -1,6 +1,6 @@
 'use client';
 
-import { useEffect, useState } from 'react';
+import { useEffect, useMemo, useState } from 'react';
 import { Activity, CheckCircle2, Clock, Cpu, Layers, Radio, RefreshCw, ShieldCheck, Sliders, Sparkles, Target, TrendingDown, TrendingUp, Volume2, VolumeX, X, Zap } from 'lucide-react';
 import type { ActiveSymbol } from '@deriv/core';
 import type { DurationPrediction, TradeSignal } from '@/hooks/use-realtime-signals';
@@ -39,14 +39,24 @@ export function SignalsDrawer({ isOpen, onClose, activeSymbol, signals, consensu
   const [isEvaluating, setIsEvaluating] = useState(false);
   const [ensembleError, setEnsembleError] = useState<string | null>(null);
 
+  const consensusDuration = useMemo(() => consensus?.recommendedDuration ?? null, [consensus]);
+
   const fetchEnsembleData = async () => {
     setIsEvaluating(true);
     setEnsembleError(null);
     try {
       const symbol = activeSymbol?.underlying_symbol || 'R_100';
+      const durationValue = consensusDuration?.value ?? 5;
+      const durationUnit = consensusDuration?.unit === 'm' || consensusDuration?.unit === 'h' ? consensusDuration.unit : 't';
       const response = await fetch('/api/ml/predict', {
         method: 'POST', headers: { 'Content-Type': 'application/json' }, cache: 'no-store',
-        body: JSON.stringify({ symbol, durationSecs: 5, assetCategory: symbol.startsWith('FRX') ? 1 : 0 }),
+        body: JSON.stringify({
+          symbol,
+          durationSecs: Math.max(1, durationUnit === 'm' ? durationValue * 60 : durationUnit === 'h' ? durationValue * 3600 : durationValue),
+          durationValue,
+          durationUnit,
+          assetCategory: symbol.startsWith('FRX') ? 1 : 0,
+        }),
       });
       const data = await response.json().catch(() => ({}));
       if (!response.ok || data?.success !== true || !data?.multiModelEnsemble) throw new Error(typeof data?.error === 'string' ? data.error : `Multi-Model evaluation request failed (${response.status})`);
@@ -57,7 +67,7 @@ export function SignalsDrawer({ isOpen, onClose, activeSymbol, signals, consensu
     } finally { setIsEvaluating(false); }
   };
 
-  useEffect(() => { if (isOpen && activeTab === 'multimodel') void fetchEnsembleData(); }, [isOpen, activeTab, activeSymbol]);
+  useEffect(() => { if (isOpen && activeTab === 'multimodel') void fetchEnsembleData(); }, [isOpen, activeTab, activeSymbol, consensusDuration]);
   if (!isOpen) return null;
 
   const handleQuickExecute = async (signal: TradeSignal) => {
