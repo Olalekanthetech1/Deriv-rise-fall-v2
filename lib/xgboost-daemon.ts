@@ -5,6 +5,9 @@ interface PendingRequest {
   resolve: (data: any) => void;
   reject: (err: any) => void;
   timer: NodeJS.Timeout;
+  onProgress?: (data: any) => void;
+  trainingRunId?: string;
+  modelType?: string;
 }
 
 type DaemonAction = 'predict' | 'predict_ensemble' | 'train' | 'train_partitioned' | 'list_models' | 'ping' | 'backtest';
@@ -38,6 +41,7 @@ function attachClientRoundTripTiming(data: any, roundTripMs: number): any {
 class XGBoostDaemonManager {
   private child: ChildProcess | null = null;
   private pending = new Map<string, PendingRequest>();
+  private liveTrainingDiagnostics = new Map<string, any>();
   private reqIdCounter = 0;
   private isReady = false;
   private buffer = '';
@@ -76,10 +80,27 @@ class XGBoostDaemonManager {
               this.restartDelay = 1000;
               continue;
             }
+            if (data.type === 'progress' && data.id && this.pending.has(data.id)) {
+              const req = this.pending.get(data.id)!;
+              const trainingRunId = typeof data.trainingRunId === 'string' ? data.trainingRunId : req.trainingRunId || '';
+              const modelType = typeof data.modelType === 'string' ? data.modelType : req.modelType || '';
+              if (trainingRunId && modelType) {
+                this.liveTrainingDiagnostics.set(`${trainingRunId}:${modelType}`, {
+                  phase: data.phase || 'running',
+                  elapsedMs: Number(data.elapsedMs) || 0,
+                  timings: data.timings && typeof data.timings === 'object' ? data.timings : {},
+                  message: typeof data.message === 'string' ? data.message : null,
+                  updatedAt: new Date().toISOString(),
+                });
+              }
+              try { req.onProgress?.(data); } catch { /* diagnostics must never break training */ }
+              continue;
+            }
             if (data.id && this.pending.has(data.id)) {
               const req = this.pending.get(data.id)!;
               clearTimeout(req.timer);
               this.pending.delete(data.id);
+              if (req.trainingRunId && req.modelType) this.liveTrainingDiagnostics.delete(`${req.trainingRunId}:${req.modelType}`);
               req.resolve(data);
             }
           } catch {
@@ -91,6 +112,7 @@ class XGBoostDaemonManager {
         this.child = null;
         this.isReady = false;
         this.buffer = '';
+        this.liveTrainingDiagnostics.clear();
         for (const req of this.pending.values()) {
           clearTimeout(req.timer);
           req.reject(new Error('Python ML daemon exited unexpectedly'));
@@ -112,6 +134,7 @@ class XGBoostDaemonManager {
     this.child = null;
     this.isReady = false;
     this.buffer = '';
+    this.liveTrainingDiagnostics.clear();
     if (!child) return;
     try {
       child.kill('SIGTERM');
@@ -149,7 +172,11 @@ class XGBoostDaemonManager {
     'backtest',
   ]);
 
-  public async sendCommand(action: DaemonAction, payload: Record<string, any> = {}): Promise<any> {
+  public async sendCommand(
+    action: DaemonAction,
+    payload: Record<string, any> = {},
+    options: { onProgress?: (data: any) => void } = {},
+  ): Promise<any> {
     if (!XGBoostDaemonManager.ALLOWED_ACTIONS.has(action)) throw new Error(`Unauthorized daemon action: ${action}`);
     this.ensureDaemonRunning();
     if (!this.child?.stdin?.writable) throw new Error('Python ML daemon unavailable');
@@ -166,6 +193,8 @@ class XGBoostDaemonManager {
     const id = `req_${Date.now()}_${++this.reqIdCounter}`;
     const packet = JSON.stringify({ action, id, ...sanitized }) + '\n';
     const roundTripStartedAt = Date.now();
+    const trainingRunId = typeof payload.trainingRunId === 'string' ? payload.trainingRunId : '';
+    const modelType = typeof payload.modelType === 'string' ? payload.modelType : '';
 
     return new Promise((resolve, reject) => {
       const defaultTimeoutMs = action === 'train' || action === 'train_partitioned'
@@ -182,6 +211,7 @@ class XGBoostDaemonManager {
       const timer = setTimeout(() => {
         if (!this.pending.has(id)) return;
         this.pending.delete(id);
+        if (trainingRunId && modelType) this.liveTrainingDiagnostics.delete(`${trainingRunId}:${modelType}`);
         if (action === 'train' || action === 'train_partitioned') {
           this.terminateTrainingDaemon();
           reject(new Error(`DAEMON_TRAINING_TIMEOUT: ${action} exceeded ${timeoutMs}ms; native worker was terminated and will restart cleanly.`));
@@ -194,6 +224,9 @@ class XGBoostDaemonManager {
         resolve: (data: any) => resolve(attachClientRoundTripTiming(data, Date.now() - roundTripStartedAt)),
         reject,
         timer,
+        onProgress: options.onProgress,
+        trainingRunId,
+        modelType,
       });
 
       try {
@@ -201,9 +234,14 @@ class XGBoostDaemonManager {
       } catch (err) {
         clearTimeout(timer);
         this.pending.delete(id);
+        if (trainingRunId && modelType) this.liveTrainingDiagnostics.delete(`${trainingRunId}:${modelType}`);
         reject(err);
       }
     });
+  }
+
+  public getLiveTrainingDiagnostic(trainingRunId: string, modelType: string) {
+    return this.liveTrainingDiagnostics.get(`${trainingRunId}:${modelType}`) || null;
   }
 
   public isAvailable() {

@@ -1,8 +1,10 @@
 """Partition-aware native training for duration-specific persisted datasets."""
 from __future__ import annotations
 
+import json
 import math
 import os
+import sys
 import time
 from typing import Any
 
@@ -82,6 +84,27 @@ def _elapsed_ms(start: float) -> float:
     return round((time.perf_counter() - start) * 1000.0, 3)
 
 
+def _emit_progress(request: dict[str, Any], phase: str, total_started: float, timings: dict[str, float], message: str | None = None) -> None:
+    """Emit a machine-readable progress event over the daemon stdout protocol."""
+    event = {
+        "type": "progress",
+        "id": request.get("id"),
+        "trainingRunId": request.get("trainingRunId"),
+        "modelType": request.get("modelType"),
+        "phase": phase,
+        "elapsedMs": _elapsed_ms(total_started),
+        "timings": dict(timings),
+    }
+    if message:
+        event["message"] = message
+    try:
+        sys.stdout.write(json.dumps(event, default=str) + "\n")
+        sys.stdout.flush()
+    except Exception:
+        # Diagnostics must never break a training request.
+        pass
+
+
 def _partition(payload: dict[str, Any], key: str, sequence: bool = False):
     data = payload.get(key)
     if not isinstance(data, dict):
@@ -145,26 +168,32 @@ def train_partitioned(kind: str, payload: dict[str, Any]) -> dict[str, Any]:
     }
 
     total_started = time.perf_counter()
+    _emit_progress(payload, "starting", total_started, timings, "Native training request accepted.")
     if family == "sequential":
         train_partition_started = time.perf_counter()
         Xt, yt = _partition(payload, "trainSequenceDataset", True)
         timings["trainPartitionMs"] = _elapsed_ms(train_partition_started)
+        _emit_progress(payload, "train_partition_validated", total_started, timings, f"Training partition validated: {len(Xt)} sequences.")
 
         validation_partition_started = time.perf_counter()
         Xv, yv = _partition(payload, "validationSequenceDataset", True)
         timings["validationPartitionMs"] = _elapsed_ms(validation_partition_started)
+        _emit_progress(payload, "validation_partition_validated", total_started, timings, f"Validation partition validated: {len(Xv)} sequences.")
     else:
         train_partition_started = time.perf_counter()
         Xt, yt = _partition(payload, "trainTabularDataset")
         timings["trainPartitionMs"] = _elapsed_ms(train_partition_started)
+        _emit_progress(payload, "train_partition_validated", total_started, timings, f"Training partition validated: {len(Xt)} rows.")
 
         validation_partition_started = time.perf_counter()
         Xv, yv = _partition(payload, "validationTabularDataset")
         timings["validationPartitionMs"] = _elapsed_ms(validation_partition_started)
+        _emit_progress(payload, "validation_partition_validated", total_started, timings, f"Validation partition validated: {len(Xv)} rows.")
 
     _require_two_classes(yt, "TRAINING")
     _require_two_classes(yv, "VALIDATION")
     metrics: dict[str, Any] = {}
+    _emit_progress(payload, "model_fit_start", total_started, timings, f"Starting native {kind} model fit.")
 
     if family == "sequential":
         if train_deep is None or predict_deep is None:
@@ -180,6 +209,7 @@ def train_partitioned(kind: str, payload: dict[str, Any]) -> dict[str, Any]:
             lr=float(hyper.get("learningRate", 0.001)),
         )
         timings["fitMs"] = _elapsed_ms(fit_started)
+        _emit_progress(payload, "model_fit_complete", total_started, timings, f"Native {kind} fit completed in {timings['fitMs']:.1f} ms.")
 
         predict_started = time.perf_counter()
         probabilities = predict_deep(kind, {k: v.cpu() for k, v in model.state_dict().items()}, Xv)
@@ -190,6 +220,7 @@ def train_partitioned(kind: str, payload: dict[str, Any]) -> dict[str, Any]:
             "accuracy": round(float(accuracy_score(yv, predictions)) * 100, 3),
             "logLoss": round(float(log_loss(yv, probabilities, labels=[0, 1])), 6),
         }
+        _emit_progress(payload, "prediction_complete", total_started, timings, f"Validation prediction completed in {timings['predictionMs']:.1f} ms.")
         record = {
             "modelType": kind,
             "state_dict": {k: v.cpu() for k, v in model.state_dict().items()},
@@ -268,6 +299,7 @@ def train_partitioned(kind: str, payload: dict[str, Any]) -> dict[str, Any]:
         else:
             raise ValueError(f"UNSUPPORTED_TABULAR_MODEL:{kind}")
 
+        _emit_progress(payload, "model_fit_complete", total_started, timings, f"Native {kind} fit completed in {timings['fitMs']:.1f} ms.")
         if kind in {"xgboost", "lightgbm", "catboost"}:
             prediction_started = time.perf_counter()
             probabilities = model.predict_proba(Xv)
@@ -277,6 +309,7 @@ def train_partitioned(kind: str, payload: dict[str, Any]) -> dict[str, Any]:
                 "accuracy": round(float(accuracy_score(yv, predictions)) * 100, 3),
                 "logLoss": round(float(log_loss(yv, probabilities, labels=[0, 1])), 6),
             }
+            _emit_progress(payload, "prediction_complete", total_started, timings, f"Validation prediction completed in {timings['predictionMs']:.1f} ms.")
         else:
             metrics = {}
 
@@ -288,10 +321,12 @@ def train_partitioned(kind: str, payload: dict[str, Any]) -> dict[str, Any]:
             "trainedAt": time.time(),
         }
 
+    _emit_progress(payload, "artifact_save_start", total_started, timings, "Persisting candidate model artifact.")
     artifact_started = time.perf_counter()
     artifact = save_duration(kind, symbol, duration_value, duration_unit, record, str(training_run_id) if training_run_id else None)
     timings["artifactSaveMs"] = _elapsed_ms(artifact_started)
     timings["totalMs"] = _elapsed_ms(total_started)
+    _emit_progress(payload, "artifact_save_complete", total_started, timings, f"Artifact persisted in {timings['artifactSaveMs']:.1f} ms.")
 
     metrics = dict(metrics)
     metrics["timings"] = dict(timings)

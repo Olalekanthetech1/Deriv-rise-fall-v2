@@ -2,6 +2,7 @@ import { NextRequest, NextResponse } from 'next/server';
 import { verifySessionToken } from '../auth/route';
 import { getMlModelKeys, type MlModelKey } from '@/lib/ml-model-registry';
 import { clearTrainingRunHistory, listTrainingRuns, trainDatasetModels } from '@/lib/ml-training-orchestrator';
+import { xgboostDaemon } from '@/lib/xgboost-daemon';
 
 function isAdmin(req: NextRequest): boolean {
   const cookieToken = req.cookies.get('admin_session_token')?.value;
@@ -10,12 +11,38 @@ function isAdmin(req: NextRequest): boolean {
 }
 function noStore() { return { 'Cache-Control': 'no-store, max-age=0' }; }
 
+function withLiveDiagnostics(runs: any[]) {
+  return runs.map((run) => ({
+    ...run,
+    models: Array.isArray(run?.models) ? run.models.map((model: any) => {
+      const live = xgboostDaemon.getLiveTrainingDiagnostic(String(run.run_id), String(model.model_type));
+      if (!live) return model;
+      const metrics = model.metrics && typeof model.metrics === 'object' ? model.metrics : {};
+      const timings = live.timings && typeof live.timings === 'object' ? live.timings : {};
+      return {
+        ...model,
+        metrics: {
+          ...metrics,
+          timings: { ...(metrics.timings && typeof metrics.timings === 'object' ? metrics.timings : {}), ...timings },
+          liveDiagnostics: {
+            phase: live.phase,
+            elapsedMs: live.elapsedMs,
+            message: live.message,
+            updatedAt: live.updatedAt,
+            source: 'native-python-runtime-live',
+          },
+        },
+      };
+    }) : run?.models,
+  }));
+}
+
 export async function GET(req: NextRequest) {
   if (!isAdmin(req)) return NextResponse.json({ success: false, error: 'Unauthorized admin access.' }, { status: 401, headers: noStore() });
   try {
     const symbol = req.nextUrl.searchParams.get('symbol')?.trim().toUpperCase() || undefined;
     const runs = await listTrainingRuns(symbol);
-    return NextResponse.json({ success: true, runs, modelTypes: getMlModelKeys(), dataSource: 'live-database' }, { headers: noStore() });
+    return NextResponse.json({ success: true, runs: withLiveDiagnostics(runs), modelTypes: getMlModelKeys(), dataSource: 'live-database-plus-native-runtime' }, { headers: noStore() });
   } catch (error) {
     return NextResponse.json({ success: false, error: error instanceof Error ? error.message : 'Unable to load training runs.' }, { status: 503, headers: noStore() });
   }
