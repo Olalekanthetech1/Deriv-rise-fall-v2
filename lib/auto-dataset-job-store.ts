@@ -10,11 +10,13 @@ export type AutoDatasetJob = {
   requestedCount: number;
   completedCount: number;
   failedCount: number;
+  cancelledCount: number;
   failures: Array<{ value: number; unit: DerivDurationUnit; error: string }>;
   startedAt: string;
   finishedAt?: string;
 };
 export type AutoDatasetJobItem = { id: number; itemIndex: number; value: number; unit: DerivDurationUnit; rangeId: string; attempts: number };
+export type AutoDatasetJobItemStatus = 'pending' | 'running' | 'completed' | 'failed' | 'cancelled';
 
 let schemaReady: Promise<void> | null = null;
 async function ensureSchema(): Promise<void> {
@@ -30,7 +32,7 @@ async function ensureSchema(): Promise<void> {
   try { await schemaReady; } catch (error) { schemaReady = null; throw error; }
 }
 function mapJob(row: any): AutoDatasetJob {
-  return { id: String(row.id), symbol: String(row.symbol), status: row.status as AutoDatasetJobStatus, requestedCount: Number(row.requested_count), completedCount: Number(row.completed_count), failedCount: Number(row.failed_count), failures: Array.isArray(row.failures) ? row.failures : [], startedAt: new Date(row.started_at).toISOString(), ...(row.finished_at ? { finishedAt: new Date(row.finished_at).toISOString() } : {}) };
+  return { id: String(row.id), symbol: String(row.symbol), status: row.status as AutoDatasetJobStatus, requestedCount: Number(row.requested_count), completedCount: Number(row.completed_count), failedCount: Number(row.failed_count), cancelledCount: Number(row.cancelled_count ?? 0), failures: Array.isArray(row.failures) ? row.failures : [], startedAt: new Date(row.started_at).toISOString(), ...(row.finished_at ? { finishedAt: new Date(row.finished_at).toISOString() } : {}) };
 }
 export async function getAutoDatasetJob(jobId: string): Promise<AutoDatasetJob | null> {
   await ensureSchema(); const sql = getDbOrThrow(); const rows = await sql`SELECT * FROM ops_ml_dataset_build_jobs WHERE id = ${jobId} LIMIT 1`; return rows.length ? mapJob(rows[0]) : null;
@@ -83,26 +85,62 @@ export async function claimNextAutoDatasetJobItem(jobId: string, staleAfterMinut
   if (!rows.length) return null;
   return { id: Number(rows[0].id), itemIndex: Number(rows[0].item_index), value: Number(rows[0].duration_value), unit: rows[0].duration_unit as DerivDurationUnit, rangeId: String(rows[0].duration_range_id), attempts: Number(rows[0].attempts) };
 }
+
+/** Cancel pending/running AUTO work for a dataset identity before deleting it. */
+export async function cancelAutoDatasetItemsForDataset(symbol: string, durationValue: number, durationUnit: DerivDurationUnit): Promise<number> {
+  await ensureSchema(); const sql = getDbOrThrow();
+  const rows = await sql`
+    UPDATE ops_ml_dataset_build_job_items AS item
+    SET status = 'cancelled', completed_at = COALESCE(item.completed_at, NOW()), error_message = 'Cancelled because the corresponding training dataset was deleted.'
+    FROM ops_ml_dataset_build_jobs AS job
+    WHERE item.job_id = job.id
+      AND job.symbol = ${symbol}
+      AND job.status = 'running'
+      AND item.duration_value = ${durationValue}
+      AND item.duration_unit = ${durationUnit}
+      AND item.status IN ('pending', 'running')
+    RETURNING item.id, item.job_id
+  `;
+  const jobIds = Array.from(new Set(rows.map((row: any) => String(row.job_id))));
+  for (const jobId of jobIds) await refreshAutoDatasetJobStatus(jobId);
+  return rows.length;
+}
+
+export async function getAutoDatasetJobItemStatus(jobId: string, itemId: number): Promise<AutoDatasetJobItemStatus | null> {
+  await ensureSchema(); const sql = getDbOrThrow();
+  const rows = await sql`SELECT status FROM ops_ml_dataset_build_job_items WHERE id = ${itemId} AND job_id = ${jobId} LIMIT 1`;
+  return rows.length ? rows[0].status as AutoDatasetJobItemStatus : null;
+}
+
+/** Remove a just-built dataset when its AUTO job item was cancelled during construction. */
+export async function discardAutoDatasetBuild(datasetId: string): Promise<void> {
+  await ensureSchema(); const sql = getDbOrThrow();
+  await sql`DELETE FROM training_datasets WHERE id = ${datasetId}::uuid`;
+}
+
 export async function completeAutoDatasetJobItem(jobId: string, itemId: number): Promise<void> {
-  await ensureSchema(); const sql = getDbOrThrow(); await sql`UPDATE ops_ml_dataset_build_job_items SET status = 'completed', completed_at = NOW(), error_message = NULL WHERE id = ${itemId} AND job_id = ${jobId}`; await refreshAutoDatasetJobStatus(jobId);
+  await ensureSchema(); const sql = getDbOrThrow(); await sql`UPDATE ops_ml_dataset_build_job_items SET status = 'completed', completed_at = NOW(), error_message = NULL WHERE id = ${itemId} AND job_id = ${jobId} AND status = 'running'`; await refreshAutoDatasetJobStatus(jobId);
 }
 export async function failAutoDatasetJobItem(jobId: string, itemId: number, error: string): Promise<void> {
-  await ensureSchema(); const sql = getDbOrThrow(); await sql`UPDATE ops_ml_dataset_build_job_items SET status = 'failed', completed_at = NOW(), error_message = ${error.slice(0, 2000)} WHERE id = ${itemId} AND job_id = ${jobId}`; await refreshAutoDatasetJobStatus(jobId);
+  await ensureSchema(); const sql = getDbOrThrow(); await sql`UPDATE ops_ml_dataset_build_job_items SET status = 'failed', completed_at = NOW(), error_message = ${error.slice(0, 2000)} WHERE id = ${itemId} AND job_id = ${jobId} AND status = 'running'`; await refreshAutoDatasetJobStatus(jobId);
 }
 export async function refreshAutoDatasetJobStatus(jobId: string): Promise<AutoDatasetJob | null> {
   await ensureSchema(); const sql = getDbOrThrow();
   const rows = await sql`
     WITH counts AS (
-      SELECT COUNT(*) FILTER (WHERE status = 'completed')::integer AS completed_count, COUNT(*) FILTER (WHERE status = 'failed')::integer AS failed_count, COUNT(*)::integer AS total_count
+      SELECT COUNT(*) FILTER (WHERE status = 'completed')::integer AS completed_count,
+             COUNT(*) FILTER (WHERE status = 'failed')::integer AS failed_count,
+             COUNT(*) FILTER (WHERE status = 'cancelled')::integer AS cancelled_count,
+             COUNT(*)::integer AS total_count
       FROM ops_ml_dataset_build_job_items WHERE job_id = ${jobId}
     ), updated AS (
       UPDATE ops_ml_dataset_build_jobs AS job
       SET completed_count = counts.completed_count, failed_count = counts.failed_count,
           failures = COALESCE((SELECT jsonb_agg(jsonb_build_object('value', item.duration_value, 'unit', item.duration_unit, 'error', COALESCE(item.error_message, 'Dataset build failed.')) ORDER BY item.item_index) FROM ops_ml_dataset_build_job_items AS item WHERE item.job_id = job.id AND item.status = 'failed'), '[]'::jsonb),
-          status = CASE WHEN counts.total_count > 0 AND counts.completed_count + counts.failed_count >= counts.total_count THEN CASE WHEN counts.completed_count = 0 THEN 'failed' ELSE 'completed' END ELSE 'running' END,
-          finished_at = CASE WHEN counts.total_count > 0 AND counts.completed_count + counts.failed_count >= counts.total_count THEN COALESCE(job.finished_at, NOW()) ELSE NULL END,
+          status = CASE WHEN counts.total_count > 0 AND counts.completed_count + counts.failed_count + counts.cancelled_count >= counts.total_count THEN CASE WHEN counts.completed_count + counts.failed_count = 0 THEN 'failed' ELSE 'completed' END ELSE 'running' END,
+          finished_at = CASE WHEN counts.total_count > 0 AND counts.completed_count + counts.failed_count + counts.cancelled_count >= counts.total_count THEN COALESCE(job.finished_at, NOW()) ELSE NULL END,
           updated_at = NOW()
-      FROM counts WHERE job.id = ${jobId} RETURNING job.*
+      FROM counts WHERE job.id = ${jobId} RETURNING job.*, counts.cancelled_count
     ) SELECT * FROM updated
   `;
   return rows.length ? mapJob(rows[0]) : null;
