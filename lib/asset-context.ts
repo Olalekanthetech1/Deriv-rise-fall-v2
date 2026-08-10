@@ -1,4 +1,4 @@
-import { durationToSeconds, type SignalDirection } from './signal-manager';
+import { durationToSeconds } from './signal-manager';
 
 export type AssetDurationUnit = 't' | 'm' | 'h';
 export type AssetClass = 'synthetic' | 'forex' | 'commodity' | 'index' | 'crypto' | 'equity' | 'unknown';
@@ -179,14 +179,14 @@ export function evaluateSignalStrategyGate(
   const reasons = [...context.rationale];
   const numericConfidence = Number(ensembleConfidence);
   const validConfidence = Number.isFinite(numericConfidence) ? numericConfidence : 0;
-  const hasModels = Number.isFinite(availableModels) && Number(availableModels) > 0;
+  const hasModels = Number.isFinite(availableModels) && availableModels > 0;
   const anomalyHigh = String(anomalyRisk || '').toUpperCase() === 'HIGH';
   const accepted = context.accepted && hasModels && !anomalyHigh && validConfidence >= context.confidenceGateThreshold;
 
   reasons.push(`Ensemble confidence: ${validConfidence.toFixed(2)}%.`);
   reasons.push(`Available models: ${Math.max(0, Math.floor(Number.isFinite(availableModels) ? Number(availableModels) : 0))}.`);
   reasons.push(anomalyHigh ? 'Anomaly risk is HIGH.' : `Anomaly risk: ${String(anomalyRisk || 'UNKNOWN').toUpperCase()}.`);
-  reasons.push(accepted ? 'Strategy gate accepted.' : 'Strategy gate blocked.' );
+  reasons.push(accepted ? 'Strategy gate accepted.' : 'Strategy gate blocked.');
 
   return {
     accepted,
