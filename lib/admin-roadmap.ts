@@ -15,7 +15,7 @@ export const adminRoadmap: RoadmapSection[] = [
   { id: 'market-data-ingestion', title: 'Market Data Ingestion', description: 'Historical ticks, live streams and validation before they enter the training pipeline.', status: 'complete' },
   { id: 'dataset-builder', title: 'Training Dataset Builder', description: 'Real-tick feature windows, future-direction labels, chronological splits and leakage validation.', status: 'complete' },
   { id: 'training-pipeline', title: 'Model Training Pipeline', description: 'Eight-model native training from persisted duration-aware datasets with per-model validation and audit lineage.', status: 'next' },
-  { id: 'asset-strategy', title: 'Asset-Aware Model Strategy', description: 'Global, asset-class and asset-specialist model selection.', status: 'planned' },
+  { id: 'asset-strategy', title: 'Asset-Aware Model Strategy', description: 'Runtime asset-class and market-type strategy selection with duration-aware model adaptation and persisted lineage.', status: 'next' },
   { id: 'champion-challenger', title: 'Champion/Challenger Evaluation', description: 'Out-of-sample model comparison and promotion gates.', status: 'planned' },
   { id: 'prediction-integration', title: 'Prediction & Trading Integration', description: 'Trained-model inference, execution lineage and trade persistence.', status: 'planned' },
   { id: 'final-verification', title: 'Production Verification', description: 'Build verification, deployment checks and final integrity audit.', status: 'planned' },
