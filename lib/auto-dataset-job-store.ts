@@ -25,7 +25,7 @@ async function ensureSchema(): Promise<void> {
     await sql`CREATE INDEX IF NOT EXISTS idx_ops_ml_dataset_jobs_symbol_started ON ops_ml_dataset_build_jobs (symbol, started_at DESC)`;
     await sql`CREATE UNIQUE INDEX IF NOT EXISTS uq_ops_ml_dataset_jobs_running_symbol ON ops_ml_dataset_build_jobs (symbol) WHERE status = 'running'`;
     await sql`CREATE TABLE IF NOT EXISTS ops_ml_dataset_build_job_items (id BIGSERIAL PRIMARY KEY, job_id UUID NOT NULL REFERENCES ops_ml_dataset_build_jobs(id) ON DELETE CASCADE, item_index INTEGER NOT NULL, duration_value INTEGER NOT NULL, duration_unit VARCHAR(1) NOT NULL, duration_range_id VARCHAR(160) NOT NULL, status VARCHAR(24) NOT NULL DEFAULT 'pending', attempts INTEGER NOT NULL DEFAULT 0, error_message TEXT, claimed_at TIMESTAMPTZ, completed_at TIMESTAMPTZ, UNIQUE (job_id, item_index))`;
-    await sql`CREATE INDEX IF NOT EXISTS idx_ops_ml_dataset_job_items_claim ON ops_ml_dataset_build_job_items (job_id, status, claimed_at, item_index)`;
+    await sql`CREATE INDEX IF NOT EXISTS idx_ops_ml_dataset_job_items_claim ON ops_ml_dataset_job_items (job_id, status, claimed_at, item_index)`;
   })();
   try { await schemaReady; } catch (error) { schemaReady = null; throw error; }
 }
@@ -35,13 +35,24 @@ function mapJob(row: any): AutoDatasetJob {
 export async function getAutoDatasetJob(jobId: string): Promise<AutoDatasetJob | null> {
   await ensureSchema(); const sql = getDbOrThrow(); const rows = await sql`SELECT * FROM ops_ml_dataset_build_jobs WHERE id = ${jobId} LIMIT 1`; return rows.length ? mapJob(rows[0]) : null;
 }
+
+async function runningJobMatches(sql: any, jobId: string, durations: Array<{ value: number; unit: DerivDurationUnit; rangeId: string }>): Promise<boolean> {
+  const rows = await sql`SELECT item_index, duration_value, duration_unit, duration_range_id FROM ops_ml_dataset_build_job_items WHERE job_id = ${jobId} ORDER BY item_index`;
+  if (rows.length !== durations.length) return false;
+  return rows.every((row: any, index: number) => Number(row.item_index) === index && Number(row.duration_value) === durations[index].value && String(row.duration_unit) === durations[index].unit && String(row.duration_range_id) === durations[index].rangeId);
+}
+
 export async function createAutoDatasetJob(symbol: string, durations: Array<{ value: number; unit: DerivDurationUnit; rangeId: string }>): Promise<AutoDatasetJob> {
   await ensureSchema(); const sql = getDbOrThrow();
   const running = await sql`SELECT * FROM ops_ml_dataset_build_jobs WHERE symbol = ${symbol} AND status = 'running' ORDER BY started_at DESC LIMIT 1`;
-  if (running.length) return mapJob(running[0]);
+  if (running.length) {
+    const existing = running[0];
+    if (await runningJobMatches(sql, String(existing.id), durations)) return mapJob(existing);
+    await sql`UPDATE ops_ml_dataset_build_jobs SET status = 'failed', failures = ${JSON.stringify([{ value: 0, unit: 't', error: 'Superseded by a new AUTO horizon scope.' }])}::jsonb, finished_at = NOW(), updated_at = NOW() WHERE id = ${existing.id} AND status = 'running'`;
+  }
   const id = randomUUID();
   try { await sql`INSERT INTO ops_ml_dataset_build_jobs (id, symbol, status, requested_count) VALUES (${id}, ${symbol}, 'running', ${durations.length})`; }
-  catch (error) { const retry = await sql`SELECT * FROM ops_ml_dataset_build_jobs WHERE symbol = ${symbol} AND status = 'running' ORDER BY started_at DESC LIMIT 1`; if (retry.length) return mapJob(retry[0]); throw error; }
+  catch (error) { const retry = await sql`SELECT * FROM ops_ml_dataset_build_jobs WHERE symbol = ${symbol} AND status = 'running' ORDER BY started_at DESC LIMIT 1`; if (retry.length && await runningJobMatches(sql, String(retry[0].id), durations)) return mapJob(retry[0]); throw error; }
   try {
     if (durations.length) {
       const jobIds = durations.map(() => id), indices = durations.map((_, index) => index), values = durations.map((item) => item.value), units = durations.map((item) => item.unit), rangeIds = durations.map((item) => item.rangeId);
