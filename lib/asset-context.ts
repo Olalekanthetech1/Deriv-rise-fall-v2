@@ -1,6 +1,4 @@
-import { durationToSeconds } from './signal-manager';
-
-export type AssetDurationUnit = 't' | 'm' | 'h';
+export type AssetDurationUnit = 't' | 's' | 'm' | 'h' | 'd';
 export type AssetClass = 'synthetic' | 'forex' | 'commodity' | 'index' | 'crypto' | 'equity' | 'unknown';
 export type MarketType = 'synthetic' | 'spot' | 'cfd' | 'options' | 'unknown';
 
@@ -22,7 +20,7 @@ export interface AssetDurationDescriptor {
   unit: AssetDurationUnit;
   seconds: number;
   label: string;
-  band: 'tick' | 'seconds' | 'minutes' | 'hours';
+  band: 'tick' | 'seconds' | 'minutes' | 'hours' | 'days';
 }
 
 export interface AssetAwareSignalContext {
@@ -60,7 +58,7 @@ function normalizeText(value: unknown): string {
 function inferAssetCategory(symbol: string, assetCategory?: number | null): number {
   if (Number.isFinite(assetCategory)) return Math.max(0, Math.min(3, Number(assetCategory)));
   const text = symbol.toUpperCase();
-  if (/^(FRX|FX)/.test(text) || /(USD|EUR|GBP|JPY|CHF|AUD|CAD|NZD|XAU|XAG)/.test(text)) return 1;
+  if (/^(FRX|FX)/.test(text) || /(USD|EUR|GBP|JPY|CHF|AUD|CAD|NZD)/.test(text)) return 1;
   if (/^(R_|1HZ|2HZ|3HZ|4HZ|5HZ|6HZ|7HZ|8HZ|9HZ|10HZ)/.test(text)) return 0;
   if (/(XAU|XAG|OIL|WTI|BRENT|COM|GOLD|SILVER|NATGAS)/.test(text)) return 2;
   if (/(BTC|ETH|SOL|XRP|ADA|DOGE|LTC|BNB)/.test(text)) return 3;
@@ -83,9 +81,7 @@ function inferAssetClass(symbol: string, category: number, assetClass?: string |
 
 function inferMarketType(symbol: string, marketType?: string | null): MarketType {
   const normalized = normalizeText(marketType);
-  if (normalized === 'synthetic' || normalized === 'spot' || normalized === 'cfd' || normalized === 'options') {
-    return normalized;
-  }
+  if (normalized === 'synthetic' || normalized === 'spot' || normalized === 'cfd' || normalized === 'options') return normalized;
   const text = symbol.toUpperCase();
   if (/^(R_|1HZ|2HZ|3HZ|4HZ|5HZ|6HZ|7HZ|8HZ|9HZ|10HZ)/.test(text)) return 'synthetic';
   if (/(FRX|FX|BTC|ETH|SOL|XRP|ADA|DOGE|LTC|BNB)/.test(text)) return 'spot';
@@ -93,36 +89,61 @@ function inferMarketType(symbol: string, marketType?: string | null): MarketType
   return 'unknown';
 }
 
+function durationToSeconds(value: number, unit: AssetDurationUnit): number {
+  if (unit === 's') return Math.max(1, Math.round(value));
+  if (unit === 'm') return Math.max(1, Math.round(value * 60));
+  if (unit === 'h') return Math.max(1, Math.round(value * 3600));
+  if (unit === 'd') return Math.max(1, Math.round(value * 86400));
+  return Math.max(1, Math.round(value));
+}
+
+function durationLabel(value: number, unit: AssetDurationUnit): string {
+  const name = unit === 't' ? 'Tick' : unit === 's' ? 'Sec' : unit === 'm' ? 'Min' : unit === 'h' ? 'Hr' : 'Day';
+  return `${value} ${name}${value === 1 ? '' : 's'}`;
+}
+
+function durationBand(unit: AssetDurationUnit): AssetDurationDescriptor['band'] {
+  if (unit === 's') return 'seconds';
+  if (unit === 'm') return 'minutes';
+  if (unit === 'h') return 'hours';
+  if (unit === 'd') return 'days';
+  return 'tick';
+}
+
 function resolveDurationDescriptor(input: AssetAwareContextInput): AssetDurationDescriptor {
   const valueCandidate = Number(input.durationValue);
   const secondsCandidate = Number(input.durationSeconds);
   const unitCandidate = input.durationUnit;
 
-  const hasExplicitDuration = Number.isFinite(valueCandidate) && valueCandidate > 0 && (unitCandidate === 't' || unitCandidate === 'm' || unitCandidate === 'h');
-  if (hasExplicitDuration) {
-    const seconds = durationToSeconds(valueCandidate, unitCandidate!);
-    const band = unitCandidate === 'm' ? 'minutes' : unitCandidate === 'h' ? 'hours' : 'tick';
-    const label = `${valueCandidate} ${unitCandidate === 't' ? 'Tick' : unitCandidate === 'm' ? 'Min' : 'Hr'}${valueCandidate === 1 ? '' : 's'}`;
-    return { value: valueCandidate, unit: unitCandidate!, seconds, label, band };
+  if (Number.isFinite(valueCandidate) && valueCandidate > 0 && unitCandidate && ['t', 's', 'm', 'h', 'd'].includes(unitCandidate)) {
+    const value = Math.round(valueCandidate);
+    return { value, unit: unitCandidate, seconds: durationToSeconds(value, unitCandidate), label: durationLabel(value, unitCandidate), band: durationBand(unitCandidate) };
   }
 
-  const inferredSeconds = Number.isFinite(secondsCandidate) && secondsCandidate > 0 ? secondsCandidate : 1;
+  const inferredSeconds = Number.isFinite(secondsCandidate) && secondsCandidate > 0 ? Math.round(secondsCandidate) : 1;
+  if (inferredSeconds >= 86400 && inferredSeconds % 86400 === 0) {
+    const days = Math.max(1, Math.round(inferredSeconds / 86400));
+    return { value: days, unit: 'd', seconds: inferredSeconds, label: durationLabel(days, 'd'), band: 'days' };
+  }
   if (inferredSeconds >= 3600 && inferredSeconds % 3600 === 0) {
     const hours = Math.max(1, Math.round(inferredSeconds / 3600));
-    return { value: hours, unit: 'h', seconds: inferredSeconds, label: `${hours} Hr${hours === 1 ? '' : 's'}`, band: 'hours' };
+    return { value: hours, unit: 'h', seconds: inferredSeconds, label: durationLabel(hours, 'h'), band: 'hours' };
   }
   if (inferredSeconds >= 60 && inferredSeconds % 60 === 0) {
     const minutes = Math.max(1, Math.round(inferredSeconds / 60));
-    return { value: minutes, unit: 'm', seconds: inferredSeconds, label: `${minutes} Min${minutes === 1 ? '' : 's'}`, band: 'minutes' };
+    return { value: minutes, unit: 'm', seconds: inferredSeconds, label: durationLabel(minutes, 'm'), band: 'minutes' };
+  }
+  if (inferredSeconds >= 15) {
+    return { value: inferredSeconds, unit: 's', seconds: inferredSeconds, label: durationLabel(inferredSeconds, 's'), band: 'seconds' };
   }
   const ticks = Math.max(1, Math.round(Number.isFinite(valueCandidate) && valueCandidate > 0 ? valueCandidate : inferredSeconds));
-  return { value: ticks, unit: 't', seconds: Math.max(1, Math.round(inferredSeconds)), label: `${ticks} Tick${ticks === 1 ? '' : 's'}`, band: 'tick' };
+  return { value: ticks, unit: 't', seconds: durationToSeconds(ticks, 't'), label: durationLabel(ticks, 't'), band: 'tick' };
 }
 
 function deriveStrategyMode(assetClass: AssetClass, marketType: MarketType, durationBand: AssetDurationDescriptor['band']): 'CLASSIC' | 'PRO' | 'AI' {
   const text = `${assetClass} ${marketType}`;
   if (assetClass === 'synthetic' || durationBand === 'tick') return 'CLASSIC';
-  if (assetClass === 'commodity' || assetClass === 'equity' || durationBand === 'hours') return 'AI';
+  if (assetClass === 'commodity' || assetClass === 'equity' || durationBand === 'hours' || durationBand === 'days') return 'AI';
   if (/forex|crypto|spot/.test(text)) return 'PRO';
   return 'PRO';
 }
@@ -144,6 +165,7 @@ export function resolveAssetAwareSignalContext(input: AssetAwareContextInput): A
   if (assetClass === 'crypto') confidenceGateThreshold += 1;
   if (duration.band === 'minutes') confidenceGateThreshold += 1;
   if (duration.band === 'hours') confidenceGateThreshold += 2;
+  if (duration.band === 'days') confidenceGateThreshold += 3;
   if (qualityScore < 0.75) confidenceGateThreshold += 1;
   if (qualityScore < 0.6) confidenceGateThreshold += 2;
   confidenceGateThreshold = clamp(confidenceGateThreshold, 68, 92);
@@ -175,6 +197,7 @@ export function evaluateSignalStrategyGate(
   ensembleConfidence: number,
   availableModels: number,
   anomalyRisk: string | null | undefined,
+  direction: 'RISE' | 'FALL',
 ): SignalStrategyGate {
   const reasons = [...context.rationale];
   const numericConfidence = Number(ensembleConfidence);
@@ -192,7 +215,7 @@ export function evaluateSignalStrategyGate(
     accepted,
     confidenceGateThreshold: context.confidenceGateThreshold,
     riskTier: !hasModels || anomalyHigh ? 'HIGH' : validConfidence < context.confidenceGateThreshold ? 'ELEVATED' : context.qualityScore < 0.75 ? 'MODERATE' : 'LOW',
-    action: accepted ? 'EXECUTE_CALL' : 'HOLD_NO_SIGNAL',
+    action: accepted ? (direction === 'RISE' ? 'EXECUTE_CALL' : 'EXECUTE_PUT') : 'HOLD_NO_SIGNAL',
     reasons,
   };
 }
