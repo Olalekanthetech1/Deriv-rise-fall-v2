@@ -117,9 +117,6 @@ export function useRealtimeSignals(
         const data = (await res.json().catch(() => ({}))) as SignalApiResponse;
 
         if (data?.error === MODEL_UNAVAILABLE_ERROR) {
-          // Training/validation has not produced a production-eligible model yet.
-          // Stop per-tick prediction polling and retry periodically instead of
-          // flooding the API with an error that cannot succeed until model state changes.
           modelRetryAfterRef.current = Date.now() + MODEL_RETRY_COOLDOWN_MS;
           if (isSubscribed) {
             setSignals([]);
@@ -163,7 +160,6 @@ export function useRealtimeSignals(
     void fetchSignals();
     return () => {
       isSubscribed = false;
-      predictionInFlightRef.current = false;
     };
   }, [activeSymbol, currentTick, prices, durationValue, durationUnit, playAlertSound]);
 
