@@ -9,6 +9,14 @@ interface PendingRequest {
 
 type DaemonAction = 'predict' | 'predict_ensemble' | 'train' | 'train_partitioned' | 'list_models' | 'ping' | 'backtest';
 const CANONICAL_RUNTIME_ENTRYPOINT = 'ml_runtime_entry.py';
+const DEFAULT_TRAINING_TIMEOUT_MS = 15 * 60 * 1000;
+
+function trainingTimeoutMs(): number {
+  const raw = process.env.ML_TRAINING_TIMEOUT_MS?.trim();
+  const value = raw ? Number(raw) : DEFAULT_TRAINING_TIMEOUT_MS;
+  if (!Number.isFinite(value)) return DEFAULT_TRAINING_TIMEOUT_MS;
+  return Math.min(2 * 60 * 60 * 1000, Math.max(60_000, Math.trunc(value)));
+}
 
 function attachClientRoundTripTiming(data: any, roundTripMs: number): any {
   if (!data || typeof data !== 'object') return data;
@@ -82,6 +90,7 @@ class XGBoostDaemonManager {
       const onExit = () => {
         this.child = null;
         this.isReady = false;
+        this.buffer = '';
         for (const req of this.pending.values()) {
           clearTimeout(req.timer);
           req.reject(new Error('Python ML daemon exited unexpectedly'));
@@ -96,6 +105,28 @@ class XGBoostDaemonManager {
       this.isReady = false;
       this.scheduleRestart();
     }
+  }
+
+  private terminateTrainingDaemon() {
+    const child = this.child;
+    this.child = null;
+    this.isReady = false;
+    this.buffer = '';
+    if (!child) return;
+    try {
+      child.kill('SIGTERM');
+      const killTimer = setTimeout(() => {
+        try {
+          if (!child.killed) child.kill('SIGKILL');
+        } catch {
+          // Process already exited.
+        }
+      }, 2000);
+      child.once('exit', () => clearTimeout(killTimer));
+    } catch {
+      // The child may have already exited; restart scheduling remains safe.
+    }
+    this.scheduleRestart();
   }
 
   private scheduleRestart() {
@@ -138,7 +169,7 @@ class XGBoostDaemonManager {
 
     return new Promise((resolve, reject) => {
       const defaultTimeoutMs = action === 'train' || action === 'train_partitioned'
-        ? 10 * 60 * 1000
+        ? trainingTimeoutMs()
         : action === 'backtest'
           ? 60000
           : action === 'predict_ensemble'
@@ -149,8 +180,12 @@ class XGBoostDaemonManager {
         ? configuredTimeout
         : defaultTimeoutMs;
       const timer = setTimeout(() => {
-        if (this.pending.has(id)) {
-          this.pending.delete(id);
+        if (!this.pending.has(id)) return;
+        this.pending.delete(id);
+        if (action === 'train' || action === 'train_partitioned') {
+          this.terminateTrainingDaemon();
+          reject(new Error(`DAEMON_TRAINING_TIMEOUT: ${action} exceeded ${timeoutMs}ms; native worker was terminated and will restart cleanly.`));
+        } else {
           reject(new Error(`Daemon request ${action} timed out after ${timeoutMs}ms`));
         }
       }, timeoutMs);
