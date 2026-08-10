@@ -73,32 +73,47 @@ function expandTrainingHorizonLadder(ranges: DerivDurationRange[]): Array<{ valu
 
 const activeLocalWorkers = new Set<string>();
 
+/**
+ * Process exactly one durable item per invocation. This is intentional:
+ * dataset construction can allocate large tick/sample arrays, so returning
+ * after each item gives the Node runtime a GC boundary instead of retaining
+ * one AUTO job's entire workload inside a long-lived request.
+ */
 async function runAutoDatasetWorker(jobId: string): Promise<void> {
   if (activeLocalWorkers.has(jobId)) return;
   activeLocalWorkers.add(jobId);
   try {
-    while (true) {
-      const job = await getAutoDatasetJob(jobId);
-      if (!job || job.status !== 'running') return;
+    const job = await getAutoDatasetJob(jobId);
+    if (!job || job.status !== 'running') return;
 
-      const item = await claimNextAutoDatasetJobItem(jobId);
-      if (!item) {
-        await refreshAutoDatasetJobStatus(jobId);
-        return;
-      }
+    const item = await claimNextAutoDatasetJobItem(jobId);
+    if (!item) {
+      await refreshAutoDatasetJobStatus(jobId);
+      return;
+    }
 
-      try {
-        await buildDurationTrainingDataset({
-          symbol: job.symbol,
-          durationValue: item.value,
-          durationUnit: item.unit,
-          durationRangeId: item.rangeId,
-        });
-        await completeAutoDatasetJobItem(jobId, item.id);
-      } catch (error) {
-        const message = error instanceof Error ? error.message : String(error);
-        await failAutoDatasetJobItem(jobId, item.id, message);
-      }
+    const memoryBefore = process.memoryUsage().rss;
+    try {
+      await buildDurationTrainingDataset({
+        symbol: job.symbol,
+        durationValue: item.value,
+        durationUnit: item.unit,
+        durationRangeId: item.rangeId,
+      });
+      await completeAutoDatasetJobItem(jobId, item.id);
+      const memoryAfter = process.memoryUsage().rss;
+      console.info('[AUTO dataset item completed]', JSON.stringify({
+        jobId,
+        itemIndex: item.itemIndex,
+        value: item.value,
+        unit: item.unit,
+        memoryBeforeMb: Math.round(memoryBefore / 1048576),
+        memoryAfterMb: Math.round(memoryAfter / 1048576),
+      }));
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      await failAutoDatasetJobItem(jobId, item.id, message);
+      console.error('[AUTO dataset item failed]', JSON.stringify({ jobId, itemIndex: item.itemIndex, value: item.value, unit: item.unit, error: message }));
     }
   } catch (error) {
     console.error('[AUTO dataset worker error]:', error);
@@ -108,10 +123,10 @@ async function runAutoDatasetWorker(jobId: string): Promise<void> {
 }
 
 function resumeAutoDatasetJob(jobId: string): void {
-  const concurrency = envPositiveInt('DERIV_AUTO_BUILD_CONCURRENCY', 2, 8);
-  for (let index = 0; index < concurrency; index += 1) {
-    void runAutoDatasetWorker(jobId);
-  }
+  // AUTO dataset construction is deliberately serialized. Each dataset can
+  // materialize a large tick/sample working set and the current Render tier
+  // has a hard 512 MB memory ceiling. Never run multiple builders in parallel.
+  void runAutoDatasetWorker(jobId);
 }
 
 export async function GET(req: NextRequest) {
