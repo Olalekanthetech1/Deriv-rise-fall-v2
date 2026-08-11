@@ -54,7 +54,17 @@ export async function POST(req: NextRequest) {
     return NextResponse.json({ success: true, dataSource: 'persisted-real-tick-datasets-plus-dedicated-ml-worker', ...result }, { status: 202, headers: noStore() });
   } catch (error) {
     const message = error instanceof Error ? error.message : 'Unable to create training batch.';
+    const match = /^TRAINING_BATCH_ALREADY_RUNNING:([0-9a-f-]+):(queued|running)$/i.exec(message);
+    if (match) {
+      return NextResponse.json({
+        success: false,
+        error: 'An existing training batch is still active. Open or resume that batch before starting another plan.',
+        code: 'TRAINING_BATCH_ALREADY_RUNNING',
+        activeBatchId: match[1],
+        activeBatchStatus: match[2].toLowerCase(),
+      }, { status: 409, headers: noStore() });
+    }
     const status = /ALREADY_RUNNING|BATCH_ALREADY_RUNNING|ALREADY_QUEUED/i.test(message) ? 409 : /DATASET|MODEL|SELECTED|LIMIT/i.test(message) ? 422 : /DATABASE/i.test(message) ? 503 : 500;
-    return NextResponse.json({ success: false, error: message }, { status, headers: noStore() });
+    return NextResponse.json({ success: false, error: message, code: 'TRAINING_BATCH_START_FAILED' }, { status, headers: noStore() });
   }
 }
