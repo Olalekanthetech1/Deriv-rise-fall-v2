@@ -1,5 +1,7 @@
 import { NextRequest, NextResponse } from 'next/server';
 import { initDbSchema, getDb } from '@/lib/db';
+import { getMlModelKeys, type MlModelKey } from '@/lib/ml-model-registry';
+import { enqueueTrainingJob, type TrainingQueueJob } from '@/lib/ml-training-queue';
 import { verifySessionToken } from '../../admin/auth/route';
 
 function getRetrainIntervalMs(): number | null {
@@ -13,46 +15,66 @@ function isAuthValid(req: NextRequest): boolean {
   return verifySessionToken(cookieToken) || verifySessionToken(headerToken);
 }
 
+function normalizeSymbol(value: string): string {
+  return value.trim().toUpperCase();
+}
+
 async function resolveLiveSymbols(req: NextRequest, requestedSymbol: string): Promise<string[]> {
-  if (requestedSymbol !== 'ALL_ASSETS') return [requestedSymbol];
+  if (requestedSymbol !== 'ALL_ASSETS') return [normalizeSymbol(requestedSymbol)];
   const response = await fetch(new URL('/api/symbols', req.url), { cache: 'no-store' });
   const data = await response.json().catch(() => null);
-  if (!response.ok || !Array.isArray(data?.symbols)) throw new Error(data?.error || 'Live Deriv symbol discovery is unavailable.');
-  const symbols = data.symbols
-    .filter((item: any) => item?.isOpen && typeof item?.symbol === 'string' && item.symbol.trim())
-    .map((item: any) => item.symbol.trim());
+  if (!response.ok || !Array.isArray(data?.symbols)) {
+    throw new Error(data?.error || 'Live Deriv symbol discovery is unavailable.');
+  }
+  const symbols = [...new Set(
+    data.symbols
+      .filter((item: any) => item?.isOpen && typeof item?.symbol === 'string' && item.symbol.trim())
+      .map((item: any) => normalizeSymbol(item.symbol)),
+  )];
   if (!symbols.length) throw new Error('No open Deriv symbols are currently available for fleet retraining.');
   return symbols;
 }
 
+async function findLatestEligibleDataset(sql: ReturnType<typeof getDb>, symbol: string): Promise<{ id: string; horizonTicks: number } | null> {
+  if (!sql) return null;
+  const rows = await sql`
+    SELECT id::text AS id, horizon_ticks::int AS horizon_ticks
+    FROM training_datasets
+    WHERE asset_symbol = ${symbol}
+      AND status = 'completed'
+      AND leakage_check_passed = TRUE
+      AND sample_count > 0
+    ORDER BY created_at DESC
+    LIMIT 1
+  `;
+  if (!rows.length) return null;
+  return { id: String(rows[0].id), horizonTicks: Number(rows[0].horizon_ticks) };
+}
+
 export async function GET(req: NextRequest) {
   if (!isAuthValid(req)) return NextResponse.json({ error: 'Unauthorized admin access.' }, { status: 401 });
-
   try {
     const intervalMs = getRetrainIntervalMs();
     const isConnected = await initDbSchema();
     const sql = getDb();
     let lastTrainedAt: string | null = null;
     let timeSinceLastTrainMs: number | null = null;
-
     if (sql && isConnected) {
       const lastLog = await sql`SELECT created_at AS trained_at FROM ml_training_logs ORDER BY created_at DESC LIMIT 1`;
-      if (lastLog.length > 0) {
+      if (lastLog.length) {
         lastTrainedAt = new Date(lastLog[0].trained_at).toISOString();
         timeSinceLastTrainMs = Math.max(0, Date.now() - new Date(lastLog[0].trained_at).getTime());
       } else {
         const lastModel = await sql`SELECT trained_at FROM ml_models ORDER BY trained_at DESC LIMIT 1`;
-        if (lastModel.length > 0) {
+        if (lastModel.length) {
           lastTrainedAt = new Date(lastModel[0].trained_at).toISOString();
           timeSinceLastTrainMs = Math.max(0, Date.now() - new Date(lastModel[0].trained_at).getTime());
         }
       }
     }
-
     const scheduleConfigured = intervalMs !== null;
     const isDue = scheduleConfigured && timeSinceLastTrainMs !== null ? timeSinceLastTrainMs >= intervalMs : null;
     const nextDueInMs = scheduleConfigured && timeSinceLastTrainMs !== null ? Math.max(0, intervalMs - timeSinceLastTrainMs) : null;
-
     return NextResponse.json({
       status: isConnected ? (scheduleConfigured ? 'active' : 'schedule_not_configured') : 'database_unavailable',
       scheduleConfigured,
@@ -63,107 +85,88 @@ export async function GET(req: NextRequest) {
       isDue,
       nextScheduledRunInMinutes: nextDueInMs !== null ? Math.ceil(nextDueInMs / 60000) : null,
     }, { headers: { 'Cache-Control': 'no-store' } });
-  } catch (err: any) {
-    return NextResponse.json({ error: err.message || 'Cron status check failed' }, { status: 500 });
+  } catch (error) {
+    const message = error instanceof Error ? error.message : 'Cron status check failed';
+    return NextResponse.json({ error: message }, { status: 500 });
   }
 }
 
 export async function POST(req: NextRequest) {
   if (!isAuthValid(req)) return NextResponse.json({ error: 'Unauthorized admin access.' }, { status: 401 });
-
   try {
     const isConnected = await initDbSchema();
-    if (!isConnected) return NextResponse.json({ success: false, error: 'Database unavailable; retraining requires persisted real tick data.' }, { status: 503 });
-
+    if (!isConnected) return NextResponse.json({ success: false, error: 'DATABASE_UNAVAILABLE' }, { status: 503 });
     const body = await req.json().catch(() => ({}));
-    const symbol = typeof body?.symbol === 'string' ? body.symbol.trim() : '';
-    const force = body.force === true;
-    if (!symbol) return NextResponse.json({ success: false, error: 'A live symbol or ALL_ASSETS is required.' }, { status: 400 });
+    const requestedSymbol = typeof body?.symbol === 'string' ? body.symbol.trim() : '';
+    const force = body?.force === true;
+    if (!requestedSymbol) return NextResponse.json({ success: false, error: 'A live symbol or ALL_ASSETS is required.' }, { status: 400 });
 
     const intervalMs = getRetrainIntervalMs();
     const sql = getDb();
-    if (!sql) return NextResponse.json({ success: false, error: 'Database unavailable.' }, { status: 503 });
+    if (!sql) return NextResponse.json({ success: false, error: 'DATABASE_UNAVAILABLE' }, { status: 503 });
 
     let shouldRetrain = force;
     let lastTrainedAt: Date | null = null;
     if (!force) {
       if (intervalMs === null) return NextResponse.json({ success: false, error: 'ML_RETRAIN_INTERVAL_MS is not configured.' }, { status: 503 });
       const lastLog = await sql`SELECT created_at AS trained_at FROM ml_training_logs ORDER BY created_at DESC LIMIT 1`;
-      if (lastLog.length > 0) {
+      if (lastLog.length) {
         lastTrainedAt = new Date(lastLog[0].trained_at);
         shouldRetrain = Date.now() - lastTrainedAt.getTime() >= intervalMs;
       } else {
         shouldRetrain = true;
       }
     }
-
     if (!shouldRetrain) {
       return NextResponse.json({ success: true, retrained: false, reason: 'The configured retraining interval has not elapsed since the last training cycle.', lastTrainedAt: lastTrainedAt?.toISOString() || null });
     }
 
-    const { ensureMinTicks } = await import('@/lib/ticks-helper');
-    const { xgboostDaemon } = await import('@/lib/xgboost-daemon');
-    const symbols = await resolveLiveSymbols(req, symbol);
-    const cronResults: any[] = [];
+    const symbols = await resolveLiveSymbols(req, requestedSymbol);
+    const requestedModels = Array.isArray(body?.modelTypes)
+      ? body.modelTypes.filter((value: unknown): value is string => typeof value === 'string')
+      : getMlModelKeys();
+    const modelTypes = requestedModels.length ? requestedModels : getMlModelKeys();
+    const queued: TrainingQueueJob[] = [];
+    const skipped: Array<{ symbol: string; error: string; horizonTicks?: number }> = [];
 
-    for (const sym of symbols) {
-      const dbTicks = await ensureMinTicks(sym, 500);
-      if (!dbTicks || dbTicks.length < 20) {
-        cronResults.push({ symbol: sym, success: false, error: 'INSUFFICIENT_REAL_TICKS', samplesCount: dbTicks?.length || 0 });
+    for (const symbol of symbols) {
+      const dataset = await findLatestEligibleDataset(sql, symbol);
+      if (!dataset) {
+        skipped.push({ symbol, error: 'NO_ELIGIBLE_DATASET: no completed leakage-validated dataset with samples is available.' });
         continue;
       }
-
-      const assetCategory = sym.startsWith('FRX') ? 1 : sym.startsWith('CWM') ? 2 : 0;
-      const daemonRes = await xgboostDaemon.sendCommand('train', { symbol: sym, ticks: dbTicks, assetCategory });
-      if (!daemonRes?.success) {
-        cronResults.push({ symbol: sym, success: false, error: daemonRes?.error || 'NATIVE_TRAINING_FAILED' });
-        continue;
+      try {
+        const job = await enqueueTrainingJob({ datasetId: dataset.id, modelTypes: modelTypes as MlModelKey[] });
+        queued.push(job);
+      } catch (error) {
+        const message = error instanceof Error ? error.message : String(error);
+        skipped.push({ symbol, error: message, horizonTicks: dataset.horizonTicks });
       }
-
-      const validationAccuracy = Number(daemonRes.accuracy);
-      const featureCount = Number(daemonRes.featureCount);
-      if (!Number.isFinite(validationAccuracy) || !Number.isFinite(featureCount)) {
-        cronResults.push({ symbol: sym, success: false, error: 'MISSING_RUNTIME_VALIDATION_METADATA' });
-        continue;
-      }
-
-      const modelVersion = daemonRes.modelId;
-      const modelName = daemonRes.engine || daemonRes.modelType;
-      if (!modelVersion || !modelName) {
-        cronResults.push({ symbol: sym, success: false, error: 'MISSING_RUNTIME_MODEL_IDENTITY' });
-        continue;
-      }
-
-      await sql`
-        INSERT INTO ml_models (model_name, version, symbol, accuracy, feature_count, hyperparameters)
-        VALUES (${modelName}, ${modelVersion}, ${sym}, ${validationAccuracy}, ${featureCount}, ${JSON.stringify(daemonRes.hyperparameters || {})}::jsonb)
-      `;
-
-      await sql`
-        INSERT INTO ml_training_logs (symbol, samples_count, train_accuracy, val_accuracy, log_message)
-        VALUES (${sym}, ${Number(daemonRes.samplesCount) || 0}, ${null}, ${validationAccuracy}, ${`Automated retrain [${sym}]: validation accuracy=${validationAccuracy}%`})
-      `;
-
-      cronResults.push({ symbol: sym, success: true, samplesCount: Number(daemonRes.samplesCount) || 0, validationAccuracy, modelId: modelVersion, featureCount });
     }
 
-    const successful = cronResults.filter((item) => item.success);
-    const leadResult = successful[0];
-    const nextScheduledRun = intervalMs !== null ? new Date(Date.now() + intervalMs).toISOString() : null;
-
+    const success = queued.length > 0;
     return NextResponse.json({
-      success: successful.length > 0,
-      retrained: successful.length > 0,
+      success,
+      retrained: false,
+      queued: success,
+      executionBoundary: 'dedicated-ml-worker',
+      dataSource: 'persisted-real-tick-dataset',
       mode: symbols.length > 1 ? 'ALL_ASSETS_FLEET' : 'SINGLE_ASSET',
-      fleetTrainedCount: successful.length,
-      symbol: symbols.length > 1 ? 'ALL_ASSETS' : symbol,
-      samplesCount: leadResult?.samplesCount ?? null,
-      accuracy: leadResult?.validationAccuracy ?? null,
-      fleetResults: cronResults,
-      trainedAt: new Date().toISOString(),
-      nextScheduledRun,
-    });
-  } catch (err: any) {
-    return NextResponse.json({ error: err.message || 'Cron retraining failed' }, { status: 500 });
+      symbol: symbols.length > 1 ? 'ALL_ASSETS' : symbols[0],
+      modelTypes,
+      queuedCount: queued.length,
+      skippedCount: skipped.length,
+      fleetTrainedCount: 0,
+      jobs: queued,
+      skipped,
+      trainedAt: null,
+      nextScheduledRun: intervalMs !== null ? new Date(Date.now() + intervalMs).toISOString() : null,
+      message: success
+        ? `Queued ${queued.length} retraining job(s) on the canonical ML worker boundary.`
+        : 'No eligible datasets were available for retraining.',
+    }, { status: success ? 202 : 422 });
+  } catch (error) {
+    const message = error instanceof Error ? error.message : 'Cron retraining could not be queued.';
+    return NextResponse.json({ success: false, error: message }, { status: 500 });
   }
 }
