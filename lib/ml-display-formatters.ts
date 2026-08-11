@@ -19,6 +19,18 @@ export function formatReadableDuration(value: unknown, unit: DisplayDurationUnit
   return `${count} ${label}${numericValue === 1 ? '' : 's'}`;
 }
 
+function canonicalAssetName(symbol: string, displayName: unknown): string {
+  const canonical = symbol ? getSymbolDisplayName(symbol) : '';
+  const supplied = String(displayName || '').trim();
+  if (!supplied) return canonical || 'Unknown asset';
+  if (!symbol) return supplied;
+  const normalizedSymbol = symbol.toUpperCase();
+  const normalizedSupplied = supplied.toUpperCase();
+  if (normalizedSupplied === normalizedSymbol || normalizedSupplied === `${normalizedSymbol} (${normalizedSymbol})`) return canonical || supplied;
+  if (supplied.includes(`(${symbol})`) || supplied.includes(`(${normalizedSymbol})`)) return supplied;
+  return supplied;
+}
+
 export function formatReadableDatasetName(input: {
   name?: unknown;
   assetSymbol?: unknown;
@@ -28,8 +40,8 @@ export function formatReadableDatasetName(input: {
   taskLabel?: string;
 }): string {
   const symbol = String(input.assetSymbol || '').trim();
-  const assetName = String(input.assetDisplayName || '').trim() || (symbol ? getSymbolDisplayName(symbol) : 'Unknown asset');
-  const assetLabel = symbol ? `${assetName} (${symbol})` : assetName;
+  const assetName = canonicalAssetName(symbol, input.assetDisplayName);
+  const assetLabel = symbol && !assetName.toUpperCase().includes(`(${symbol.toUpperCase()})`) ? `${assetName} (${symbol})` : assetName;
   const duration = formatReadableDuration(input.durationValue, String(input.durationUnit || ''));
   const task = input.taskLabel?.trim() || 'Direction Dataset';
   return duration ? `${assetLabel} — ${duration} ${task}` : `${assetLabel} — ${task}`;
