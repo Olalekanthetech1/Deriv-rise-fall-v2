@@ -22,9 +22,9 @@ services:
     name: deriv-ai-ml-worker
     runtime: docker
     dockerfilePath: ./Dockerfile
+    dockerCommand: npm run ml:worker
     region: frankfurt
     plan: starter
-    startCommand: npm run ml:worker
     envVars:
       - key: NODE_ENV
         value: "production"
