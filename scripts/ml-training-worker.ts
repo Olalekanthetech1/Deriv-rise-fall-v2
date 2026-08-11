@@ -21,32 +21,44 @@ function sleep(ms: number) {
   return new Promise((resolve) => setTimeout(resolve, ms));
 }
 
-async function heartbeatLoop(job: TrainingQueueJob) {
-  while (!stopping) {
-    await sleep(heartbeatMs);
-    if (stopping) return;
-    try {
-      await heartbeatTrainingJob(job.jobId, workerId);
-    } catch (error) {
-      console.error('[ML Worker] heartbeat failed:', error);
+function startHeartbeat(job: TrainingQueueJob) {
+  let active = true;
+  const loop = async () => {
+    while (active && !stopping) {
+      await sleep(heartbeatMs);
+      if (!active || stopping) return;
+      try {
+        await heartbeatTrainingJob(job.jobId, workerId);
+      } catch (error) {
+        console.error('[ML Worker] heartbeat failed:', error);
+      }
     }
-  }
+  };
+  void loop();
+  return () => { active = false; };
 }
 
 async function processJob(job: TrainingQueueJob) {
   console.log(`[ML Worker] claimed ${job.jobId} dataset=${job.datasetId} attempt=${job.attempts}`);
-  const heartbeat = heartbeatLoop(job);
+  const stopHeartbeat = startHeartbeat(job);
   try {
     const modelTypes = job.modelTypes.length ? job.modelTypes as ModelType : undefined;
     const result = await trainDatasetModels({ datasetId: job.datasetId, modelTypes });
-    await finishTrainingJob(job.jobId, workerId, result.status === 'failed' ? 'failed' : 'completed', result.status === 'failed' ? 'All requested models failed.' : undefined, result.runId);
+    await finishTrainingJob(
+      job.jobId,
+      workerId,
+      result.status === 'failed' ? 'failed' : 'completed',
+      result.status === 'failed' ? 'All requested models failed.' : undefined,
+      result.runId,
+    );
     console.log(`[ML Worker] completed ${job.jobId} run=${result.runId} status=${result.status}`);
   } catch (error) {
     const message = error instanceof Error ? error.message : String(error);
     await finishTrainingJob(job.jobId, workerId, 'failed', message);
     console.error(`[ML Worker] failed ${job.jobId}: ${message}`);
+  } finally {
+    stopHeartbeat();
   }
-  void heartbeat;
 }
 
 async function main() {
