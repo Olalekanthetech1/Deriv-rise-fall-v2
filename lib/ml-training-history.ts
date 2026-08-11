@@ -2,26 +2,22 @@ import { neon } from '@neondatabase/serverless';
 import { getDbConnectionString, initDbSchema } from './db';
 import { listTrainingQueueJobs } from './ml-training-queue';
 
-/**
- * Remove terminal worker-queue records that are part of failed training history.
- * Active queued/running work is intentionally preserved.
- */
+/** Remove terminal failed worker-queue records while preserving queued/running work. */
 export async function clearTerminalTrainingQueueHistory(): Promise<number> {
   const url = getDbConnectionString();
   if (!url) throw new Error('DATABASE_UNAVAILABLE');
 
   await listTrainingQueueJobs();
-
   const sql = neon(url);
-  const running = await sql`
-    SELECT job_id,dataset_id,training_run_id,worker_id,heartbeat_at
+  const active = await sql`
+    SELECT job_id,dataset_id,training_run_id,worker_id,heartbeat_at,status
     FROM ml_training_job_queue
-    WHERE status='running'
+    WHERE status IN ('running','queued')
     ORDER BY created_at DESC
   `;
-  if (running.length) {
+  if (active.length) {
     const error = new Error('TRAINING_HISTORY_RESET_BLOCKED_BY_RUNNING_JOBS');
-    (error as Error & { runningQueueJobs?: unknown[] }).runningQueueJobs = running;
+    (error as Error & { runningQueueJobs?: unknown[] }).runningQueueJobs = active;
     throw error;
   }
 
@@ -30,7 +26,6 @@ export async function clearTerminalTrainingQueueHistory(): Promise<number> {
     WHERE status='failed'
     RETURNING job_id
   `;
-
   return deleted.length;
 }
 
@@ -44,15 +39,15 @@ export async function clearFailedTrainingRunHistory(): Promise<{ deletedRuns: nu
   if (!url || !(await initDbSchema())) throw new Error('DATABASE_UNAVAILABLE');
   const sql = neon(url);
 
-  const running = await sql`
-    SELECT run_id,asset_symbol,duration_value,duration_unit,created_at,heartbeat_at
+  const active = await sql`
+    SELECT run_id,asset_symbol,duration_value,duration_unit,created_at,heartbeat_at,status
     FROM ml_training_runs
     WHERE status IN ('running','queued')
     ORDER BY created_at DESC
   `;
-  if (running.length) {
+  if (active.length) {
     const error = new Error('TRAINING_HISTORY_RESET_BLOCKED_BY_RUNNING_JOBS');
-    (error as Error & { runningRuns?: unknown[] }).runningRuns = running;
+    (error as Error & { runningRuns?: unknown[] }).runningRuns = active;
     throw error;
   }
 
