@@ -44,12 +44,19 @@ async function processJob(job: TrainingQueueJob) {
   try {
     const modelTypes = job.modelTypes.length ? job.modelTypes as ModelType : undefined;
     const result = await trainDatasetModels({ datasetId: job.datasetId, modelTypes });
+    const queueStatus = result.status === 'failed' ? 'failed' : 'completed';
     await finishTrainingJob(
       job.jobId,
       workerId,
-      result.status === 'failed' ? 'failed' : 'completed',
+      queueStatus,
       result.status === 'failed' ? 'All requested models failed.' : undefined,
       result.runId,
+      {
+        trainingRunId: result.runId,
+        status: result.status,
+        completedModels: result.completedModels,
+        failedModels: result.failedModels,
+      },
     );
     console.log(`[ML Worker] completed ${job.jobId} run=${result.runId} status=${result.status}`);
   } catch (error) {
