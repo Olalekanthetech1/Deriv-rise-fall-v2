@@ -1,7 +1,7 @@
 import { NextRequest, NextResponse } from 'next/server';
 import { getRateLimitBlocks } from '@/lib/health';
 import { getDb } from '@/lib/db';
-import { xgboostDaemon } from '@/lib/xgboost-daemon';
+import { mlRuntimeClient } from '@/lib/ml-runtime-client';
 import { verifySessionToken } from '../auth/route';
 
 function isAuthValid(req: NextRequest): boolean {
@@ -29,9 +29,9 @@ export async function GET(req: NextRequest) {
   let pythonStatus = false;
   let daemonLatencyMs: number | null = null;
   try {
-    const daemonStart = Date.now();
-    const pingRes = await xgboostDaemon.sendCommand('ping');
-    daemonLatencyMs = Date.now() - daemonStart;
+    const runtimeStart = Date.now();
+    const pingRes = await mlRuntimeClient.sendCommand('ping');
+    daemonLatencyMs = Date.now() - runtimeStart;
     if (pingRes && pingRes.success) {
       pythonStatus = true;
     }
