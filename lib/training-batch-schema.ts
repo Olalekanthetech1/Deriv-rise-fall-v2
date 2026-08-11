@@ -2,7 +2,7 @@ import { neon } from '@neondatabase/serverless';
 import { getDbConnectionString } from './db';
 
 /** Idempotent persistence boundary for admin training plans. */
-export async function ensureTrainingBatchSchema(sql: ReturnType<typeof neon>): Promise<void> {
+export async function ensureTrainingBatchSchema(sql: any): Promise<void> {
   await sql`
     CREATE TABLE IF NOT EXISTS ml_training_batches (
       batch_id UUID PRIMARY KEY,
