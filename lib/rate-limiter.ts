@@ -1,10 +1,12 @@
 import { Ratelimit } from '@upstash/ratelimit';
 import { Redis } from '@upstash/redis';
 
-// Process-local limiter used for high-frequency telemetry and as a fail-open-to-safe fallback
+// Process-local limiter used for high-frequency telemetry and as a fail-safe fallback
 // when the distributed limiter is unavailable. This is intentionally bounded and expiring.
 const memoryStore = new Map<string, { count: number; resetAt: number }>();
 const MAX_MEMORY_KEYS = 10_000;
+const DISTRIBUTED_RETRY_COOLDOWN_MS = 30_000;
+let distributedRetryAt = 0;
 export let inMemoryBlocks = 0;
 
 function pruneMemoryStore(now: number) {
@@ -113,12 +115,18 @@ export async function checkRateLimit(key: string, type: RateLimitType = 'api') {
 
   if (!limiter) return getMemoryLimit(key, type);
 
+  const now = Date.now();
+  if (now < distributedRetryAt) {
+    return getMemoryLimit(key, type);
+  }
+
   try {
     return await limiter.limit(key);
   } catch (error) {
     // Upstash quota/network failures must never turn the API gateway into a 500 generator.
-    // Fall back to a bounded process-local limiter and preserve safe throttling semantics.
-    console.warn('Distributed rate limiter unavailable; using local fallback.', error);
+    // Temporarily stop probing Redis so a quota incident does not create a second request storm.
+    distributedRetryAt = now + DISTRIBUTED_RETRY_COOLDOWN_MS;
+    console.warn('Distributed rate limiter unavailable; using local fallback for 30s.', error);
     return getMemoryLimit(key, type);
   }
 }
