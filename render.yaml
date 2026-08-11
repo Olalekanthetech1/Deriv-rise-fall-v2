@@ -37,4 +37,7 @@ services:
       - key: ML_TRAINING_STALE_AFTER_MS
         sync: false
       - key: DATABASE_URL
-        sync: false
+        fromService:
+          type: web
+          name: deriv-ai-trading-hub
+          envVarKey: DATABASE_URL
