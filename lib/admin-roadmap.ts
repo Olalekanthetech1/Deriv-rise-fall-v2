@@ -1,4 +1,4 @@
-export type RoadmapStatus = 'complete' | 'next' | 'planned';
+export type RoadmapStatus = 'complete' | 'current' | 'next' | 'planned';
 
 export type RoadmapSection = { id: string; title: string; description: string; status: RoadmapStatus };
 
@@ -13,9 +13,9 @@ export const adminRoadmap: RoadmapSection[] = [
   { id: 'ml-config', title: 'ML Pipeline Configuration', description: 'Generate, validate, version and activate the effective ML pipeline configuration from canonical registries.', status: 'next' },
   { id: 'database', title: 'Database Operations', description: 'New-schema migration, live Neon verification, data integrity and safe maintenance.', status: 'complete' },
   { id: 'market-data-ingestion', title: 'Market Data Ingestion', description: 'Historical ticks, live streams and validation before they enter the training pipeline.', status: 'complete' },
-  { id: 'dataset-builder', title: 'Training Dataset Builder', description: 'Real-tick feature windows, future-direction labels, chronological splits and leakage validation.', status: 'complete' },
-  { id: 'training-pipeline', title: 'Model Training Pipeline', description: 'Eight-model native training from persisted duration-aware datasets with per-model validation and audit lineage.', status: 'next' },
-  { id: 'asset-strategy', title: 'Asset-Aware Model Strategy', description: 'Runtime asset-class and market-type strategy selection with duration-aware model adaptation and persisted lineage.', status: 'next' },
+  { id: 'dataset-builder', title: 'Training Dataset Builder', description: 'Gate 5 confirmed complete: dynamic Deriv duration/horizon selection, real-tick dataset construction, schema/lineage controls and dependency-safe deletion are implemented and accepted.', status: 'complete' },
+  { id: 'training-pipeline', title: 'Model Training Pipeline', description: 'Gate 6 — CURRENT HIGHEST PRIORITY: restore reliable worker dispatch from QUEUED through execution, artifact creation and terminal completion with persisted heartbeat and lineage evidence.', status: 'current' },
+  { id: 'asset-strategy', title: 'Asset-Aware Model Strategy', description: 'Gate 7 remains behind Gate 6: runtime asset-class and market-type strategy selection with duration-aware model adaptation and persisted lineage.', status: 'next' },
   { id: 'champion-challenger', title: 'Champion/Challenger Evaluation', description: 'Out-of-sample model comparison and promotion gates.', status: 'planned' },
   { id: 'prediction-integration', title: 'Prediction & Trading Integration', description: 'Trained-model inference, execution lineage and trade persistence.', status: 'planned' },
   { id: 'final-verification', title: 'Production Verification', description: 'Build verification, deployment checks and final integrity audit.', status: 'planned' },
