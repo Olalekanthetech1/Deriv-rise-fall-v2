@@ -11,6 +11,8 @@ services:
         value: "3000"
       - key: NODE_ENV
         value: "production"
+      - key: RATE_LIMIT_BACKEND
+        sync: false
       - key: ML_TRAINING_CONCURRENCY
         value: "1"
       - key: NEXT_PUBLIC_DERIV_APP_ID
@@ -28,6 +30,8 @@ services:
     envVars:
       - key: NODE_ENV
         value: "production"
+      - key: RATE_LIMIT_BACKEND
+        value: "local"
       - key: ML_TRAINING_CONCURRENCY
         value: "1"
       - key: ML_WORKER_POLL_INTERVAL_MS
