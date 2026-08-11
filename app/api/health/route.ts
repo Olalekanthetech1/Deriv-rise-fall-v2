@@ -1,17 +1,16 @@
 import { NextResponse } from 'next/server';
 import { getDb } from '@/lib/db';
-import { xgboostDaemon } from '@/lib/xgboost-daemon';
+import { mlRuntimeClient } from '@/lib/ml-runtime-client';
 
 export async function GET() {
-  const startDb = Date.now();
   const health: any = {
     status: 'healthy',
     timestamp: new Date().toISOString(),
     services: {
       database: 'unknown',
       dbLatencyMs: null,
-      pythonDaemon: 'unknown',
-      daemonLatencyMs: null,
+      pythonRuntime: 'unknown',
+      runtimeLatencyMs: null,
     },
     env: {
       databaseUrlSet: !!process.env.DATABASE_URL,
@@ -36,20 +35,19 @@ export async function GET() {
   }
 
   try {
-    const daemonStart = Date.now();
-    const pingRes = await xgboostDaemon.sendCommand('ping');
-    health.services.daemonLatencyMs = Date.now() - daemonStart;
+    const runtimeStart = Date.now();
+    const pingRes = await mlRuntimeClient.sendCommand('ping');
+    health.services.runtimeLatencyMs = Date.now() - runtimeStart;
     if (pingRes && pingRes.success) {
-      health.services.pythonDaemon = 'connected';
+      health.services.pythonRuntime = 'connected';
     } else {
-      health.services.pythonDaemon = 'error';
+      health.services.pythonRuntime = 'error';
       health.status = 'degraded';
     }
   } catch (err) {
-    health.services.pythonDaemon = 'error';
+    health.services.pythonRuntime = 'error';
     health.status = 'degraded';
   }
 
   return NextResponse.json(health, { status: health.status === 'healthy' ? 200 : 503 });
 }
-
