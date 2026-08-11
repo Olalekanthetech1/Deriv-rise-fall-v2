@@ -1,9 +1,9 @@
 import { NextResponse } from 'next/server';
-import { xgboostDaemon } from '@/lib/xgboost-daemon';
+import { mlRuntimeClient } from '@/lib/ml-runtime-client';
 
 export async function GET() {
   try {
-    if (!xgboostDaemon.isAvailable()) {
+    if (!mlRuntimeClient.isAvailable()) {
       return NextResponse.json({
         success: false,
         dataSource: 'native-runtime-unavailable',
