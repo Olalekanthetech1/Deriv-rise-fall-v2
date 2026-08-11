@@ -20,6 +20,7 @@ export type TrainingQueueJob = {
   updatedAt?: string;
 };
 export type TrainingQueueResult = { trainingRunId?: string; status?: string; completedModels?: number; failedModels?: number; error?: string };
+export type WorkerStatus = { workerId: string | null; status: 'online' | 'stale' | 'offline'; heartbeatAt: string | null };
 
 let schemaReady = false;
 
@@ -48,9 +49,41 @@ async function getQueueDb() {
     await sql`ALTER TABLE ml_training_job_queue ADD COLUMN IF NOT EXISTS batch_item_id BIGINT`;
     await sql`CREATE INDEX IF NOT EXISTS idx_ml_training_queue_claim ON ml_training_job_queue (status, available_at, created_at)`;
     await sql`CREATE UNIQUE INDEX IF NOT EXISTS uq_ml_training_queue_active_dataset ON ml_training_job_queue (dataset_id) WHERE status IN ('queued','running')`;
+    await sql`CREATE TABLE IF NOT EXISTS ml_training_worker_heartbeats (
+      worker_id VARCHAR(160) PRIMARY KEY,
+      status VARCHAR(24) NOT NULL DEFAULT 'online',
+      heartbeat_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+      updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+    )`;
     schemaReady = true;
   }
   return sql;
+}
+
+export async function recordWorkerHeartbeat(workerId: string, status: 'online' | 'stopping' = 'online') {
+  const sql = await getQueueDb();
+  if (!sql) return;
+  await sql`
+    INSERT INTO ml_training_worker_heartbeats (worker_id,status,heartbeat_at,updated_at)
+    VALUES (${workerId},${status},NOW(),NOW())
+    ON CONFLICT (worker_id) DO UPDATE SET status=EXCLUDED.status,heartbeat_at=EXCLUDED.heartbeat_at,updated_at=NOW()
+  `;
+}
+
+export async function getWorkerStatus(): Promise<WorkerStatus> {
+  const sql = await getQueueDb();
+  if (!sql) return { workerId: null, status: 'offline', heartbeatAt: null };
+  const raw = Number(process.env.ML_TRAINING_STALE_AFTER_MS || 20 * 60 * 1000);
+  const staleMs = Math.max(60_000, Math.min(24 * 60 * 60 * 1000, Number.isFinite(raw) ? Math.trunc(raw) : 20 * 60 * 1000));
+  const rows = await sql`SELECT worker_id,status,heartbeat_at FROM ml_training_worker_heartbeats ORDER BY heartbeat_at DESC LIMIT 1`;
+  if (!rows.length) return { workerId: null, status: 'offline', heartbeatAt: null };
+  const heartbeatAt = rows[0].heartbeat_at ? new Date(rows[0].heartbeat_at) : null;
+  const stale = !heartbeatAt || (Date.now() - heartbeatAt.getTime()) > staleMs;
+  return {
+    workerId: rows[0].worker_id ? String(rows[0].worker_id) : null,
+    status: stale ? 'stale' : String(rows[0].status) === 'stopping' ? 'stale' : 'online',
+    heartbeatAt: heartbeatAt ? heartbeatAt.toISOString() : null,
+  };
 }
 
 export async function enqueueTrainingJob(request: TrainingQueueRequest): Promise<TrainingQueueJob> {
@@ -114,7 +147,6 @@ export async function finishTrainingJob(jobId: string, workerId: string, status:
   const batchId = rows[0]?.batch_id ? String(rows[0].batch_id) : null;
   const batchItemId = rows[0]?.batch_item_id ? Number(rows[0].batch_item_id) : null;
   if (!batchId || !batchItemId) return;
-
   const completedModels = Number(result?.completedModels || 0);
   const failedModels = Number(result?.failedModels || (status === 'failed' ? 1 : 0));
   const itemStatus = status === 'failed' ? 'failed' : failedModels > 0 && completedModels > 0 ? 'partial' : 'completed';
@@ -141,10 +173,7 @@ export async function recoverStaleTrainingJobs() {
   if (!sql) return 0;
   const raw = Number(process.env.ML_TRAINING_STALE_AFTER_MS || 20 * 60 * 1000);
   const staleMs = Math.max(60_000, Math.min(24 * 60 * 60 * 1000, Number.isFinite(raw) ? Math.trunc(raw) : 20 * 60 * 1000));
-  const rows = await sql`
-    SELECT job_id,batch_id,batch_item_id FROM ml_training_job_queue
-    WHERE status='running' AND COALESCE(heartbeat_at,updated_at,created_at) < NOW() - (${staleMs}::bigint * INTERVAL '1 millisecond')
-  `;
+  const rows = await sql`SELECT job_id,batch_id,batch_item_id FROM ml_training_job_queue WHERE status='running' AND COALESCE(heartbeat_at,updated_at,created_at) < NOW() - (${staleMs}::bigint * INTERVAL '1 millisecond')`;
   if (!rows.length) return 0;
   for (const row of rows) {
     if (row.batch_item_id) await sql`UPDATE ml_training_batch_items SET status='queued',heartbeat_at=NULL,error='Training worker heartbeat expired; item returned to queue.',updated_at=NOW() WHERE id=${Number(row.batch_item_id)} AND status='running'`;
