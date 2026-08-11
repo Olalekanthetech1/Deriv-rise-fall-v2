@@ -1,5 +1,5 @@
 import { NextRequest, NextResponse } from 'next/server';
-import { xgboostDaemon } from '@/lib/xgboost-daemon';
+import { mlRuntimeClient } from '@/lib/ml-runtime-client';
 import { initDbSchema, getTicksHistory } from '@/lib/db';
 import { verifySessionToken } from '../auth/route';
 
@@ -36,7 +36,7 @@ export async function POST(req: NextRequest) {
       ? Number(body.assetCategory)
       : symbol.startsWith('FRX') ? 1 : symbol.startsWith('CWM') ? 2 : 0;
 
-    const nativeResult = await xgboostDaemon.sendCommand('backtest', {
+    const nativeResult = await mlRuntimeClient.sendCommand('backtest', {
       symbol,
       ticks,
       horizons: [horizonSecs],
