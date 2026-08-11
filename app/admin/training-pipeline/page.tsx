@@ -54,13 +54,20 @@ export default function TrainingPipelinePage() {
       ]);
       const datasetsData = await datasetsRes.json().catch(() => ({}));
       const runsData = await runsRes.json().catch(() => ({}));
-      if (!datasetsRes.ok) throw new Error(datasetsData?.error || 'Unable to load training datasets.');
-      if (!runsRes.ok) throw new Error(runsData?.error || 'Unable to load training runs.');
       const next = Array.isArray(datasetsData?.datasets) ? datasetsData.datasets as Dataset[] : [];
-      setDatasets(next);
-      setRuns(Array.isArray(runsData?.runs) ? runsData.runs as Run[] : []);
-      setSelectedDataset((current) => current && next.some((item) => item.id === current) ? current : next[0]?.id || '');
-      setSelectedDatasets((current) => current.filter((id) => next.some((item) => item.id === id)));
+      const runList = Array.isArray(runsData?.runs) ? runsData.runs as Run[] : [];
+
+      if (datasetsRes.ok) {
+        setDatasets(next);
+        setSelectedDataset((current) => current && next.some((item) => item.id === current) ? current : next[0]?.id || '');
+        setSelectedDatasets((current) => current.filter((id) => next.some((item) => item.id === id)));
+      }
+      if (runsRes.ok) setRuns(runList);
+
+      const failures: string[] = [];
+      if (!datasetsRes.ok) failures.push(`Datasets: ${datasetsData?.error || 'unable to load training datasets.'}`);
+      if (!runsRes.ok) failures.push(`Training runs: ${runsData?.error || 'unable to load training run diagnostics.'}`);
+      setError(failures.length ? failures.join(' ') : null);
     } catch (e) {
       setError(e instanceof Error ? e.message : 'Unable to load model training operations.');
     } finally { setLoading(false); }

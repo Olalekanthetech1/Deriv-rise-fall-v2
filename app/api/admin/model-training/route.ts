@@ -12,6 +12,7 @@ function isAdmin(req: NextRequest): boolean {
   return verifySessionToken(cookieToken) || verifySessionToken(headerToken);
 }
 function noStore() { return { 'Cache-Control': 'no-store, max-age=0' }; }
+function isUuid(value: unknown): value is string { return typeof value === 'string' && /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(value); }
 
 function withLiveDiagnostics(runs: any[]) {
   return runs.map((run) => ({
@@ -49,13 +50,13 @@ async function mergeActiveQueueIntoRuns(runs: any[], queue: any[]) {
 
   const sql = getDb();
   if (!sql) return runs;
-  const datasetIds = [...new Set(jobs.map((job) => String(job.datasetId)).filter(Boolean))];
+  const datasetIds = [...new Set(jobs.map((job) => String(job.datasetId)).filter(isUuid))];
   if (!datasetIds.length) return runs;
 
   const rows = await sql`
     SELECT id,asset_symbol,duration_value,duration_unit,duration_seconds,horizon_ticks
     FROM training_datasets
-    WHERE id = ANY(${datasetIds}::text[])
+    WHERE id = ANY(${datasetIds}::uuid[])
   `;
   const datasets = new Map(rows.map((row: any) => [String(row.id), row]));
 

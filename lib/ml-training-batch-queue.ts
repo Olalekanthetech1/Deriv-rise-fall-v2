@@ -11,7 +11,7 @@ type TrainingBatchPlan = { datasetIds: string[]; modelTypes?: MlModelKey[]; skip
 
 function normalizeIds(values: unknown): string[] {
   if (!Array.isArray(values)) return [];
-  return [...new Set(values.filter((value): value is string => typeof value === 'string' && /^[A-Za-z0-9_-]+$/.test(value.trim())).map((value) => value.trim()))];
+  return [...new Set(values.filter((value): value is string => typeof value === 'string' && /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(value.trim())).map((value) => value.trim()))];
 }
 
 function normalizeModels(values: unknown): MlModelKey[] {
@@ -65,7 +65,7 @@ export async function createTrainingBatchQueued(plan: TrainingBatchPlan) {
   const runningRun = await sql`SELECT run_id FROM ml_training_runs WHERE status='running' ORDER BY created_at DESC LIMIT 1`;
   if (runningRun.length) throw new Error('TRAINING_ALREADY_RUNNING');
 
-  const rows = await sql`SELECT id,asset_symbol,duration_value,duration_unit,horizon_ticks,status,leakage_check_passed,sample_count FROM training_datasets WHERE id = ANY(${datasetIds}::text[])`;
+  const rows = await sql`SELECT id,asset_symbol,duration_value,duration_unit,horizon_ticks,status,leakage_check_passed,sample_count FROM training_datasets WHERE id = ANY(${datasetIds}::uuid[])`;
   const datasetMap = new Map(rows.map((row: any) => [String(row.id), row]));
   if (datasetMap.size !== datasetIds.length) throw new Error('ONE_OR_MORE_DATASETS_NOT_FOUND');
 
