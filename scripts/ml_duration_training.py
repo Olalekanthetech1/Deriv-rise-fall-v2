@@ -84,9 +84,9 @@ def _elapsed_ms(start: float) -> float:
     return round((time.perf_counter() - start) * 1000.0, 3)
 
 
-def _emit_progress(request: dict[str, Any], phase: str, total_started: float, timings: dict[str, float], message: str | None = None) -> None:
-    """Emit a machine-readable progress event over the daemon stdout protocol."""
-    event = {
+def _emit_progress(request: dict[str, Any], phase: str, total_started: float, timings: dict[str, float], message: str | None = None, extra: dict[str, Any] | None = None) -> None:
+    """Emit machine-readable progress over the daemon stdout protocol."""
+    event: dict[str, Any] = {
         "type": "progress",
         "id": request.get("id"),
         "trainingRunId": request.get("trainingRunId"),
@@ -97,11 +97,12 @@ def _emit_progress(request: dict[str, Any], phase: str, total_started: float, ti
     }
     if message:
         event["message"] = message
+    if extra:
+        event.update(extra)
     try:
         sys.stdout.write(json.dumps(event, default=str) + "\n")
         sys.stdout.flush()
     except Exception:
-        # Diagnostics must never break a training request.
         pass
 
 
@@ -200,6 +201,26 @@ def train_partitioned(kind: str, payload: dict[str, Any]) -> dict[str, Any]:
             raise RuntimeError("PYTORCH_SEQUENCE_RUNTIME_UNAVAILABLE")
 
         fit_started = time.perf_counter()
+        last_deep_progress: dict[str, Any] = {}
+
+        def deep_progress(event: dict[str, Any]) -> None:
+            nonlocal last_deep_progress
+            last_deep_progress = dict(event)
+            phase = str(event.get("phase") or "deep_training_progress")
+            deep_timings = dict(timings)
+            if event.get("epochMs") is not None:
+                deep_timings["lastEpochMs"] = float(event["epochMs"])
+            if event.get("trainingMs") is not None:
+                deep_timings["deepTrainingMs"] = float(event["trainingMs"])
+            _emit_progress(
+                payload,
+                phase,
+                total_started,
+                deep_timings,
+                f"{kind} native progress: {phase}.",
+                {"deepTraining": event},
+            )
+
         model = train_deep(
             kind,
             Xt,
@@ -207,8 +228,15 @@ def train_partitioned(kind: str, payload: dict[str, Any]) -> dict[str, Any]:
             epochs=int(hyper.get("epochs", 8)),
             batch_size=int(hyper.get("batchSize", 64)),
             lr=float(hyper.get("learningRate", 0.001)),
+            progress=deep_progress,
         )
         timings["fitMs"] = _elapsed_ms(fit_started)
+        if last_deep_progress.get("peakRssBytes") is not None:
+            timings["peakRssBytes"] = float(last_deep_progress["peakRssBytes"])
+        if last_deep_progress.get("deepTrainingMs") is not None:
+            timings["deepTrainingMs"] = float(last_deep_progress["deepTrainingMs"])
+        if last_deep_progress.get("epochsCompleted") is not None:
+            timings["epochsCompleted"] = float(last_deep_progress["epochsCompleted"])
         _emit_progress(payload, "model_fit_complete", total_started, timings, f"Native {kind} fit completed in {timings['fitMs']:.1f} ms.")
 
         predict_started = time.perf_counter()
