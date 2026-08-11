@@ -9,6 +9,34 @@ function isAuthValid(req: NextRequest): boolean {
   return verifySessionToken(cookieToken) || verifySessionToken(headerToken);
 }
 
+function readableAssetName(symbol: string, storedDisplayName?: unknown): string {
+  const stored = String(storedDisplayName || '').trim();
+  if (stored) return stored;
+  const oneSecondVolatility = /^1HZ(\d+)V$/i.exec(symbol);
+  if (oneSecondVolatility) return `Volatility ${oneSecondVolatility[1]} (1s) Index`;
+  const volatility = /^R_(\d+)$/i.exec(symbol);
+  if (volatility) return `Volatility ${volatility[1]} Index`;
+  return symbol.replace(/_/g, ' ');
+}
+
+function normalizeRegistryModel(model: Record<string, any>) {
+  const rawSymbol = String(model.asset_symbol || model.symbol || '').trim();
+  const rawModelFamily = String(model.model_family || '').trim();
+  const definition = getMlModelDefinition(rawModelFamily.toLowerCase());
+  const horizonTicks = Number(model.horizon_ticks ?? model.horizon_secs);
+
+  return {
+    ...model,
+    symbol: rawSymbol || undefined,
+    horizon_secs: Number.isFinite(horizonTicks) ? horizonTicks : undefined,
+    model_name: definition?.displayName || rawModelFamily || model.model_name || 'Unknown model',
+    raw_symbol: rawSymbol || undefined,
+    raw_model_family: rawModelFamily || undefined,
+    raw_horizon_ticks: Number.isFinite(horizonTicks) ? horizonTicks : undefined,
+    asset_display_name: readableAssetName(rawSymbol, model.asset_display_name),
+  };
+}
+
 export async function GET(req: NextRequest) {
   if (!isAuthValid(req)) {
     return NextResponse.json({ success: false, error: 'Unauthorized admin access.' }, { status: 401 });
@@ -34,7 +62,7 @@ export async function GET(req: NextRequest) {
     return NextResponse.json({
       success: true,
       count: models?.length || 0,
-      models: models || [],
+      models: (models || []).map((model: Record<string, any>) => normalizeRegistryModel(model)),
       dataSource: 'live-database',
     });
   } catch (err: any) {
