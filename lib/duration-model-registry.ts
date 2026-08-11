@@ -37,10 +37,10 @@ export async function registerDurationModel(data: DurationModelRegistration): Pr
       dataset_id, format, status, feature_schema_version, framework, training_run_id,
       strategy_key, strategy_version, strategy_metadata, metrics, hyperparameters, updated_at
     ) VALUES (
-      ${data.modelId}, ${data.modelFamily}, ${data.version}, ${data.symbol}, ${data.assetClass}, ${data.effectiveHorizonTicks},
-      ${data.durationValue}, ${data.durationUnit}, ${data.durationSeconds}, ${data.durationUnit === 't' ? 'tick' : 'time'},
-      ${data.datasetId}, ${data.format}, ${data.status}, ${data.featureSchemaVersion}, ${data.framework}, ${data.trainingRunId},
-      ${data.strategyKey}, ${data.strategyVersion}, ${JSON.stringify(data.strategyMetadata ?? {})}::jsonb,
+      ${data.modelId}::text, ${data.modelFamily}::text, ${data.version}::text, ${data.symbol}::text, ${data.assetClass}::text, ${data.effectiveHorizonTicks}::integer,
+      ${data.durationValue}::integer, ${data.durationUnit}::varchar, ${data.durationSeconds}::numeric, ${data.durationUnit === 't' ? 'tick' : 'time'}::varchar,
+      ${data.datasetId}::text, ${data.format}::text, ${data.status}::varchar, ${data.featureSchemaVersion}::text, ${data.framework}::text, ${data.trainingRunId}::uuid,
+      ${data.strategyKey}::text, ${data.strategyVersion}::text, ${JSON.stringify(data.strategyMetadata ?? {})}::jsonb,
       ${JSON.stringify(data.metrics ?? {})}::jsonb, ${JSON.stringify(data.hyperparameters ?? {})}::jsonb, NOW()
     )
     ON CONFLICT (model_id) DO UPDATE SET
