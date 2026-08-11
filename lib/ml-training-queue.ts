@@ -24,6 +24,15 @@ export type WorkerStatus = { workerId: string | null; status: 'online' | 'stale'
 
 let schemaReady = false;
 
+function durationEnvMs(name: string, fallback: number, minimum: number, maximum: number): number {
+  const raw = Number(process.env[name] || fallback);
+  return Number.isFinite(raw) ? Math.min(maximum, Math.max(minimum, Math.trunc(raw))) : fallback;
+}
+
+function workerLeaseTimeoutMs(): number {
+  return durationEnvMs('ML_WORKER_LEASE_TIMEOUT_MS', 90_000, 30_000, 10 * 60 * 1000);
+}
+
 async function getQueueDb() {
   const url = getDbConnectionString();
   if (!url || !(await initDbSchema())) return null;
@@ -73,8 +82,7 @@ export async function recordWorkerHeartbeat(workerId: string, status: 'online' |
 export async function getWorkerStatus(): Promise<WorkerStatus> {
   const sql = await getQueueDb();
   if (!sql) return { workerId: null, status: 'offline', heartbeatAt: null };
-  const raw = Number(process.env.ML_TRAINING_STALE_AFTER_MS || 20 * 60 * 1000);
-  const staleMs = Math.max(60_000, Math.min(24 * 60 * 60 * 1000, Number.isFinite(raw) ? Math.trunc(raw) : 20 * 60 * 1000));
+  const staleMs = workerLeaseTimeoutMs();
   const rows = await sql`SELECT worker_id,status,heartbeat_at FROM ml_training_worker_heartbeats ORDER BY heartbeat_at DESC LIMIT 1`;
   if (!rows.length) return { workerId: null, status: 'offline', heartbeatAt: null };
   const heartbeatAt = rows[0].heartbeat_at ? new Date(rows[0].heartbeat_at) : null;
@@ -116,7 +124,14 @@ export async function claimNextTrainingJob(workerId: string): Promise<TrainingQu
   if (!sql) throw new Error('DATABASE_UNAVAILABLE');
   const rows = await sql`
     WITH candidate AS (
-      SELECT job_id FROM ml_training_job_queue WHERE status='queued' AND available_at <= NOW() ORDER BY created_at ASC LIMIT 1 FOR UPDATE SKIP LOCKED
+      SELECT job_id
+      FROM ml_training_job_queue
+      WHERE status='queued'
+        AND available_at <= NOW()
+        AND NOT EXISTS (SELECT 1 FROM ml_training_job_queue WHERE status='running')
+      ORDER BY created_at ASC
+      LIMIT 1
+      FOR UPDATE SKIP LOCKED
     )
     UPDATE ml_training_job_queue q
     SET status='running',worker_id=${workerId},attempts=q.attempts+1,heartbeat_at=NOW(),updated_at=NOW()
@@ -168,19 +183,49 @@ export async function finishTrainingJob(jobId: string, workerId: string, status:
   await sql`UPDATE ml_training_batches SET status=${batchStatus},completed_jobs=${Number(row?.completed_jobs || 0)},failed_jobs=${Number(row?.failed_jobs || 0)},skipped_jobs=${Number(row?.skipped_items || 0)},completed_at=${terminal ? new Date().toISOString() : null},heartbeat_at=${terminal ? null : new Date().toISOString()},updated_at=NOW() WHERE batch_id=${batchId}`;
 }
 
-export async function recoverStaleTrainingJobs() {
+/**
+ * Recover jobs owned by a worker that disappeared without a graceful shutdown.
+ * A live worker heartbeats every few seconds; a 90s lease therefore gives ample
+ * room for transient DB/network pauses while still recovering Render restarts quickly.
+ */
+export async function recoverAbandonedTrainingJobs(): Promise<number> {
   const sql = await getQueueDb();
   if (!sql) return 0;
-  const raw = Number(process.env.ML_TRAINING_STALE_AFTER_MS || 20 * 60 * 1000);
-  const staleMs = Math.max(60_000, Math.min(24 * 60 * 60 * 1000, Number.isFinite(raw) ? Math.trunc(raw) : 20 * 60 * 1000));
-  const rows = await sql`SELECT job_id,batch_id,batch_item_id FROM ml_training_job_queue WHERE status='running' AND COALESCE(heartbeat_at,updated_at,created_at) < NOW() - (${staleMs}::bigint * INTERVAL '1 millisecond')`;
+  const leaseMs = workerLeaseTimeoutMs();
+  const rows = await sql`
+    SELECT q.job_id,q.training_run_id,q.batch_id,q.batch_item_id,q.worker_id
+    FROM ml_training_job_queue q
+    LEFT JOIN ml_training_worker_heartbeats w ON w.worker_id=q.worker_id
+    WHERE q.status='running'
+      AND (
+        w.worker_id IS NULL
+        OR w.status='stopping'
+        OR w.heartbeat_at < NOW() - (${leaseMs}::bigint * INTERVAL '1 millisecond')
+      )
+  `;
   if (!rows.length) return 0;
+
   for (const row of rows) {
-    if (row.batch_item_id) await sql`UPDATE ml_training_batch_items SET status='queued',heartbeat_at=NULL,error='Training worker heartbeat expired; item returned to queue.',updated_at=NOW() WHERE id=${Number(row.batch_item_id)} AND status='running'`;
-    if (row.batch_id) await sql`UPDATE ml_training_batches SET status='queued',worker_id=NULL,heartbeat_at=NULL,error='Training worker heartbeat expired; batch returned to queue.',updated_at=NOW() WHERE batch_id=${String(row.batch_id)} AND status IN ('running','partial')`;
+    const jobId = String(row.job_id);
+    const trainingRunId = row.training_run_id ? String(row.training_run_id) : null;
+    if (trainingRunId) {
+      await sql`UPDATE ml_training_run_models SET status='timed_out',error='ML worker lease expired; training run was interrupted by worker loss.',completed_at=COALESCE(completed_at,NOW()),heartbeat_at=NULL WHERE run_id=${trainingRunId} AND status IN ('running','queued')`;
+      await sql`UPDATE ml_training_runs SET status='timed_out',error='ML worker lease expired; training run was interrupted by worker loss.',completed_at=COALESCE(completed_at,NOW()),heartbeat_at=NULL,updated_at=NOW() WHERE run_id=${trainingRunId} AND status='running'`;
+    }
+    if (row.batch_item_id) {
+      await sql`UPDATE ml_training_batch_items SET status='queued',heartbeat_at=NULL,error='ML worker lease expired; item returned to queue.',updated_at=NOW() WHERE id=${Number(row.batch_item_id)} AND status='running'`;
+    }
+    if (row.batch_id) {
+      await sql`UPDATE ml_training_batches SET status='queued',worker_id=NULL,heartbeat_at=NULL,error='ML worker lease expired; batch returned to queue.',updated_at=NOW() WHERE batch_id=${String(row.batch_id)} AND status IN ('running','partial')`;
+    }
+    await sql`UPDATE ml_training_job_queue SET status='queued',worker_id=NULL,heartbeat_at=NULL,error='ML worker lease expired; job returned to queue.',available_at=NOW(),updated_at=NOW() WHERE job_id=${jobId} AND status='running'`;
   }
-  await sql`UPDATE ml_training_job_queue SET status='queued',worker_id=NULL,heartbeat_at=NULL,error='Training worker heartbeat expired; job returned to queue.',available_at=NOW(),updated_at=NOW() WHERE status='running' AND COALESCE(heartbeat_at,updated_at,created_at) < NOW() - (${staleMs}::bigint * INTERVAL '1 millisecond')`;
   return rows.length;
+}
+
+/** Legacy stale-run recovery retained for API compatibility. */
+export async function recoverStaleTrainingJobs() {
+  return recoverAbandonedTrainingJobs();
 }
 
 function mapQueueJob(row:any): TrainingQueueJob {
