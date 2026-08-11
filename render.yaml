@@ -25,6 +25,7 @@ services:
     dockerCommand: npm run ml:worker
     region: frankfurt
     plan: starter
+    maxShutdownDelaySeconds: 300
     envVars:
       - key: NODE_ENV
         value: "production"
