@@ -2,6 +2,7 @@ import { NextRequest, NextResponse } from 'next/server';
 import { verifySessionToken } from '../auth/route';
 import { getMlModelKeys, type MlModelKey } from '@/lib/ml-model-registry';
 import { clearTrainingRunHistory, listTrainingRuns } from '@/lib/ml-training-orchestrator';
+import { clearTerminalTrainingQueueHistory } from '@/lib/ml-training-history';
 import { enqueueTrainingJob, listTrainingQueueJobs, recoverStaleTrainingJobs } from '@/lib/ml-training-queue';
 import { getDb } from '@/lib/db';
 import { xgboostDaemon } from '@/lib/xgboost-daemon';
@@ -141,8 +142,18 @@ export async function DELETE(req: NextRequest) {
   try {
     const confirmation = req.headers.get('x-confirm-training-history-reset');
     if (confirmation !== 'DELETE_TRAINING_HISTORY') return NextResponse.json({ success: false, error: 'Explicit confirmation is required to clear training history.' }, { status: 400, headers: noStore() });
+
+    // Clear terminal worker-queue failures as part of the same user-visible
+    // history operation. The GET endpoint merges failed queue jobs back into
+    // the history list when their persisted run row no longer exists.
+    const deletedQueueJobs = await clearTerminalTrainingQueueHistory();
     const result = await clearTrainingRunHistory();
-    return NextResponse.json({ success: true, message: 'Training history cleared. Datasets, dataset samples, registered models, artifacts, market data and configuration were not targeted.', ...result }, { headers: noStore() });
+    return NextResponse.json({
+      success: true,
+      message: 'Training history cleared. Datasets, dataset samples, registered models, artifacts, market data and configuration were not targeted.',
+      deletedQueueJobs,
+      ...result,
+    }, { headers: noStore() });
   } catch (error) {
     const message = error instanceof Error ? error.message : 'Unable to clear training history.';
     if (message === 'TRAINING_HISTORY_RESET_BLOCKED_BY_RUNNING_JOBS') {
