@@ -183,11 +183,6 @@ export async function finishTrainingJob(jobId: string, workerId: string, status:
   await sql`UPDATE ml_training_batches SET status=${batchStatus},completed_jobs=${Number(row?.completed_jobs || 0)},failed_jobs=${Number(row?.failed_jobs || 0)},skipped_jobs=${Number(row?.skipped_items || 0)},completed_at=${terminal ? new Date().toISOString() : null},heartbeat_at=${terminal ? null : new Date().toISOString()},updated_at=NOW() WHERE batch_id=${batchId}`;
 }
 
-/**
- * Recover jobs owned by a worker that disappeared without a graceful shutdown.
- * A live worker heartbeats every few seconds; the lease gives room for transient
- * DB/network pauses while still recovering Render restarts quickly.
- */
 export async function recoverAbandonedTrainingJobs(): Promise<number> {
   const sql = await getQueueDb();
   if (!sql) return 0;
@@ -220,11 +215,6 @@ export async function recoverAbandonedTrainingJobs(): Promise<number> {
     await sql`UPDATE ml_training_job_queue SET status='queued',worker_id=NULL,heartbeat_at=NULL,error='ML worker lease expired; job returned to queue.',available_at=NOW(),updated_at=NOW() WHERE job_id=${jobId} AND status='running'`;
   }
   return rows.length;
-}
-
-/** Legacy name retained for existing callers. */
-export async function recoverStaleTrainingJobs() {
-  return recoverAbandonedTrainingJobs();
 }
 
 function mapQueueJob(row:any): TrainingQueueJob {
