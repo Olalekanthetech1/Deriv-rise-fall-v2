@@ -29,12 +29,14 @@ export function formatReadableDatasetName(input: {
 }): string {
   const symbol = String(input.assetSymbol || '').trim();
   const assetName = String(input.assetDisplayName || '').trim() || (symbol ? getSymbolDisplayName(symbol) : 'Unknown asset');
+  const assetLabel = symbol ? `${assetName} (${symbol})` : assetName;
   const duration = formatReadableDuration(input.durationValue, String(input.durationUnit || ''));
   const task = input.taskLabel?.trim() || 'Direction Dataset';
-  return duration ? `${assetName} — ${duration} ${task}` : `${assetName} — ${task}`;
+  return duration ? `${assetLabel} — ${duration} ${task}` : `${assetLabel} — ${task}`;
 }
 
 export function formatReadableAsset(input: unknown): string {
   const symbol = String(input || '').trim();
-  return symbol ? getSymbolDisplayName(symbol) : 'Unknown asset';
+  if (!symbol) return 'Unknown asset';
+  return `${getSymbolDisplayName(symbol)} (${symbol})`;
 }
