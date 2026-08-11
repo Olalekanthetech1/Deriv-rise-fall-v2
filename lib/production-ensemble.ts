@@ -1,7 +1,7 @@
 import { EngineeredTickFeatures, extractTickFeatures, featureObjToArray, TickPoint } from './ml-feature-extractor';
 import { buildFeatureSequence } from './ml-feature-dataset';
 import { getMlModelDefinition, getMlModelKeys, getPredictiveModelDefinitions, type MlModelKey } from './ml-model-registry';
-import { xgboostDaemon } from './xgboost-daemon';
+import { mlRuntimeClient } from './ml-runtime-client';
 import { evaluateSignalStrategyGate, resolveAssetAwareSignalContext, type AssetAwareSignalContext, type SignalStrategyGate } from './asset-context';
 
 export type Signal = 'RISE' | 'FALL';
@@ -77,7 +77,7 @@ export async function evaluateProductionEnsemble(
   });
 
   const predictiveModels = getPredictiveModelDefinitions();
-  const remote = await xgboostDaemon.sendCommand('predict_ensemble', {
+  const remote = await mlRuntimeClient.sendCommand('predict_ensemble', {
     symbol,
     durationSecs: Number(durationSecs),
     assetCategory,
