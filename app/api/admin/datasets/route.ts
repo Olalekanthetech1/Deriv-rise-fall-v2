@@ -3,6 +3,7 @@ import { verifySessionToken } from '../auth/route';
 import { buildDurationTrainingDataset, listDurationTrainingDatasets } from '@/lib/training-dataset-builder-duration-v2';
 import { expandTrainingDurations, type DerivDurationRange, type DerivDurationUnit } from '@/lib/deriv-duration-registry';
 import { getCachedOrDiscoverDuration } from '@/lib/deriv-duration-cache';
+import { initializeMlPipelineConfig } from '@/lib/ml-pipeline-config';
 import { claimNextAutoDatasetJobItem, completeAutoDatasetJobItem, createAutoDatasetJob, failAutoDatasetJobItem, getAutoDatasetJob, getAutoDatasetJobItemStatus, getLatestAutoDatasetJob, refreshAutoDatasetJobStatus, discardAutoDatasetBuild } from '@/lib/auto-dataset-job-store';
 
 function isAuthenticated(req: NextRequest): boolean {
@@ -54,6 +55,7 @@ async function runAutoDatasetWorker(jobId: string): Promise<void> {
   try {
     const job = await getAutoDatasetJob(jobId);
     if (!job || job.status !== 'running') return;
+    await initializeMlPipelineConfig();
     const item = await claimNextAutoDatasetJobItem(jobId);
     if (!item) {
       await refreshAutoDatasetJobStatus(jobId);
@@ -117,8 +119,6 @@ export async function GET(req: NextRequest) {
       durationRefreshing: resolved.refreshing,
       durationCachedAt: resolved.cachedAt,
       durationDiscovery: resolved.discovery,
-      // The selector must expose the complete broker-discovered duration domain.
-      // The same exact domain is used by AUTO builds below.
       trainingHorizons: brokerTrainingHorizons,
       brokerTrainingHorizons,
       autoTrainingHorizons: expandTrainingHorizonLadder(resolved.discovery.ranges),
@@ -135,6 +135,7 @@ export async function POST(req: NextRequest) {
     const symbol = typeof body?.symbol === 'string' ? body.symbol.trim().toUpperCase() : '';
     if (!symbol) return NextResponse.json({ success: false, error: 'A Deriv symbol is required.' }, { status: 400, headers: noStore() });
     const resolved = await getCachedOrDiscoverDuration(symbol);
+    await initializeMlPipelineConfig();
     if (body?.buildAllSupportedHorizons === true) {
       const requestedUnit = body?.durationUnit == null || body?.durationUnit === '' ? undefined : body.durationUnit;
       if (requestedUnit !== undefined && !validUnit(requestedUnit)) return NextResponse.json({ success: false, error: 'A valid Deriv duration unit is required when filtering AUTO horizons.' }, { status: 400, headers: noStore() });
@@ -148,8 +149,6 @@ export async function POST(req: NextRequest) {
       resumeAutoDatasetJob(job.id);
       const result = { status: job.status, jobId: job.id, requestedCount: job.requestedCount, completedCount: job.completedCount, failedCount: job.failedCount };
       const scope = requestedUnit ? ` for ${requestedUnit}` : '';
-      // Keep jobId/counts at the top level as the stable API contract consumed by
-      // the admin UI, while retaining the result envelope for compatibility.
       return NextResponse.json({ success: true, accepted: true, jobId: job.id, requestedCount: job.requestedCount, completedCount: job.completedCount, failedCount: job.failedCount, dataSource: 'deriv-real-ticks', durationSource: resolved.source, durationRefreshing: resolved.refreshing, result, job, message: `AUTO dataset build started for all ${job.requestedCount} dynamically derived horizon samples${scope}.` }, { status: 202, headers: noStore() });
     }
     const legacyHorizon = body?.horizonTicks;
