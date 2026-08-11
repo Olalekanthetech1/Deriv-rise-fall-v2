@@ -11,7 +11,7 @@ export async function GET() {
       return NextResponse.json({
         status: 'degraded',
         isDbConnected: false,
-        worker: { status: 'offline', workerId: null, heartbeatAt: null },
+        trainingWorker: { status: 'offline', workerId: null, heartbeatAt: null },
         modelRegistry: { total: 0, production: 0, candidate: 0, validated: 0 },
       }, { status: 503, headers: { 'Cache-Control': 'no-store' } });
     }
@@ -35,10 +35,9 @@ export async function GET() {
 
     const registry = registryRows[0] || {};
     const trainingRuns = Object.fromEntries((runRows as Array<{ status: string; count: number }>).map((row) => [row.status, Number(row.count)]));
-    const healthy = worker.status === 'online';
 
     return NextResponse.json({
-      status: healthy ? 'healthy' : 'degraded',
+      status: worker.status === 'online' ? 'healthy' : 'degraded',
       isDbConnected: true,
       trainingWorker: worker,
       modelRegistry: {
@@ -48,7 +47,7 @@ export async function GET() {
         validated: Number(registry.validated || 0),
       },
       trainingRuns,
-    }, { status: healthy ? 200 : 503, headers: { 'Cache-Control': 'no-store' } });
+    }, { status: 200, headers: { 'Cache-Control': 'no-store' } });
   } catch (error) {
     return NextResponse.json({
       status: 'degraded',
