@@ -1,6 +1,18 @@
 import { NextResponse } from 'next/server';
 import type { NextRequest } from 'next/server';
-import { checkRateLimit } from '@/lib/rate-limiter';
+import { checkRateLimit, type RateLimitType } from '@/lib/rate-limiter';
+
+const TELEMETRY_ROUTES = [
+  '/api/health',
+  '/api/ml/status',
+  '/api/admin/health',
+  '/api/admin/latency-ping',
+];
+
+function isTelemetryRoute(pathname: string, method: string) {
+  if (method !== 'GET' && method !== 'HEAD') return false;
+  return TELEMETRY_ROUTES.includes(pathname) || pathname.startsWith('/api/admin/observability');
+}
 
 export async function proxy(request: NextRequest) {
   const ip = request.headers.get('x-forwarded-for')?.split(',')[0]?.trim()
@@ -13,9 +25,11 @@ export async function proxy(request: NextRequest) {
     const isAuthRoute = pathname === '/api/admin/auth';
     const isMlRoute = pathname.startsWith('/api/ml/');
     const isWsRoute = pathname.startsWith('/api/db/ticks');
+    const isTelemetry = isTelemetryRoute(pathname, request.method);
 
-    let routeType: 'ml' | 'auth' | 'ws' | 'api' = 'api';
-    if (isAuthRoute) routeType = 'auth';
+    let routeType: RateLimitType = 'api';
+    if (isTelemetry) routeType = 'telemetry';
+    else if (isAuthRoute) routeType = 'auth';
     else if (isMlRoute) routeType = 'ml';
     else if (isWsRoute) routeType = 'ws';
 
