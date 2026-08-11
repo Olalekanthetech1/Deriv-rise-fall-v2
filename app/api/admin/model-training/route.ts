@@ -56,9 +56,26 @@ export async function POST(req: NextRequest) {
     if (!datasetId) return NextResponse.json({ success: false, error: 'datasetId is required. Select a completed leakage-validated dataset.' }, { status: 400, headers: noStore() });
     const requested = Array.isArray(body?.modelTypes) ? body.modelTypes.filter((value: unknown): value is MlModelKey => typeof value === 'string' && getMlModelKeys().includes(value as MlModelKey)) : undefined;
     if (Array.isArray(body?.modelTypes) && body.modelTypes.length > 0 && (!requested || requested.length !== body.modelTypes.length)) return NextResponse.json({ success: false, error: 'One or more requested model types are not registered.' }, { status: 400, headers: noStore() });
-    const result = await trainDatasetModels({ datasetId, modelTypes: requested });
-    const terminalSuccess = result.status === 'completed' || result.status === 'partial';
-    return NextResponse.json({ success: terminalSuccess, dataSource: 'persisted-real-tick-dataset', ...result }, { status: terminalSuccess ? 201 : 504, headers: noStore() });
+
+    // Training is a long-running native/Python workload. Never hold the HTTP request
+    // open until model fitting finishes: Render's proxy can terminate long requests
+    // (observed as 502/timeout) even while the native worker is healthy. The
+    // orchestrator persists the run and model heartbeats, so the UI can observe the
+    // durable state through GET /api/admin/model-training.
+    void trainDatasetModels({ datasetId, modelTypes: requested }).catch((error) => {
+      console.error('[ML Training Background Job]', error instanceof Error ? error.message : error);
+    });
+
+    return NextResponse.json({
+      success: true,
+      accepted: true,
+      status: 'accepted',
+      dataSource: 'persisted-real-tick-dataset',
+      datasetId,
+      modelTypes: requested ?? getMlModelKeys(),
+      message: 'Training accepted. The native worker is running asynchronously; poll training diagnostics for persisted progress and terminal status.',
+      acceptedAt: new Date().toISOString(),
+    }, { status: 202, headers: { ...noStore(), 'Retry-After': '2' } });
   } catch (error) {
     const message = error instanceof Error ? error.message : 'Model training failed.';
     const status = /TRAINING_ALREADY_RUNNING/i.test(message) ? 409 : /DATASET|INSUFFICIENT|INVALID_|SCHEMA|REQUIRED|NO_REGISTERED/i.test(message) ? 422 : /DATABASE/i.test(message) ? 503 : 500;
