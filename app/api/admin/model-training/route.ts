@@ -3,9 +3,9 @@ import { verifySessionToken } from '../auth/route';
 import { getMlModelKeys, type MlModelKey } from '@/lib/ml-model-registry';
 import { listTrainingRuns } from '@/lib/ml-training-orchestrator';
 import { clearFailedTrainingRunHistory, clearTerminalTrainingQueueHistory } from '@/lib/ml-training-history';
-import { enqueueTrainingJob, listTrainingQueueJobs, recoverStaleTrainingJobs } from '@/lib/ml-training-queue';
+import { enqueueTrainingJob, listTrainingQueueJobs, recoverAbandonedTrainingJobs } from '@/lib/ml-training-queue';
 import { getDb } from '@/lib/db';
-import { xgboostDaemon } from '@/lib/xgboost-daemon';
+import { mlRuntimeClient } from '@/lib/ml-runtime-client';
 import { formatReadableAsset } from '@/lib/ml-display-formatters';
 
 function isAdmin(req: NextRequest): boolean {
@@ -20,7 +20,7 @@ function withLiveDiagnostics(runs: any[]) {
   return runs.map((run) => ({
     ...run,
     models: Array.isArray(run?.models) ? run.models.map((model: any) => {
-      const live = xgboostDaemon.getLiveTrainingDiagnostic(String(run.run_id), String(model.model_type));
+      const live = mlRuntimeClient.getLiveTrainingDiagnostic(String(run.run_id), String(model.model_type));
       if (!live) return model;
       const metrics = model.metrics && typeof model.metrics === 'object' ? model.metrics : {};
       const timings = live.timings && typeof live.timings === 'object' ? live.timings : {};
@@ -108,7 +108,7 @@ function withReadableAssets(runs: any[]) {
 export async function GET(req: NextRequest) {
   if (!isAdmin(req)) return NextResponse.json({ success: false, error: 'Unauthorized admin access.' }, { status: 401, headers: noStore() });
   try {
-    await recoverStaleTrainingJobs();
+    await recoverAbandonedTrainingJobs();
     const symbol = req.nextUrl.searchParams.get('symbol')?.trim().toUpperCase() || undefined;
     const [runs, queue] = await Promise.all([listTrainingRuns(symbol), listTrainingQueueJobs()]);
     const visibleRuns = await mergeActiveQueueIntoRuns(runs, queue);
@@ -153,8 +153,6 @@ export async function DELETE(req: NextRequest) {
     const confirmation = req.headers.get('x-confirm-training-history-reset');
     if (confirmation !== 'DELETE_TRAINING_HISTORY') return NextResponse.json({ success: false, error: 'Explicit confirmation is required to clear failed training history.' }, { status: 400, headers: noStore() });
 
-    // Failed queue jobs are merged back into the history list when their
-    // persisted run row no longer exists, so clean them with the same action.
     const deletedQueueJobs = await clearTerminalTrainingQueueHistory();
     const result = await clearFailedTrainingRunHistory();
     return NextResponse.json({
