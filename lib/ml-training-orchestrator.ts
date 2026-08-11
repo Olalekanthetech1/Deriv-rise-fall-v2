@@ -6,7 +6,7 @@ import { getMlModelDefinitions, type MlModelKey } from './ml-model-registry';
 import { registerDurationModel } from './duration-model-registry';
 import { getMlRuntimeSchemaContract } from './ml-runtime-schema';
 import { resolveAssetAwareModelStrategy } from './asset-aware-model-strategy';
-import { xgboostDaemon } from './xgboost-daemon';
+import { mlRuntimeClient } from './ml-runtime-client';
 
 type DurationUnit = 't' | 's' | 'm' | 'h' | 'd';
 type TrainingRequest = { datasetId: string; modelTypes?: MlModelKey[] };
@@ -183,7 +183,7 @@ export async function trainDatasetModels(request: TrainingRequest) {
       const sequenceModel = definition.family === 'sequential';
       const configuredHyperparameters = { ...strategy.hyperparameters[definition.key] } as Record<string, number>;
       if (sequenceModel) configuredHyperparameters.sequenceLength = sequenceLength;
-      const result = await xgboostDaemon.sendCommand('train_partitioned', {
+      const result = await mlRuntimeClient.sendCommand('train_partitioned', {
         symbol: String(dataset.asset_symbol), modelType: definition.key, durationValue, durationUnit, durationSeconds,
         effectiveHorizonTicks, datasetId, trainingRunId: runId, schemaContract: schema,
         trainTabularDataset: sequenceModel ? undefined : partitions.train,
@@ -209,7 +209,7 @@ export async function trainDatasetModels(request: TrainingRequest) {
       results.push({ modelType: definition.key, success: true, modelId, metrics, engine: result.engine });
     } catch (error) {
       const message = error instanceof Error ? error.message : 'Native training failed.';
-      modelTimedOut = message.startsWith('DAEMON_TRAINING_TIMEOUT');
+      modelTimedOut = message.startsWith('ML_TRAINING_TIMEOUT');
       await sql`UPDATE ml_training_run_models SET status=${modelTimedOut ? 'timed_out' : 'failed'},error=${message},completed_at=NOW(),heartbeat_at=NULL WHERE run_id=${runId} AND model_type=${definition.key}`;
       failed += 1;
       if (modelTimedOut) timeoutCount += 1;
@@ -261,22 +261,8 @@ export async function clearTrainingRunHistory() {
   if (!url || !(await initDbSchema())) throw new Error('DATABASE_UNAVAILABLE');
   const sql = neon(url);
   await ensureTrainingDurationSchema(sql);
-  await reconcileStaleTrainingRuns(sql);
-
-  const running = await sql`SELECT run_id,asset_symbol,duration_value,duration_unit,created_at,heartbeat_at FROM ml_training_runs WHERE status='running' ORDER BY created_at DESC`;
-  if (running.length) {
-    const error = new Error('TRAINING_HISTORY_RESET_BLOCKED_BY_RUNNING_JOBS');
-    (error as Error & { runningRuns?: unknown[] }).runningRuns = running;
-    throw error;
-  }
-
-  const modelRows = await sql`SELECT COUNT(*)::int AS count FROM ml_training_run_models`;
-  const runRows = await sql`SELECT COUNT(*)::int AS count FROM ml_training_runs`;
-  const modelCount = Number(modelRows[0]?.count || 0);
-  const runCount = Number(runRows[0]?.count || 0);
-
-  await sql`DELETE FROM ml_training_run_models`;
-  await sql`DELETE FROM ml_training_runs`;
-
-  return { deletedRuns: runCount, deletedRunModels: modelCount };
+  await sql`UPDATE ml_training_run_models SET status='cancelled',error=COALESCE(error,'Training history archived by admin.'),completed_at=COALESCE(completed_at,NOW()),heartbeat_at=NULL WHERE run_id IN (SELECT run_id FROM ml_training_runs WHERE status IN ('failed','partial','timed_out','cancelled')) AND status IN ('queued','running')`;
+  await sql`DELETE FROM ml_training_run_models WHERE run_id IN (SELECT run_id FROM ml_training_runs WHERE status IN ('failed','partial','timed_out','cancelled'))`;
+  await sql`DELETE FROM ml_training_runs WHERE status IN ('failed','partial','timed_out','cancelled')`;
+  return true;
 }
