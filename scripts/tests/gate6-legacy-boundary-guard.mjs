@@ -20,32 +20,69 @@ function walk(directory) {
 
 const files = sourceRoots.flatMap((relativeRoot) => walk(path.join(root, relativeRoot)));
 const violations = [];
+const guardFile = 'scripts/tests/gate6-legacy-boundary-guard.mjs';
+const dbCompatibilityFile = 'lib/db.ts';
 
-// `registerModelInDb` was historically exported from lib/db.ts. The canonical
-// model-registration implementations now live in the duration-aware registry
-// boundary. Until the compatibility export is proven unused and removed, this
-// guard prevents any new production caller from depending on it again.
+function relativePath(file) {
+  return path.relative(root, file).replaceAll('\\', '/');
+}
+
+function isAppLayer(relative) {
+  return /^(app|components)\//.test(relative);
+}
+
+function isRouteOrAdmin(relative) {
+  return /^app\/(api\/.*|admin\/.*)\.(ts|tsx)$/.test(relative);
+}
+
+// Legacy model registration is a compatibility boundary only. It must not be
+// reachable from application/runtime code. Keep the definition isolated until
+// the compatibility export is removed completely; callers fail the build.
+const legacyRegistrationPatterns = [
+  /\bregisterModelInDb\b/,
+];
+
 for (const file of files) {
-  const relative = path.relative(root, file).replaceAll('\\', '/');
-  if (relative === 'lib/db.ts' || relative === 'scripts/tests/gate6-legacy-boundary-guard.mjs') continue;
+  const relative = relativePath(file);
+  if (relative === guardFile || relative === dbCompatibilityFile) continue;
+
   const content = fs.readFileSync(file, 'utf8');
-  if (/\bregisterModelInDb\b/.test(content)) {
-    violations.push(`${relative} -> registerModelInDb compatibility API`);
+  for (const pattern of legacyRegistrationPatterns) {
+    if (pattern.test(content)) {
+      violations.push(`${relative} -> legacy model-registration API (${pattern.source})`);
+    }
   }
 }
 
 // Training execution must remain behind the dedicated queue/worker boundary.
-// Reject obvious attempts to reintroduce native training directly into route/UI
-// code via the retired daemon API.
+// Reject imports/references that would let UI, API, or admin code execute the
+// worker/retired daemon directly. The worker itself and shared server modules
+// are intentionally outside this app-layer rule.
 for (const file of files) {
-  const relative = path.relative(root, file).replaceAll('\\', '/');
+  const relative = relativePath(file);
   const content = fs.readFileSync(file, 'utf8');
-  if (/^app\/(api\/.*|admin\/.*)\.(ts|tsx)$/.test(relative)) {
-    if (/from\s+['"][^'"]*xgboost-daemon[^'"]*['"]/.test(content)) {
-      violations.push(`${relative} -> direct xgboost-daemon import in app layer`);
-    }
-    if (/from\s+['"][^'"]*ml-training-worker[^'"]*['"]/.test(content)) {
-      violations.push(`${relative} -> direct ml-training-worker import in app layer`);
+  if (!isRouteOrAdmin(relative)) continue;
+
+  if (/from\s+['"][^'"]*xgboost-daemon[^'"]*['"]/.test(content)) {
+    violations.push(`${relative} -> direct xgboost-daemon import in app layer`);
+  }
+  if (/from\s+['"][^'"]*ml-training-worker[^'"]*['"]/.test(content)) {
+    violations.push(`${relative} -> direct ml-training-worker import in app layer`);
+  }
+}
+
+// Prevent browser/client components from importing known server-only training
+// boundaries through aliases or relative paths. This closes the common bypass
+// where an API route check passes but a Client Component reaches the worker via
+// a shared module.
+for (const file of files) {
+  const relative = relativePath(file);
+  const content = fs.readFileSync(file, 'utf8');
+  if (!/\.(tsx|jsx)$/.test(relative) || !isAppLayer(relative)) continue;
+
+  if (/['"]use client['"]/.test(content)) {
+    if (/from\s+['"][^'"]*(?:ml-training-worker|xgboost-daemon)[^'"]*['"]/.test(content)) {
+      violations.push(`${relative} -> client component imports server-only training boundary`);
     }
   }
 }
