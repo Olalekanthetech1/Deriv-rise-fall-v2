@@ -4,7 +4,7 @@ import { buildDurationTrainingDataset, listDurationTrainingDatasets } from '@/li
 import { expandTrainingDurations, type DerivDurationRange, type DerivDurationUnit } from '@/lib/deriv-duration-registry';
 import { getCachedOrDiscoverDuration } from '@/lib/deriv-duration-cache';
 import { initializeMlPipelineConfig } from '@/lib/ml-pipeline-config';
-import { claimNextAutoDatasetJobItem, completeAutoDatasetJobItem, createAutoDatasetJob, failAutoDatasetJobItem, getAutoDatasetJob, getAutoDatasetJobItemStatus, getLatestAutoDatasetJob, refreshAutoDatasetJobStatus, discardAutoDatasetBuild } from '@/lib/auto-dataset-job-store';
+import { archiveAutoDatasetJob, claimNextAutoDatasetJobItem, completeAutoDatasetJobItem, createAutoDatasetJob, failAutoDatasetJobItem, getAutoDatasetJob, getAutoDatasetJobItemStatus, getLatestAutoDatasetJob, refreshAutoDatasetJobStatus, discardAutoDatasetBuild, skipAutoDatasetJobItem } from '@/lib/auto-dataset-job-store';
 import { formatReadableDatasetName } from '@/lib/ml-display-formatters';
 
 function isAuthenticated(req: NextRequest): boolean {
@@ -21,11 +21,9 @@ function matchingRanges(discovery: Awaited<ReturnType<typeof getCachedOrDiscover
     return (value - range.min) % step === 0;
   });
 }
-
 function expandTrainingHorizonLadder(ranges: DerivDurationRange[]): Array<{ value: number; unit: DerivDurationUnit; rangeId: string }> {
   return expandTrainingDurations(ranges, 10000);
 }
-
 function trainingEligibleDatasets<T extends Record<string, any>>(datasets: T[]): T[] {
   const eligible = datasets
     .filter((dataset) => dataset?.status === 'completed' && dataset?.leakage_check_passed === true && Number(dataset?.sample_count ?? 0) > 0)
@@ -41,7 +39,6 @@ function trainingEligibleDatasets<T extends Record<string, any>>(datasets: T[]):
     return true;
   });
 }
-
 function withReadableDatasetNames<T extends Record<string, any>>(datasets: T[]): T[] {
   return datasets.map((dataset) => ({
     ...dataset,
@@ -54,6 +51,14 @@ function withReadableDatasetNames<T extends Record<string, any>>(datasets: T[]):
     }),
     raw_name: dataset.name,
   }));
+}
+
+/**
+ * These are deterministic data-feasibility outcomes. They should be visible to
+ * admins as skipped horizons, not as infrastructure/training failures.
+ */
+function isFeasibilitySkip(message: string): boolean {
+  return /^(No persisted real ticks can satisfy|No non-flat directional samples could be constructed|Temporal split validation failed|Insufficient real Deriv ticks|The duration-aware feature window requires)/i.test(message.trim());
 }
 
 const activeLocalWorkers = new Set<string>();
@@ -84,8 +89,13 @@ async function runAutoDatasetWorker(jobId: string): Promise<void> {
       console.info('[AUTO dataset item completed]', JSON.stringify({ jobId, itemIndex: item.itemIndex, value: item.value, unit: item.unit, memoryBeforeMb: Math.round(memoryBefore / 1048576), memoryAfterMb: Math.round(memoryAfter / 1048576) }));
     } catch (error) {
       const message = error instanceof Error ? error.message : String(error);
-      await failAutoDatasetJobItem(jobId, item.id, message);
-      console.error('[AUTO dataset item failed]', JSON.stringify({ jobId, itemIndex: item.itemIndex, value: item.value, unit: item.unit, error: message }));
+      if (isFeasibilitySkip(message)) {
+        await skipAutoDatasetJobItem(jobId, item.id, message);
+        console.info('[AUTO dataset horizon skipped]', JSON.stringify({ jobId, itemIndex: item.itemIndex, value: item.value, unit: item.unit, reason: message }));
+      } else {
+        await failAutoDatasetJobItem(jobId, item.id, message);
+        console.error('[AUTO dataset item failed]', JSON.stringify({ jobId, itemIndex: item.itemIndex, value: item.value, unit: item.unit, error: message }));
+      }
     }
   } catch (error) {
     console.error('[AUTO dataset worker error]:', error);
@@ -137,6 +147,20 @@ export async function GET(req: NextRequest) {
   }
 }
 
+export async function DELETE(req: NextRequest) {
+  if (!isAuthenticated(req)) return NextResponse.json({ error: 'Unauthorized admin access.' }, { status: 401, headers: noStore() });
+  try {
+    const jobId = req.nextUrl.searchParams.get('autoJobId')?.trim();
+    if (!jobId) return NextResponse.json({ success: false, error: 'autoJobId is required.' }, { status: 400, headers: noStore() });
+    const result = await archiveAutoDatasetJob(jobId);
+    if (result.active) return NextResponse.json({ success: false, error: 'The AUTO build is still running. Stop/wait for it to finish before archiving its report.' }, { status: 409, headers: noStore() });
+    if (!result.archived) return NextResponse.json({ success: false, error: 'AUTO build report was not found.' }, { status: 404, headers: noStore() });
+    return NextResponse.json({ success: true, archived: true, message: 'AUTO report archived. Persisted training datasets, training runs and registered models were not modified.' }, { headers: noStore() });
+  } catch (error) {
+    return NextResponse.json({ success: false, error: error instanceof Error ? error.message : 'Unable to archive AUTO dataset build report.' }, { status: 500, headers: noStore() });
+  }
+}
+
 export async function POST(req: NextRequest) {
   if (!isAuthenticated(req)) return NextResponse.json({ error: 'Unauthorized admin access.' }, { status: 401, headers: noStore() });
   try {
@@ -156,9 +180,9 @@ export async function POST(req: NextRequest) {
       }
       const job = await createAutoDatasetJob(symbol, durations);
       resumeAutoDatasetJob(job.id);
-      const result = { status: job.status, jobId: job.id, requestedCount: job.requestedCount, completedCount: job.completedCount, failedCount: job.failedCount };
+      const result = { status: job.status, jobId: job.id, requestedCount: job.requestedCount, completedCount: job.completedCount, skippedCount: job.skippedCount, failedCount: job.failedCount };
       const scope = requestedUnit ? ` for ${requestedUnit}` : '';
-      return NextResponse.json({ success: true, accepted: true, jobId: job.id, requestedCount: job.requestedCount, completedCount: job.completedCount, failedCount: job.failedCount, dataSource: 'deriv-real-ticks', durationSource: resolved.source, durationRefreshing: resolved.refreshing, result, job, message: `AUTO dataset build started for all ${job.requestedCount} dynamically derived horizon samples${scope}.` }, { status: 202, headers: noStore() });
+      return NextResponse.json({ success: true, accepted: true, jobId: job.id, requestedCount: job.requestedCount, completedCount: job.completedCount, skippedCount: job.skippedCount, failedCount: job.failedCount, dataSource: 'deriv-real-ticks', durationSource: resolved.source, durationRefreshing: resolved.refreshing, result, job, message: `AUTO dataset build started for all ${job.requestedCount} dynamically derived horizon samples${scope}.` }, { status: 202, headers: noStore() });
     }
     const legacyHorizon = body?.horizonTicks;
     const durationValue = legacyHorizon != null ? Number(legacyHorizon) : Number(body?.durationValue);
