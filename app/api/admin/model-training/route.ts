@@ -1,7 +1,8 @@
 import { NextRequest, NextResponse } from 'next/server';
 import { verifySessionToken } from '../auth/route';
 import { getMlModelKeys, type MlModelKey } from '@/lib/ml-model-registry';
-import { clearTrainingRunHistory, listTrainingRuns, trainDatasetModels } from '@/lib/ml-training-orchestrator';
+import { clearTrainingRunHistory, listTrainingRuns } from '@/lib/ml-training-orchestrator';
+import { enqueueTrainingJob, listTrainingQueueJobs, recoverStaleTrainingJobs } from '@/lib/ml-training-queue';
 import { xgboostDaemon } from '@/lib/xgboost-daemon';
 
 function isAdmin(req: NextRequest): boolean {
@@ -40,9 +41,17 @@ function withLiveDiagnostics(runs: any[]) {
 export async function GET(req: NextRequest) {
   if (!isAdmin(req)) return NextResponse.json({ success: false, error: 'Unauthorized admin access.' }, { status: 401, headers: noStore() });
   try {
+    await recoverStaleTrainingJobs();
     const symbol = req.nextUrl.searchParams.get('symbol')?.trim().toUpperCase() || undefined;
-    const runs = await listTrainingRuns(symbol);
-    return NextResponse.json({ success: true, runs: withLiveDiagnostics(runs), modelTypes: getMlModelKeys(), dataSource: 'live-database-plus-native-runtime' }, { headers: noStore() });
+    const [runs, queue] = await Promise.all([listTrainingRuns(symbol), listTrainingQueueJobs()]);
+    const filteredQueue = symbol ? queue.filter((job) => job.datasetId === symbol || !job.datasetId) : queue;
+    return NextResponse.json({
+      success: true,
+      runs: withLiveDiagnostics(runs),
+      queue: filteredQueue,
+      modelTypes: getMlModelKeys(),
+      dataSource: 'live-database-plus-native-runtime-plus-worker-queue',
+    }, { headers: noStore() });
   } catch (error) {
     return NextResponse.json({ success: false, error: error instanceof Error ? error.message : 'Unable to load training runs.' }, { status: 503, headers: noStore() });
   }
@@ -55,13 +64,18 @@ export async function POST(req: NextRequest) {
     const datasetId = typeof body?.datasetId === 'string' ? body.datasetId.trim() : '';
     if (!datasetId) return NextResponse.json({ success: false, error: 'datasetId is required. Select a completed leakage-validated dataset.' }, { status: 400, headers: noStore() });
     const requested = Array.isArray(body?.modelTypes) ? body.modelTypes.filter((value: unknown): value is MlModelKey => typeof value === 'string' && getMlModelKeys().includes(value as MlModelKey)) : undefined;
-    if (Array.isArray(body?.modelTypes) && body.modelTypes.length > 0 && (!requested || requested.length !== body.modelTypes.length)) return NextResponse.json({ success: false, error: 'One or more requested model types are not registered.' }, { status: 400, headers: noStore() });
-    const result = await trainDatasetModels({ datasetId, modelTypes: requested });
-    const terminalSuccess = result.status === 'completed' || result.status === 'partial';
-    return NextResponse.json({ success: terminalSuccess, dataSource: 'persisted-real-tick-dataset', ...result }, { status: terminalSuccess ? 201 : 504, headers: noStore() });
+    if (Array.isArray(body?.modelTypes) && body.modelTypes.length > 0 && (!requested || requested.length !== body.modelTypes.length)) return NextResponse.json({ success: false, error: 'One or more requested model types are not registered for production training. Experimental models must be launched explicitly from the Experimental Lab.' }, { status: 400, headers: noStore() });
+    const job = await enqueueTrainingJob({ datasetId, modelTypes: requested });
+    return NextResponse.json({
+      success: true,
+      queued: true,
+      dataSource: 'persisted-real-tick-dataset',
+      workerBoundary: 'dedicated-ml-worker',
+      ...job,
+    }, { status: 202, headers: noStore() });
   } catch (error) {
-    const message = error instanceof Error ? error.message : 'Model training failed.';
-    const status = /TRAINING_ALREADY_RUNNING/i.test(message) ? 409 : /DATASET|INSUFFICIENT|INVALID_|SCHEMA|REQUIRED|NO_REGISTERED/i.test(message) ? 422 : /DATABASE/i.test(message) ? 503 : 500;
+    const message = error instanceof Error ? error.message : 'Model training could not be queued.';
+    const status = /TRAINING_ALREADY_(RUNNING|QUEUED)/i.test(message) ? 409 : /REQUIRED/i.test(message) ? 400 : /DATABASE/i.test(message) ? 503 : 500;
     return NextResponse.json({ success: false, error: message }, { status, headers: noStore() });
   }
 }
