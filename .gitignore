@@ -7,6 +7,10 @@ coverage/
 .env*
 !.env.example
 
+# Python generated caches
+__pycache__/
+*.py[cod]
+
 # Machine Learning Models
 models_cache/
 *.pkl
