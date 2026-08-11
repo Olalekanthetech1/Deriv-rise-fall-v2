@@ -25,11 +25,29 @@ export type DurationModelRegistration = {
   hyperparameters: unknown;
 };
 
+const UUID_PATTERN = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
+
+function normalizeUuid(value: string, fieldName: string): string {
+  const normalized = String(value ?? '').trim();
+  if (!UUID_PATTERN.test(normalized)) {
+    throw new Error(`INVALID_${fieldName.toUpperCase()}_UUID`);
+  }
+  return normalized;
+}
+
 export async function registerDurationModel(data: DurationModelRegistration): Promise<void> {
   const url = getDbConnectionString();
   if (!url || !(await initDbSchema())) throw new Error('DATABASE_UNAVAILABLE');
   const sql = neon(url);
   await ensureTrainingDurationSchema(sql);
+
+  // training_datasets.id and ml_model_registry_v2.dataset_id are UUID columns.
+  // Bind the value as UUID at the SQL boundary instead of leaving it as an
+  // untyped/text parameter. This prevents PostgreSQL from rejecting otherwise
+  // valid model registrations after the native training step has completed.
+  const datasetId = normalizeUuid(data.datasetId, 'dataset_id');
+  const trainingRunId = normalizeUuid(data.trainingRunId, 'training_run_id');
+
   await sql`
     INSERT INTO ml_model_registry_v2 (
       model_id, model_family, version, asset_symbol, asset_class, horizon_ticks,
@@ -39,7 +57,7 @@ export async function registerDurationModel(data: DurationModelRegistration): Pr
     ) VALUES (
       ${data.modelId}::text, ${data.modelFamily}::text, ${data.version}::text, ${data.symbol}::text, ${data.assetClass}::text, ${data.effectiveHorizonTicks}::integer,
       ${data.durationValue}::integer, ${data.durationUnit}::varchar, ${data.durationSeconds}::numeric, ${data.durationUnit === 't' ? 'tick' : 'time'}::varchar,
-      ${data.datasetId}::text, ${data.format}::text, ${data.status}::varchar, ${data.featureSchemaVersion}::text, ${data.framework}::text, ${data.trainingRunId}::uuid,
+      ${datasetId}::uuid, ${data.format}::text, ${data.status}::varchar, ${data.featureSchemaVersion}::text, ${data.framework}::text, ${trainingRunId}::uuid,
       ${data.strategyKey}::text, ${data.strategyVersion}::text, ${JSON.stringify(data.strategyMetadata ?? {})}::jsonb,
       ${JSON.stringify(data.metrics ?? {})}::jsonb, ${JSON.stringify(data.hyperparameters ?? {})}::jsonb, NOW()
     )
