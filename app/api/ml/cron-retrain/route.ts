@@ -19,6 +19,15 @@ function normalizeSymbol(value: string): string {
   return value.trim().toUpperCase();
 }
 
+type LiveSymbolRecord = {
+  isOpen?: unknown;
+  symbol?: unknown;
+};
+
+function isLiveSymbolRecord(value: unknown): value is LiveSymbolRecord {
+  return typeof value === 'object' && value !== null;
+}
+
 async function resolveLiveSymbols(req: NextRequest, requestedSymbol: string): Promise<string[]> {
   if (requestedSymbol !== 'ALL_ASSETS') return [normalizeSymbol(requestedSymbol)];
   const response = await fetch(new URL('/api/symbols', req.url), { cache: 'no-store' });
@@ -26,11 +35,14 @@ async function resolveLiveSymbols(req: NextRequest, requestedSymbol: string): Pr
   if (!response.ok || !Array.isArray(data?.symbols)) {
     throw new Error(data?.error || 'Live Deriv symbol discovery is unavailable.');
   }
-  const symbols = [...new Set(
+
+  const symbols: string[] = Array.from(new Set(
     data.symbols
-      .filter((item: any) => item?.isOpen && typeof item?.symbol === 'string' && item.symbol.trim())
-      .map((item: any) => normalizeSymbol(item.symbol)),
-  )];
+      .filter(isLiveSymbolRecord)
+      .filter((item): item is LiveSymbolRecord & { isOpen: true; symbol: string } => item.isOpen === true && typeof item.symbol === 'string' && item.symbol.trim().length > 0)
+      .map((item) => normalizeSymbol(item.symbol)),
+  ));
+
   if (!symbols.length) throw new Error('No open Deriv symbols are currently available for fleet retraining.');
   return symbols;
 }
