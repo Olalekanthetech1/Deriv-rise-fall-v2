@@ -33,10 +33,10 @@ function sleep(ms: number) { return new Promise((resolve) => setTimeout(resolve,
 function startJobHeartbeat(job: TrainingQueueJob) {
   let active = true;
   const beat = async () => {
-    if (!active || stopping) return;
+    if (!active) return;
     try {
       await heartbeatTrainingJob(job.jobId, workerId);
-      await recordWorkerHeartbeat(workerId, 'online');
+      await recordWorkerHeartbeat(workerId, stopping && !activeJob ? 'stopping' : 'online');
     } catch (error) {
       console.error('[ML Worker] heartbeat failed:', error);
     }
@@ -100,9 +100,8 @@ async function main() {
 async function shutdown(signal: string) {
   if (stopping) return;
   stopping = true;
-  stopActiveHeartbeat?.();
-  try { await recordWorkerHeartbeat(workerId, 'stopping'); } catch { /* best effort */ }
-  console.warn(`[ML Worker] received ${signal}; activeJob=${activeJob?.jobId || 'none'}; allowing lease recovery if Render terminates the process.`);
+  try { await recordWorkerHeartbeat(workerId, activeJob ? 'online' : 'stopping'); } catch { /* best effort */ }
+  console.warn(`[ML Worker] received ${signal}; activeJob=${activeJob?.jobId || 'none'}; active training keeps heartbeating until termination.`);
 }
 
 process.on('SIGTERM', () => { void shutdown('SIGTERM'); });
