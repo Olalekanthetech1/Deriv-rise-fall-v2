@@ -2,7 +2,7 @@
 
 import Link from 'next/link';
 import { useEffect, useMemo, useState } from 'react';
-import { ArrowLeft, BrainCircuit, CheckCircle2, Database, Layers3, Play, RefreshCw, ShieldCheck, Trash2, XCircle } from 'lucide-react';
+import { ArrowLeft, BrainCircuit, CheckCircle2, Database, Filter, Layers3, Play, RefreshCw, ShieldCheck, Trash2, XCircle } from 'lucide-react';
 
 type ModelKey = 'xgboost'|'lightgbm'|'catboost'|'tcn'|'lstm'|'hmm'|'isolation_forest';
 type Dataset = { id:string; name:string; asset_symbol:string; raw_asset_symbol?:string; duration_value:number; duration_unit:string; duration_seconds:number|null; horizon_ticks:number; status:string; leakage_check_passed:boolean; sample_count:number; train_count:number };
@@ -11,17 +11,33 @@ type Run = { run_id:string; dataset_id:string; asset_symbol:string; raw_asset_sy
 type BatchItem = { dataset_id:string; status:string; requested_models:ModelKey[]; skipped_models:ModelKey[]; completed_models:number; failed_models:number; asset_symbol?:string; duration_value?:number; duration_unit?:string; horizon_ticks?:number; run_id?:string|null; error?:string|null };
 type Batch = { batch_id:string; status:string; requested_datasets:number; requested_models:number; total_jobs:number; completed_jobs:number; failed_jobs:number; skipped_jobs:number; heartbeat_at?:string|null; completed_at?:string|null; error?:string|null; items:BatchItem[] };
 
+type HorizonOption = { key:string; value:number; unit:string; seconds:number; label:string };
+
 const MODEL_LABELS: Record<ModelKey,string> = { xgboost:'XGBoost', lightgbm:'LightGBM', catboost:'CatBoost', tcn:'TCN', lstm:'LSTM / GRU', hmm:'HMM Regime', isolation_forest:'Isolation Forest' };
 const ALL_MODELS = Object.keys(MODEL_LABELS) as ModelKey[];
 const UNIT_LABELS: Record<string,string> = { t:'ticks', s:'seconds', m:'minutes', h:'hours', d:'days' };
+const UNIT_SHORT: Record<string,string> = { t:'t', s:'s', m:'m', h:'h', d:'d' };
 const durationText = (value:number, unit:string) => `${value} ${UNIT_LABELS[unit] || unit}`;
 const metric = (metrics?:Record<string,unknown>) => { const value = Number(metrics?.accuracy); return Number.isFinite(value) ? `${value.toFixed(2)}%` : '—'; };
 const failureStatus = (status:string) => ['failed','timed_out','cancelled'].includes(status);
 
+function durationSeconds(dataset: Pick<Dataset,'duration_value'|'duration_unit'|'duration_seconds'>) {
+  if (Number.isFinite(dataset.duration_seconds)) return Number(dataset.duration_seconds);
+  const value = Number(dataset.duration_value);
+  switch (dataset.duration_unit) {
+    case 't': return value;
+    case 's': return value;
+    case 'm': return value * 60;
+    case 'h': return value * 3600;
+    case 'd': return value * 86400;
+    default: return value;
+  }
+}
+
 function statusClass(status:string) {
   if (status === 'completed') return 'border-emerald-400/20 bg-emerald-400/10 text-emerald-300';
   if (status === 'partial') return 'border-amber-400/20 bg-amber-400/10 text-amber-200';
-  if (status === 'failed' || status === 'timed_out' || status === 'cancelled') return 'border-red-400/20 bg-red-400/10 text-red-200';
+  if (failureStatus(status)) return 'border-red-400/20 bg-red-400/10 text-red-200';
   return 'border-cyan-400/20 bg-cyan-400/10 text-cyan-200';
 }
 
@@ -38,13 +54,31 @@ export default function TrainingPipelinePage() {
   const [busy,setBusy] = useState(false);
   const [error,setError] = useState<string|null>(null);
   const [message,setMessage] = useState<string|null>(null);
+  const [assetFilter,setAssetFilter] = useState('all');
+  const [horizonFilter,setHorizonFilter] = useState('all');
 
   const readyDatasets = useMemo(() => datasets.filter((d) => d.status === 'completed' && d.leakage_check_passed), [datasets]);
+  const assetOptions = useMemo(() => Array.from(new Map(readyDatasets.map((d) => [d.asset_symbol, d])).values()).sort((a,b) => a.asset_symbol.localeCompare(b.asset_symbol)), [readyDatasets]);
+  const horizonOptions = useMemo<HorizonOption[]>(() => {
+    const map = new Map<string,HorizonOption>();
+    for (const dataset of readyDatasets) {
+      const seconds = durationSeconds(dataset);
+      const key = Number.isFinite(dataset.duration_seconds) ? `sec:${seconds}` : `${dataset.duration_value}:${dataset.duration_unit}`;
+      if (!map.has(key)) map.set(key, { key, value: dataset.duration_value, unit: dataset.duration_unit, seconds, label: `${dataset.duration_value}${UNIT_SHORT[dataset.duration_unit] || dataset.duration_unit}` });
+    }
+    return [...map.values()].sort((a,b) => a.seconds - b.seconds || a.label.localeCompare(b.label));
+  }, [readyDatasets]);
+  const filteredDatasets = useMemo(() => readyDatasets.filter((dataset) => {
+    const assetMatch = assetFilter === 'all' || dataset.asset_symbol === assetFilter;
+    const horizonMatch = horizonFilter === 'all' || horizonOptions.some((option) => option.key === horizonFilter && Math.abs(durationSeconds(dataset) - option.seconds) < 0.000001);
+    return assetMatch && horizonMatch;
+  }), [readyDatasets, assetFilter, horizonFilter, horizonOptions]);
   const selected = useMemo(() => datasets.find((d) => d.id === selectedDataset), [datasets, selectedDataset]);
   const runningRuns = useMemo(() => runs.filter((run) => run.status === 'running'), [runs]);
   const failedRunCount = useMemo(() => runs.filter((run) => failureStatus(run.status)).length, [runs]);
   const batchActive = !!batch && ['queued','running','partial'].includes(batch.status);
   const estimatedJobs = selectedDatasets.length * models.length;
+  const allFilteredSelected = filteredDatasets.length > 0 && filteredDatasets.every((dataset) => selectedDatasets.includes(dataset.id));
 
   async function load() {
     setLoading(true); setError(null);
@@ -81,10 +115,26 @@ export default function TrainingPipelinePage() {
     const timer = setInterval(() => { void load(); if (batch?.batch_id) void loadBatch(batch.batch_id).catch(() => undefined); }, 5000);
     return () => clearInterval(timer);
   }, [runningRuns.length, batchActive, batch?.batch_id]);
+  useEffect(() => {
+    if (selectedDataset && filteredDatasets.some((dataset) => dataset.id === selectedDataset)) return;
+    setSelectedDataset(filteredDatasets[0]?.id || '');
+  }, [filteredDatasets, selectedDataset]);
+  useEffect(() => {
+    if (horizonFilter !== 'all' && !horizonOptions.some((option) => option.key === horizonFilter)) setHorizonFilter('all');
+    if (assetFilter !== 'all' && !assetOptions.some((option) => option.asset_symbol === assetFilter)) setAssetFilter('all');
+  }, [horizonOptions, assetOptions, horizonFilter, assetFilter]);
 
   function toggleDataset(id:string) { setSelectedDatasets((current) => current.includes(id) ? current.filter((item) => item !== id) : [...current,id]); }
   function toggleModel(model:ModelKey) { setModels((current) => current.includes(model) ? current.filter((item) => item !== model) : [...current,model]); }
-  function selectAllDatasets() { setSelectedDatasets(selectedDatasets.length === readyDatasets.length ? [] : readyDatasets.map((item) => item.id)); }
+  function selectFilteredDatasets() {
+    if (allFilteredSelected) {
+      const visibleIds = new Set(filteredDatasets.map((dataset) => dataset.id));
+      setSelectedDatasets((current) => current.filter((id) => !visibleIds.has(id)));
+      return;
+    }
+    setSelectedDatasets((current) => Array.from(new Set([...current, ...filteredDatasets.map((dataset) => dataset.id)])));
+  }
+  function clearDatasetSelection() { setSelectedDatasets([]); }
   function selectAllModels() { setModels(models.length === ALL_MODELS.length ? [] : ALL_MODELS); }
 
   async function startSingle() {
@@ -146,11 +196,21 @@ export default function TrainingPipelinePage() {
     {error && <div className="mb-5 rounded-2xl border border-red-400/20 bg-red-400/[0.05] p-4 text-sm text-red-200">{error}</div>}
     {message && <div className="mb-5 flex items-center gap-2 rounded-2xl border border-emerald-400/20 bg-emerald-400/[0.05] p-4 text-sm text-emerald-200"><CheckCircle2 className="h-4 w-4"/>{message}</div>}
 
-    <section className="mb-6 rounded-3xl border border-cyan-400/15 bg-cyan-400/[0.025] p-5"><div className="mb-4 flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between"><div className="flex items-center gap-2"><Layers3 className="h-4 w-4 text-cyan-300"/><div><h2 className="text-sm font-bold">Training Plan — Multiple Datasets</h2><p className="mt-1 text-xs text-slate-500">Select individual datasets or all eligible horizons. Completed compatible models are skipped by default.</p></div></div><button onClick={selectAllDatasets} disabled={!readyDatasets.length || busy || batchActive} className="rounded-xl border border-white/10 bg-white/5 px-3 py-2 text-xs font-semibold text-cyan-200 disabled:opacity-40">{selectedDatasets.length === readyDatasets.length && readyDatasets.length ? 'Clear all' : 'Select all'}</button></div><div className="grid max-h-72 gap-2 overflow-auto sm:grid-cols-2 lg:grid-cols-3">{readyDatasets.map((dataset) => <button key={dataset.id} onClick={() => toggleDataset(dataset.id)} disabled={busy || batchActive} className={`flex items-center justify-between rounded-xl border px-3 py-3 text-left ${selectedDatasets.includes(dataset.id) ? 'border-cyan-400/25 bg-cyan-400/[0.08]' : 'border-white/10 bg-black/20'}`}><span><span className="block text-xs font-bold">{dataset.asset_symbol} · {durationText(dataset.duration_value,dataset.duration_unit)}</span><span className="mt-1 block text-[10px] text-slate-500">{dataset.sample_count.toLocaleString()} samples · {dataset.horizon_ticks.toLocaleString()} ticks</span></span>{selectedDatasets.includes(dataset.id) ? <CheckCircle2 className="h-4 w-4 text-emerald-300"/> : <XCircle className="h-4 w-4 text-slate-700"/>}</button>)}</div><div className="mt-4 grid gap-3 sm:grid-cols-2 lg:grid-cols-4"><label className="flex items-center gap-2 rounded-xl border border-white/10 bg-black/20 px-3 py-3 text-xs"><input type="checkbox" checked={skipCompleted} onChange={(e) => setSkipCompleted(e.target.checked)} disabled={busy || batchActive}/><span><strong>Skip completed</strong><span className="block text-[10px] text-slate-500">Do not retrain compatible registered models.</span></span></label><label className="flex items-center gap-2 rounded-xl border border-white/10 bg-black/20 px-3 py-3 text-xs"><input type="checkbox" checked={retryFailed} onChange={(e) => setRetryFailed(e.target.checked)} disabled={busy || batchActive}/><span><strong>Retry failed</strong><span className="block text-[10px] text-slate-500">Leave failed models eligible for a future plan.</span></span></label><div className="rounded-xl border border-white/10 bg-black/20 px-3 py-3"><span className="block text-[10px] uppercase text-slate-600">Datasets</span><strong className="text-lg">{selectedDatasets.length}</strong></div><div className="rounded-xl border border-cyan-400/15 bg-cyan-400/[0.05] px-3 py-3"><span className="block text-[10px] uppercase text-slate-600">Estimated jobs</span><strong className="text-lg text-cyan-200">{estimatedJobs.toLocaleString()}</strong></div></div><button onClick={() => void startBatch()} disabled={!selectedDatasets.length || !models.length || busy || batchActive || runningRuns.length > 0 || loading} className="mt-4 flex w-full items-center justify-center gap-2 rounded-xl bg-cyan-400 px-4 py-3 text-sm font-black text-slate-950 disabled:opacity-50"><Play className="h-4 w-4"/>{busy ? 'Working…' : `Train ${selectedDatasets.length} dataset${selectedDatasets.length === 1 ? '' : 's'} × ${models.length} model${models.length === 1 ? '' : 's'}`}</button></section>
+    <section className="mb-6 rounded-3xl border border-cyan-400/15 bg-cyan-400/[0.025] p-5"><div className="mb-4 flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between"><div className="flex items-center gap-2"><Layers3 className="h-4 w-4 text-cyan-300"/><div><h2 className="text-sm font-bold">Training Plan — Multiple Datasets</h2><p className="mt-1 text-xs text-slate-500">Filter by asset and horizon, then select individual datasets or all currently visible eligible datasets.</p></div></div><div className="flex flex-wrap gap-2"><button onClick={selectFilteredDatasets} disabled={!filteredDatasets.length || busy || batchActive} className="rounded-xl border border-white/10 bg-white/5 px-3 py-2 text-xs font-semibold text-cyan-200 disabled:opacity-40">{allFilteredSelected ? 'Clear filtered' : 'Select all filtered'}</button><button onClick={clearDatasetSelection} disabled={!selectedDatasets.length || busy || batchActive} className="rounded-xl border border-white/10 bg-white/5 px-3 py-2 text-xs font-semibold text-slate-300 disabled:opacity-40">Clear selection</button></div></div>
+
+      <div className="mb-4 grid gap-3 md:grid-cols-2"><label className="rounded-xl border border-white/10 bg-black/20 p-3"><span className="mb-1 flex items-center gap-2 text-[10px] font-bold uppercase tracking-wider text-slate-500"><Filter className="h-3.5 w-3.5"/>Asset</span><select value={assetFilter} onChange={(e) => setAssetFilter(e.target.value)} disabled={busy || batchActive} className="w-full bg-transparent text-sm font-semibold outline-none"><option value="all">All assets</option>{assetOptions.map((asset) => <option key={asset.asset_symbol} value={asset.asset_symbol}>{asset.asset_symbol}</option>)}</select></label><label className="rounded-xl border border-cyan-400/15 bg-cyan-400/[0.04] p-3"><span className="mb-1 flex items-center gap-2 text-[10px] font-bold uppercase tracking-wider text-cyan-300"><Filter className="h-3.5 w-3.5"/>Horizon</span><select value={horizonFilter} onChange={(e) => setHorizonFilter(e.target.value)} disabled={busy || batchActive} className="w-full bg-transparent text-sm font-semibold outline-none"><option value="all">All horizons</option>{horizonOptions.map((option) => <option key={option.key} value={option.key}>{option.label} — {durationText(option.value,option.unit)}</option>)}</select></label></div>
+
+      <div className="mb-4 flex flex-wrap gap-2"><button onClick={() => setHorizonFilter('all')} disabled={busy || batchActive} className={`rounded-full border px-3 py-1.5 text-xs font-bold ${horizonFilter === 'all' ? 'border-cyan-400/30 bg-cyan-400/10 text-cyan-200' : 'border-white/10 bg-black/20 text-slate-500'}`}>All</button>{horizonOptions.map((option) => <button key={option.key} onClick={() => setHorizonFilter(option.key)} disabled={busy || batchActive} className={`rounded-full border px-3 py-1.5 text-xs font-bold ${horizonFilter === option.key ? 'border-cyan-400/30 bg-cyan-400/10 text-cyan-200' : 'border-white/10 bg-black/20 text-slate-500'}`}>{option.label}</button>)}</div>
+
+      <div className="mb-3 flex items-center justify-between text-[11px] text-slate-500"><span>Showing <strong className="text-slate-300">{filteredDatasets.length}</strong> of {readyDatasets.length} eligible datasets</span><span>Selected <strong className="text-cyan-200">{selectedDatasets.length}</strong></span></div>
+      {filteredDatasets.length === 0 ? <div className="rounded-2xl border border-dashed border-white/10 p-8 text-center text-sm text-slate-500">No eligible datasets match the current filters.</div> : <div className="grid max-h-72 gap-2 overflow-auto sm:grid-cols-2 lg:grid-cols-3">{filteredDatasets.map((dataset) => <button key={dataset.id} onClick={() => toggleDataset(dataset.id)} disabled={busy || batchActive} className={`flex items-center justify-between rounded-xl border px-3 py-3 text-left ${selectedDatasets.includes(dataset.id) ? 'border-cyan-400/25 bg-cyan-400/[0.08]' : 'border-white/10 bg-black/20'}`}><span><span className="block text-xs font-bold">{dataset.asset_symbol} · {durationText(dataset.duration_value,dataset.duration_unit)}</span><span className="mt-1 block text-[10px] text-slate-500">{dataset.sample_count.toLocaleString()} samples · {dataset.horizon_ticks.toLocaleString()} ticks</span></span>{selectedDatasets.includes(dataset.id) ? <CheckCircle2 className="h-4 w-4 text-emerald-300"/> : <XCircle className="h-4 w-4 text-slate-700"/>}</button>)}</div>}
+
+      <div className="mt-4 grid gap-3 sm:grid-cols-2 lg:grid-cols-4"><label className="flex items-center gap-2 rounded-xl border border-white/10 bg-black/20 px-3 py-3 text-xs"><input type="checkbox" checked={skipCompleted} onChange={(e) => setSkipCompleted(e.target.checked)} disabled={busy || batchActive}/><span><strong>Skip completed</strong><span className="block text-[10px] text-slate-500">Do not retrain compatible registered models.</span></span></label><label className="flex items-center gap-2 rounded-xl border border-white/10 bg-black/20 px-3 py-3 text-xs"><input type="checkbox" checked={retryFailed} onChange={(e) => setRetryFailed(e.target.checked)} disabled={busy || batchActive}/><span><strong>Retry failed</strong><span className="block text-[10px] text-slate-500">Leave failed models eligible for a future plan.</span></span></label><div className="rounded-xl border border-white/10 bg-black/20 px-3 py-3"><span className="block text-[10px] uppercase text-slate-600">Datasets</span><strong className="text-lg">{selectedDatasets.length}</strong></div><div className="rounded-xl border border-cyan-400/15 bg-cyan-400/[0.05] px-3 py-3"><span className="block text-[10px] uppercase text-slate-600">Estimated jobs</span><strong className="text-lg text-cyan-200">{estimatedJobs.toLocaleString()}</strong></div></div><button onClick={() => void startBatch()} disabled={!selectedDatasets.length || !models.length || busy || batchActive || runningRuns.length > 0 || loading} className="mt-4 flex w-full items-center justify-center gap-2 rounded-xl bg-cyan-400 px-4 py-3 text-sm font-black text-slate-950 disabled:opacity-50"><Play className="h-4 w-4"/>{busy ? 'Working…' : `Train ${selectedDatasets.length} dataset${selectedDatasets.length === 1 ? '' : 's'} × ${models.length} model${models.length === 1 ? '' : 's'}`}</button>
+    </section>
 
     {batch && <section className="mb-6 rounded-3xl border border-white/10 bg-white/[0.025] p-5"><div className="flex items-center justify-between"><div><h2 className="text-sm font-bold">Training Plan Status</h2><p className="mt-1 font-mono text-[10px] text-slate-600">{batch.batch_id}</p></div><div className={`rounded-full border px-2.5 py-1 text-[10px] font-bold ${statusClass(batch.status)}`}>{batch.status.toUpperCase()}</div></div><div className="mt-4 grid grid-cols-2 gap-3 sm:grid-cols-4"><div><span className="block text-[10px] uppercase text-slate-600">Jobs</span><strong>{batch.total_jobs}</strong></div><div><span className="block text-[10px] uppercase text-slate-600">Completed</span><strong className="text-emerald-300">{batch.completed_jobs}</strong></div><div><span className="block text-[10px] uppercase text-slate-600">Failed</span><strong className="text-red-300">{batch.failed_jobs}</strong></div><div><span className="block text-[10px] uppercase text-slate-600">Skipped</span><strong>{batch.skipped_jobs}</strong></div></div><div className="mt-4 h-2 rounded-full bg-white/5"><div className="h-full rounded-full bg-cyan-400" style={{width:`${batch.total_jobs ? Math.min(100,((batch.completed_jobs + batch.failed_jobs)/batch.total_jobs)*100) : 100}%`}}/></div><div className="mt-4 grid gap-2 sm:grid-cols-2 lg:grid-cols-3">{batch.items.map((item) => <div key={item.dataset_id} className="rounded-xl border border-white/5 bg-black/20 p-3"><div className="flex justify-between gap-2"><span className="text-xs font-semibold">{item.asset_symbol || item.dataset_id}</span><span className={`text-[10px] font-bold ${item.status === 'completed' ? 'text-emerald-300' : item.status === 'failed' || item.status === 'partial' ? 'text-red-300' : 'text-cyan-300'}`}>{item.status}</span></div><p className="mt-1 text-[10px] text-slate-500">{item.duration_value != null ? durationText(Number(item.duration_value),String(item.duration_unit)) : 'dataset'}</p>{item.error && <p className="mt-2 text-[10px] text-red-300">{item.error}</p>}</div>)}</div>{['queued','partial'].includes(batch.status) && <button onClick={() => void resumeBatch()} disabled={busy} className="mt-4 rounded-xl border border-cyan-400/20 bg-cyan-400/[0.05] px-4 py-2 text-xs font-semibold text-cyan-200 disabled:opacity-40">Resume batch</button>}</section>}
 
-    <section className="mb-6 grid gap-4 lg:grid-cols-[1fr_.9fr]"><article className="rounded-3xl border border-white/10 bg-white/[0.025] p-5"><div className="mb-4 flex items-center gap-2 text-sm font-bold text-cyan-300"><Database className="h-4 w-4"/>Single Dataset</div><select value={selectedDataset} onChange={(e) => setSelectedDataset(e.target.value)} disabled={busy || batchActive} className="w-full rounded-xl border border-white/10 bg-black/30 px-4 py-3 text-sm"><option value="">Select a completed dataset</option>{readyDatasets.map((d) => <option key={d.id} value={d.id}>{d.asset_symbol} · {durationText(d.duration_value,d.duration_unit)} · {d.sample_count.toLocaleString()} samples</option>)}</select>{selected && <div className="mt-4 grid grid-cols-2 gap-3"><div className="rounded-xl border border-white/10 bg-black/20 p-3"><span className="block text-[10px] uppercase text-slate-600">Horizon</span><strong>{durationText(selected.duration_value,selected.duration_unit)}</strong></div><div className="rounded-xl border border-emerald-400/10 bg-emerald-400/[0.03] p-3"><span className="block text-[10px] uppercase text-slate-600">Leakage</span><strong className="text-emerald-300">PASSED</strong></div></div>}<button onClick={() => void startSingle()} disabled={!selectedDataset || !models.length || busy || batchActive || runningRuns.length > 0 || loading} className="mt-4 flex w-full items-center justify-center gap-2 rounded-xl border border-cyan-400/20 bg-cyan-400/[0.06] px-4 py-3 text-sm font-semibold text-cyan-200 disabled:opacity-40"><Play className="h-4 w-4"/>Queue selected dataset</button></article>
+    <section className="mb-6 grid gap-4 lg:grid-cols-[1fr_.9fr]"><article className="rounded-3xl border border-white/10 bg-white/[0.025] p-5"><div className="mb-4 flex items-center gap-2 text-sm font-bold text-cyan-300"><Database className="h-4 w-4"/>Single Dataset</div><select value={selectedDataset} onChange={(e) => setSelectedDataset(e.target.value)} disabled={busy || batchActive} className="w-full rounded-xl border border-white/10 bg-black/30 px-4 py-3 text-sm"><option value="">Select a completed dataset</option>{filteredDatasets.map((d) => <option key={d.id} value={d.id}>{d.asset_symbol} · {durationText(d.duration_value,d.duration_unit)} · {d.sample_count.toLocaleString()} samples</option>)}</select>{selected && filteredDatasets.some((d) => d.id === selected.id) && <div className="mt-4 grid grid-cols-2 gap-3"><div className="rounded-xl border border-white/10 bg-black/20 p-3"><span className="block text-[10px] uppercase text-slate-600">Horizon</span><strong>{durationText(selected.duration_value,selected.duration_unit)}</strong></div><div className="rounded-xl border border-emerald-400/10 bg-emerald-400/[0.03] p-3"><span className="block text-[10px] uppercase text-slate-600">Leakage</span><strong className="text-emerald-300">PASSED</strong></div></div>}<button onClick={() => void startSingle()} disabled={!selectedDataset || !models.length || busy || batchActive || runningRuns.length > 0 || loading || !filteredDatasets.some((d) => d.id === selectedDataset)} className="mt-4 flex w-full items-center justify-center gap-2 rounded-xl border border-cyan-400/20 bg-cyan-400/[0.06] px-4 py-3 text-sm font-semibold text-cyan-200 disabled:opacity-40"><Play className="h-4 w-4"/>Queue selected dataset</button></article>
 
     <article className="rounded-3xl border border-white/10 bg-white/[0.025] p-5"><div className="mb-4 flex items-center justify-between"><div><h2 className="text-sm font-bold">Production Candidate Models</h2><p className="mt-1 text-xs text-slate-500">Transformer is isolated in the Experimental Lab.</p></div><button onClick={selectAllModels} disabled={busy || batchActive} className="text-xs font-semibold text-cyan-300">{models.length === ALL_MODELS.length ? 'Clear' : 'Select all'}</button></div><div className="grid gap-2 sm:grid-cols-2">{ALL_MODELS.map((model) => <button key={model} onClick={() => toggleModel(model)} disabled={busy || batchActive} className={`flex items-center justify-between rounded-xl border px-3 py-3 text-left text-xs ${models.includes(model) ? 'border-cyan-400/20 bg-cyan-400/[0.06]' : 'border-white/10 bg-black/20 text-slate-500'}`}><span>{MODEL_LABELS[model]}</span>{models.includes(model) ? <CheckCircle2 className="h-4 w-4 text-emerald-300"/> : <XCircle className="h-4 w-4"/>}</button>)}</div></article></section>
 
