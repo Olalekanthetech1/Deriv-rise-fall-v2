@@ -27,17 +27,12 @@ function relativePath(file) {
   return path.relative(root, file).replaceAll('\\', '/');
 }
 
-function isAppLayer(relative) {
-  return /^(app|components)\//.test(relative);
-}
-
 function isRouteOrAdmin(relative) {
   return /^app\/(api\/.*|admin\/.*)\.(ts|tsx)$/.test(relative);
 }
 
-// Legacy model registration is a compatibility boundary only. It must not be
-// reachable from application/runtime code. Keep the definition isolated until
-// the compatibility export is removed completely; callers fail the build.
+// The old synchronous model-registration API is not an application boundary.
+// The canonical worker/runtime pipeline owns model persistence now.
 const legacyRegistrationPatterns = [
   /\bregisterModelInDb\b/,
 ];
@@ -54,35 +49,42 @@ for (const file of files) {
   }
 }
 
-// Training execution must remain behind the dedicated queue/worker boundary.
-// Reject imports/references that would let UI, API, or admin code execute the
-// worker/retired daemon directly. The worker itself and shared server modules
-// are intentionally outside this app-layer rule.
+// Training execution must remain behind the canonical ML runtime / dedicated
+// worker boundary. Reject both the retired daemon module and its old symbol.
 for (const file of files) {
   const relative = relativePath(file);
   const content = fs.readFileSync(file, 'utf8');
   if (!isRouteOrAdmin(relative)) continue;
 
-  if (/from\s+['"][^'"]*xgboost-daemon[^'"]*['"]/.test(content)) {
-    violations.push(`${relative} -> direct xgboost-daemon import in app layer`);
+  if (/from\s+['"][^'"]*(?:xgboost-daemon|ml-training-worker)[^'"]*['"]/.test(content)) {
+    violations.push(`${relative} -> direct retired training runtime import in app layer`);
   }
-  if (/from\s+['"][^'"]*ml-training-worker[^'"]*['"]/.test(content)) {
-    violations.push(`${relative} -> direct ml-training-worker import in app layer`);
+  if (/\bxgboostDaemon\b/.test(content)) {
+    violations.push(`${relative} -> retired xgboostDaemon symbol in app layer`);
+  }
+}
+
+// The queue recovery API has one canonical name. Do not allow compatibility
+// aliases to re-enter the production path.
+for (const file of files) {
+  const relative = relativePath(file);
+  if (relative === guardFile) continue;
+  const content = fs.readFileSync(file, 'utf8');
+  if (/\brecoverStaleTrainingJobs\b/.test(content)) {
+    violations.push(`${relative} -> retired training recovery alias`);
   }
 }
 
 // Prevent browser/client components from importing known server-only training
-// boundaries through aliases or relative paths. This closes the common bypass
-// where an API route check passes but a Client Component reaches the worker via
-// a shared module.
+// boundaries through aliases or relative paths.
 for (const file of files) {
   const relative = relativePath(file);
   const content = fs.readFileSync(file, 'utf8');
-  if (!/\.(tsx|jsx)$/.test(relative) || !isAppLayer(relative)) continue;
+  if (!/\.(tsx|jsx)$/.test(relative) || !/^app\//.test(relative)) continue;
 
   if (/['"]use client['"]/.test(content)) {
-    if (/from\s+['"][^'"]*(?:ml-training-worker|xgboost-daemon)[^'"]*['"]/.test(content)) {
-      violations.push(`${relative} -> client component imports server-only training boundary`);
+    if (/from\s+['"][^'"]*(?:ml-training-worker|xgboost-daemon|ml-runtime-client)[^'"]*['"]/.test(content)) {
+      violations.push(`${relative} -> client component imports server-only ML runtime boundary`);
     }
   }
 }
@@ -91,4 +93,4 @@ if (violations.length) {
   throw new Error(`[Gate 6 Legacy Boundary] violations detected:\n${violations.join('\n')}`);
 }
 
-console.log('[Gate 6 Legacy Boundary] passed: no production callers depend on the legacy model-registration compatibility API or bypass the dedicated worker boundary.');
+console.log('[Gate 6 Legacy Boundary] passed: no production callers depend on retired ML runtime, synchronous registration, or compatibility recovery aliases.');
