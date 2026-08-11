@@ -1,11 +1,12 @@
 import { NextRequest, NextResponse } from 'next/server';
 import { verifySessionToken } from '../auth/route';
 import { getMlModelKeys, type MlModelKey } from '@/lib/ml-model-registry';
-import { clearTrainingRunHistory, listTrainingRuns } from '@/lib/ml-training-orchestrator';
-import { clearTerminalTrainingQueueHistory } from '@/lib/ml-training-history';
+import { listTrainingRuns } from '@/lib/ml-training-orchestrator';
+import { clearFailedTrainingRunHistory, clearTerminalTrainingQueueHistory } from '@/lib/ml-training-history';
 import { enqueueTrainingJob, listTrainingQueueJobs, recoverStaleTrainingJobs } from '@/lib/ml-training-queue';
 import { getDb } from '@/lib/db';
 import { xgboostDaemon } from '@/lib/xgboost-daemon';
+import { formatReadableAsset } from '@/lib/ml-display-formatters';
 
 function isAdmin(req: NextRequest): boolean {
   const cookieToken = req.cookies.get('admin_session_token')?.value;
@@ -95,6 +96,15 @@ async function mergeActiveQueueIntoRuns(runs: any[], queue: any[]) {
   return [...queuedRuns, ...runs];
 }
 
+function withReadableAssets(runs: any[]) {
+  return runs.map((run) => ({
+    ...run,
+    raw_asset_symbol: run.asset_symbol,
+    asset_symbol: formatReadableAsset(run.asset_symbol),
+    models: Array.isArray(run.models) ? run.models : [],
+  }));
+}
+
 export async function GET(req: NextRequest) {
   if (!isAdmin(req)) return NextResponse.json({ success: false, error: 'Unauthorized admin access.' }, { status: 401, headers: noStore() });
   try {
@@ -104,7 +114,7 @@ export async function GET(req: NextRequest) {
     const visibleRuns = await mergeActiveQueueIntoRuns(runs, queue);
     return NextResponse.json({
       success: true,
-      runs: withLiveDiagnostics(visibleRuns),
+      runs: withReadableAssets(withLiveDiagnostics(visibleRuns)),
       queue,
       modelTypes: getMlModelKeys(),
       dataSource: 'live-database-plus-native-runtime-plus-worker-queue',
@@ -141,24 +151,23 @@ export async function DELETE(req: NextRequest) {
   if (!isAdmin(req)) return NextResponse.json({ success: false, error: 'Unauthorized admin access.' }, { status: 401, headers: noStore() });
   try {
     const confirmation = req.headers.get('x-confirm-training-history-reset');
-    if (confirmation !== 'DELETE_TRAINING_HISTORY') return NextResponse.json({ success: false, error: 'Explicit confirmation is required to clear training history.' }, { status: 400, headers: noStore() });
+    if (confirmation !== 'DELETE_TRAINING_HISTORY') return NextResponse.json({ success: false, error: 'Explicit confirmation is required to clear failed training history.' }, { status: 400, headers: noStore() });
 
-    // Clear terminal worker-queue failures as part of the same user-visible
-    // history operation. The GET endpoint merges failed queue jobs back into
-    // the history list when their persisted run row no longer exists.
+    // Failed queue jobs are merged back into the history list when their
+    // persisted run row no longer exists, so clean them with the same action.
     const deletedQueueJobs = await clearTerminalTrainingQueueHistory();
-    const result = await clearTrainingRunHistory();
+    const result = await clearFailedTrainingRunHistory();
     return NextResponse.json({
       success: true,
-      message: 'Training history cleared. Datasets, dataset samples, registered models, artifacts, market data and configuration were not targeted.',
+      message: 'Failed training history cleared. Completed and partial runs, datasets, samples, registered models, artifacts, market data and configuration were preserved.',
       deletedQueueJobs,
       ...result,
     }, { headers: noStore() });
   } catch (error) {
-    const message = error instanceof Error ? error.message : 'Unable to clear training history.';
+    const message = error instanceof Error ? error.message : 'Unable to clear failed training history.';
     if (message === 'TRAINING_HISTORY_RESET_BLOCKED_BY_RUNNING_JOBS') {
-      const runningRuns = (error as Error & { runningRuns?: unknown[] }).runningRuns || [];
-      return NextResponse.json({ success: false, error: 'Training history cannot be cleared while a training job is running. Let the active run finish first.', code: message, runningRuns }, { status: 409, headers: noStore() });
+      const runningRuns = (error as Error & { runningRuns?: unknown[]; runningQueueJobs?: unknown[] }).runningRuns || (error as Error & { runningQueueJobs?: unknown[] }).runningQueueJobs || [];
+      return NextResponse.json({ success: false, error: 'Failed history cannot be cleared while training work is active. Let the active job finish first.', code: message, runningRuns }, { status: 409, headers: noStore() });
     }
     return NextResponse.json({ success: false, error: message }, { status: 503, headers: noStore() });
   }
