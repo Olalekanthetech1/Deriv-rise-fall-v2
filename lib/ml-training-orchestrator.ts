@@ -50,30 +50,18 @@ function isStructurallyCompatibleDataset(dataset: any, schema: any): boolean {
   const metadata = asRecord(dataset?.metadata);
   const pipelineConfig = asRecord(metadata?.pipelineConfig);
   if (!pipelineConfig) return false;
-
-  const featureOrder = Array.isArray(pipelineConfig.featureOrder)
-    ? pipelineConfig.featureOrder.map((value) => String(value))
-    : [];
+  const featureOrder = Array.isArray(pipelineConfig.featureOrder) ? pipelineConfig.featureOrder.map((value) => String(value)) : [];
   if (featureOrder.length !== schema.featureCount) return false;
   if (featureOrder.join('|') !== schema.featureOrder.join('|')) return false;
-
   if (Number(pipelineConfig.canonicalFeatureWindowTicks) !== Number(schema.canonicalFeatureWindowTicks)) return false;
-
   const configuredFeatureWindows = asRecord(pipelineConfig.featureWindows);
-  const configuredSequenceLength = Number(
-    pipelineConfig.sequenceLength ?? configuredFeatureWindows?.short ?? NaN,
-  );
+  const configuredSequenceLength = Number(pipelineConfig.sequenceLength ?? configuredFeatureWindows?.short ?? NaN);
   if (configuredSequenceLength !== Number(schema.sequenceLength)) return false;
-
-  const featureWindows = configuredFeatureWindows;
-  if (!featureWindows || !sameFeatureWindows(featureWindows, schema.featureWindows)) return false;
-
+  if (!configuredFeatureWindows || !sameFeatureWindows(configuredFeatureWindows, schema.featureWindows)) return false;
   const splitRatios = asRecord(pipelineConfig.splitRatios);
   if (!splitRatios || !sameSplitRatios(splitRatios, schema.splitRatios)) return false;
-
   if (String(pipelineConfig.normalizationMethod ?? '') !== String(schema.normalizationMethod)) return false;
   if (Number(pipelineConfig.normalizationEpsilon ?? NaN) !== Number(schema.normalizationEpsilon)) return false;
-
   return true;
 }
 
@@ -101,34 +89,12 @@ async function updateRun(sql: any, runId: string, status: string, completedModel
 
 async function reconcileStaleTrainingRuns(sql: any): Promise<number> {
   const staleMs = trainingStaleAfterMs();
-  const staleRuns = await sql`
-    SELECT run_id
-    FROM ml_training_runs
-    WHERE status='running'
-      AND COALESCE(heartbeat_at, updated_at, started_at, created_at) < NOW() - (${staleMs}::bigint * INTERVAL '1 millisecond')
-  `;
+  const staleRuns = await sql`SELECT run_id FROM ml_training_runs WHERE status='running' AND COALESCE(heartbeat_at, updated_at, started_at, created_at) < NOW() - (${staleMs}::bigint * INTERVAL '1 millisecond')`;
   if (!staleRuns.length) return 0;
-
   for (const row of staleRuns) {
     const runId = String(row.run_id);
-    await sql`
-      UPDATE ml_training_run_models
-      SET status=CASE WHEN status='running' THEN 'timed_out' ELSE 'cancelled' END,
-          error=CASE WHEN status='running' THEN 'Training worker heartbeat expired; the active worker was no longer observable.' ELSE 'Training run became stale before this model started.' END,
-          completed_at=COALESCE(completed_at, NOW()),
-          heartbeat_at=NULL
-      WHERE run_id=${runId} AND status IN ('running','queued')
-    `;
-    await sql`
-      UPDATE ml_training_runs
-      SET status='timed_out',
-          error='Training worker heartbeat expired; the run was reconciled as stale.',
-          completed_at=COALESCE(completed_at, NOW()),
-          heartbeat_at=NULL,
-          metadata=COALESCE(metadata,'{}'::jsonb) || jsonb_build_object('staleRecovery', jsonb_build_object('reconciledAt', NOW(), 'staleAfterMs', (${staleMs}::bigint))),
-          updated_at=NOW()
-      WHERE run_id=${runId} AND status='running'
-    `;
+    await sql`UPDATE ml_training_run_models SET status=CASE WHEN status='running' THEN 'timed_out' ELSE 'cancelled' END,error=CASE WHEN status='running' THEN 'Training worker heartbeat expired; the active worker was no longer observable.' ELSE 'Training run became stale before this model started.' END,completed_at=COALESCE(completed_at, NOW()),heartbeat_at=NULL WHERE run_id=${runId} AND status IN ('running','queued')`;
+    await sql`UPDATE ml_training_runs SET status='timed_out',error='Training worker heartbeat expired; the run was reconciled as stale.',completed_at=COALESCE(completed_at, NOW()),heartbeat_at=NULL,metadata=COALESCE(metadata,'{}'::jsonb) || jsonb_build_object('staleRecovery', jsonb_build_object('reconciledAt', NOW(), 'staleAfterMs', (${staleMs}::bigint))),updated_at=NOW() WHERE run_id=${runId} AND status='running'`;
   }
   return staleRuns.length;
 }
@@ -136,21 +102,12 @@ async function reconcileStaleTrainingRuns(sql: any): Promise<number> {
 function startTrainingHeartbeat(sql: any, runId: string, modelType: string, activeWorkerId: string) {
   const beat = async () => {
     try {
-      await sql`
-        UPDATE ml_training_runs
-        SET heartbeat_at=NOW(), worker_id=${activeWorkerId}, updated_at=NOW()
-        WHERE run_id=${runId} AND status='running'
-      `;
-      await sql`
-        UPDATE ml_training_run_models
-        SET heartbeat_at=NOW()
-        WHERE run_id=${runId} AND model_type=${modelType} AND status='running'
-      `;
+      await sql`UPDATE ml_training_runs SET heartbeat_at=NOW(), worker_id=${activeWorkerId}, updated_at=NOW() WHERE run_id=${runId} AND status='running'`;
+      await sql`UPDATE ml_training_run_models SET heartbeat_at=NOW() WHERE run_id=${runId} AND model_type=${modelType} AND status='running'`;
     } catch {
-      // The training operation owns the terminal state; heartbeat failures must not hide model errors.
+      // Heartbeat failures must not hide model errors.
     }
   };
-
   void beat();
   const timer = setInterval(() => void beat(), HEARTBEAT_INTERVAL_MS);
   return () => clearInterval(timer);
@@ -174,17 +131,13 @@ export async function trainDatasetModels(request: TrainingRequest) {
   const durationUnit = dataset.duration_unit as DurationUnit;
   const durationSeconds = dataset.duration_seconds == null ? null : Number(dataset.duration_seconds);
   const effectiveHorizonTicks = Number(dataset.horizon_ticks);
-  if (!Number.isSafeInteger(durationValue) || durationValue <= 0 || !['t', 's', 'm', 'h', 'd'].includes(durationUnit) || !Number.isSafeInteger(effectiveHorizonTicks) || effectiveHorizonTicks <= 0) {
-    throw new Error('INVALID_DATASET_DURATION_METADATA');
-  }
+  if (!Number.isSafeInteger(durationValue) || durationValue <= 0 || !['t', 's', 'm', 'h', 'd'].includes(durationUnit) || !Number.isSafeInteger(effectiveHorizonTicks) || effectiveHorizonTicks <= 0) throw new Error('INVALID_DATASET_DURATION_METADATA');
 
   const schema = await getMlRuntimeSchemaContract({ durationValue, durationUnit });
   const datasetSchemaVersion = String(dataset.feature_schema_version ?? '');
   const currentSchemaVersion = String(schema.featureSchemaVersion);
   const schemaCompatible = datasetSchemaVersion === currentSchemaVersion || isStructurallyCompatibleDataset(dataset, schema);
-  if (!schemaCompatible) {
-    throw new Error(`DATASET_FEATURE_SCHEMA_VERSION_MISMATCH: dataset=${datasetSchemaVersion || 'unknown'} current=${currentSchemaVersion}`);
-  }
+  if (!schemaCompatible) throw new Error(`DATASET_FEATURE_SCHEMA_VERSION_MISMATCH: dataset=${datasetSchemaVersion || 'unknown'} current=${currentSchemaVersion}`);
 
   const running = await sql`SELECT run_id FROM ml_training_runs WHERE status='running' ORDER BY created_at DESC LIMIT 1`;
   if (running.length) throw new Error('TRAINING_ALREADY_RUNNING');
@@ -220,12 +173,12 @@ export async function trainDatasetModels(request: TrainingRequest) {
   const results: any[] = [];
   let completed = 0;
   let failed = 0;
-  let timedOut = false;
+  let timeoutCount = 0;
 
   for (const definition of definitions) {
-    if (timedOut) break;
     await sql`UPDATE ml_training_run_models SET status='running',started_at=NOW(),heartbeat_at=NOW() WHERE run_id=${runId} AND model_type=${definition.key}`;
     const stopHeartbeat = startTrainingHeartbeat(sql, runId, definition.key, activeWorkerId);
+    let modelTimedOut = false;
     try {
       const sequenceModel = definition.family === 'sequential';
       const configuredHyperparameters = { ...strategy.hyperparameters[definition.key] } as Record<string, number>;
@@ -256,41 +209,39 @@ export async function trainDatasetModels(request: TrainingRequest) {
       results.push({ modelType: definition.key, success: true, modelId, metrics, engine: result.engine });
     } catch (error) {
       const message = error instanceof Error ? error.message : 'Native training failed.';
-      const isTimeout = message.startsWith('DAEMON_TRAINING_TIMEOUT');
-      await sql`UPDATE ml_training_run_models SET status=${isTimeout ? 'timed_out' : 'failed'},error=${message},completed_at=NOW(),heartbeat_at=NULL WHERE run_id=${runId} AND model_type=${definition.key}`;
-      if (isTimeout) {
-        timedOut = true;
-        await sql`UPDATE ml_training_run_models SET status='cancelled',error='Training run stopped after the native worker exceeded its configured timeout.',completed_at=NOW(),heartbeat_at=NULL WHERE run_id=${runId} AND status='queued'`;
-      } else {
-        failed += 1;
-      }
-      results.push({ modelType: definition.key, success: false, timedOut: isTimeout, error: message });
+      modelTimedOut = message.startsWith('DAEMON_TRAINING_TIMEOUT');
+      await sql`UPDATE ml_training_run_models SET status=${modelTimedOut ? 'timed_out' : 'failed'},error=${message},completed_at=NOW(),heartbeat_at=NULL WHERE run_id=${runId} AND model_type=${definition.key}`;
+      failed += 1;
+      if (modelTimedOut) timeoutCount += 1;
+      results.push({ modelType: definition.key, success: false, timedOut: modelTimedOut, error: message });
     } finally {
       stopHeartbeat();
     }
 
-    if (timedOut) {
-      await updateRun(sql, runId, 'timed_out', completed, failed + 1, new Date().toISOString(), {
-        progress: { completed, failed: failed + 1, total: definitions.length },
-        featureSchemaVersion: schema.featureSchemaVersion, schemaFingerprint: schema.schemaFingerprint,
-        featureTopology: schema.featureWindows, sequenceLength,
-        strategy: { key: strategy.key, version: strategy.version, assetClass: strategy.assetClass, marketType: strategy.marketType, sequenceLength },
-        terminalReason: 'native_training_timeout',
-      });
-      break;
-    }
-
     const done = completed + failed;
-    await updateRun(sql, runId, done === definitions.length ? (failed === 0 ? 'completed' : completed > 0 ? 'partial' : 'failed') : 'running', completed, failed, done === definitions.length ? new Date().toISOString() : null, {
-      progress: { completed, failed, total: definitions.length }, featureSchemaVersion: schema.featureSchemaVersion, schemaFingerprint: schema.schemaFingerprint,
-      featureTopology: schema.featureWindows, sequenceLength,
-      strategy: { key: strategy.key, version: strategy.version, assetClass: strategy.assetClass, marketType: strategy.marketType, sequenceLength },
-    });
+    await updateRun(
+      sql,
+      runId,
+      done === definitions.length ? (failed === 0 ? 'completed' : completed > 0 ? 'partial' : 'failed') : 'running',
+      completed,
+      failed,
+      done === definitions.length ? new Date().toISOString() : null,
+      {
+        progress: { completed, failed, total: definitions.length },
+        featureSchemaVersion: schema.featureSchemaVersion,
+        schemaFingerprint: schema.schemaFingerprint,
+        featureTopology: schema.featureWindows,
+        sequenceLength,
+        timeoutCount,
+        strategy: { key: strategy.key, version: strategy.version, assetClass: strategy.assetClass, marketType: strategy.marketType, sequenceLength },
+        lastModel: { modelType: definition.key, timedOut: modelTimedOut },
+      },
+    );
   }
 
-  const finalStatus = timedOut ? 'timed_out' : failed === 0 ? 'completed' : completed > 0 ? 'partial' : 'failed';
-  await sql`UPDATE ml_training_runs SET status=${finalStatus},completed_models=${completed},failed_models=${timedOut ? failed + 1 : failed},completed_at=CASE WHEN ${finalStatus} IN ('completed','partial','failed','timed_out') THEN COALESCE(completed_at,NOW()) ELSE completed_at END,heartbeat_at=NULL,updated_at=NOW() WHERE run_id=${runId}`;
-  return { runId, status: finalStatus, completedModels: completed, failedModels: timedOut ? failed + 1 : failed, totalModels: definitions.length, strategy: { key: strategy.key, version: strategy.version, sequenceLength, featureTopology: schema.featureWindows }, dataset: { id: datasetId, symbol: dataset.asset_symbol, durationValue, durationUnit, durationSeconds, effectiveHorizonTicks }, results };
+  const finalStatus = failed === 0 ? 'completed' : completed > 0 ? 'partial' : 'failed';
+  await sql`UPDATE ml_training_runs SET status=${finalStatus},completed_models=${completed},failed_models=${failed},completed_at=COALESCE(completed_at,NOW()),heartbeat_at=NULL,metadata=COALESCE(metadata,'{}'::jsonb) || jsonb_build_object('timeoutCount', ${timeoutCount}),updated_at=NOW() WHERE run_id=${runId}`;
+  return { runId, status: finalStatus, completedModels: completed, failedModels: failed, totalModels: definitions.length, strategy: { key: strategy.key, version: strategy.version, sequenceLength, featureTopology: schema.featureWindows }, dataset: { id: datasetId, symbol: dataset.asset_symbol, durationValue, durationUnit, durationSeconds, effectiveHorizonTicks }, results };
 }
 
 export async function listTrainingRuns(symbol?: string) {
