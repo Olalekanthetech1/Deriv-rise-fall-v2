@@ -1,7 +1,7 @@
 import { NextResponse } from 'next/server';
 import { initDbSchema, getDb } from '@/lib/db';
 import { ensureTrainingDurationSchema } from '@/lib/training-duration-schema';
-import { xgboostDaemon } from '@/lib/xgboost-daemon';
+import { getWorkerStatus } from '@/lib/ml-training-queue';
 
 export async function GET() {
   try {
@@ -11,14 +11,14 @@ export async function GET() {
       return NextResponse.json({
         status: 'degraded',
         isDbConnected: false,
-        daemonReady: false,
+        trainingWorker: { status: 'offline', workerId: null, heartbeatAt: null },
         modelRegistry: { total: 0, production: 0, candidate: 0, validated: 0 },
       }, { status: 503, headers: { 'Cache-Control': 'no-store' } });
     }
 
     await ensureTrainingDurationSchema(sql);
 
-    const [registryRows, runRows] = await Promise.all([
+    const [registryRows, runRows, worker] = await Promise.all([
       sql`SELECT
         COUNT(*)::int AS total,
         COUNT(*) FILTER (WHERE status = 'production')::int AS production,
@@ -30,31 +30,16 @@ export async function GET() {
         )::int AS validated
         FROM ml_model_registry_v2`,
       sql`SELECT status, COUNT(*)::int AS count FROM ml_training_runs GROUP BY status`,
+      getWorkerStatus(),
     ]);
-
-    let daemonReady = false;
-    let daemon: Record<string, unknown> = {};
-    try {
-      const ping = await xgboostDaemon.sendCommand('ping');
-      daemonReady = ping?.success === true && ping?.pong === true;
-      daemon = {
-        schemaVersion: ping?.schemaVersion ?? null,
-        schemaFingerprint: ping?.schemaFingerprint ?? null,
-        featureCount: ping?.featureCount ?? null,
-        supportedModels: Array.isArray(ping?.models) ? ping.models : [],
-      };
-    } catch (error) {
-      daemon = { error: error instanceof Error ? error.message : 'Python ML daemon unavailable' };
-    }
 
     const registry = registryRows[0] || {};
     const trainingRuns = Object.fromEntries((runRows as Array<{ status: string; count: number }>).map((row) => [row.status, Number(row.count)]));
-    const healthy = daemonReady;
 
     return NextResponse.json({
-      status: healthy ? 'healthy' : 'degraded',
+      status: worker.status === 'online' ? 'healthy' : 'degraded',
       isDbConnected: true,
-      daemonReady,
+      trainingWorker: worker,
       modelRegistry: {
         total: Number(registry.total || 0),
         production: Number(registry.production || 0),
@@ -62,8 +47,7 @@ export async function GET() {
         validated: Number(registry.validated || 0),
       },
       trainingRuns,
-      daemon,
-    }, { status: healthy ? 200 : 503, headers: { 'Cache-Control': 'no-store' } });
+    }, { status: 200, headers: { 'Cache-Control': 'no-store' } });
   } catch (error) {
     return NextResponse.json({
       status: 'degraded',

@@ -222,6 +222,10 @@ COPY --from=builder /app/packages ./packages
 # ------------------------------------------------------------
 COPY --from=builder /app/scripts ./scripts
 
+# Dedicated ML worker imports server-side library modules directly.
+COPY --from=builder /app/lib ./lib
+COPY --from=builder /app/tsconfig.json ./tsconfig.json
+
 # ------------------------------------------------------------
 # Ensure runtime user owns application files
 # ------------------------------------------------------------
