@@ -5,6 +5,7 @@ import { expandTrainingDurations, type DerivDurationRange, type DerivDurationUni
 import { getCachedOrDiscoverDuration } from '@/lib/deriv-duration-cache';
 import { initializeMlPipelineConfig } from '@/lib/ml-pipeline-config';
 import { claimNextAutoDatasetJobItem, completeAutoDatasetJobItem, createAutoDatasetJob, failAutoDatasetJobItem, getAutoDatasetJob, getAutoDatasetJobItemStatus, getLatestAutoDatasetJob, refreshAutoDatasetJobStatus, discardAutoDatasetBuild } from '@/lib/auto-dataset-job-store';
+import { formatReadableDatasetName } from '@/lib/ml-display-formatters';
 
 function isAuthenticated(req: NextRequest): boolean {
   const cookieToken = req.cookies.get('admin_session_token')?.value;
@@ -21,13 +22,6 @@ function matchingRanges(discovery: Awaited<ReturnType<typeof getCachedOrDiscover
   });
 }
 
-/**
- * Expand the exact broker-discovered duration domain for AUTO builds.
- *
- * The training selector already uses expandTrainingDurations(). AUTO must use
- * the same registry-derived set so that "Build all seconds/minutes/hours/days"
- * means every supported value, not a sampled subset of the range.
- */
 function expandTrainingHorizonLadder(ranges: DerivDurationRange[]): Array<{ value: number; unit: DerivDurationUnit; rangeId: string }> {
   return expandTrainingDurations(ranges, 10000);
 }
@@ -46,6 +40,20 @@ function trainingEligibleDatasets<T extends Record<string, any>>(datasets: T[]):
     seen.add(identity);
     return true;
   });
+}
+
+function withReadableDatasetNames<T extends Record<string, any>>(datasets: T[]): T[] {
+  return datasets.map((dataset) => ({
+    ...dataset,
+    name: formatReadableDatasetName({
+      name: dataset.name,
+      assetSymbol: dataset.asset_symbol,
+      assetDisplayName: dataset.metadata?.assetDisplayName,
+      durationValue: dataset.duration_value,
+      durationUnit: dataset.duration_unit,
+    }),
+    raw_name: dataset.name,
+  }));
 }
 
 const activeLocalWorkers = new Set<string>();
@@ -109,12 +117,13 @@ export async function GET(req: NextRequest) {
     }
     const datasets = await listDurationTrainingDatasets(symbol);
     const visibleDatasets = eligibleForTraining ? trainingEligibleDatasets(datasets as Array<Record<string, any>>) : datasets;
-    if (!symbol) return NextResponse.json({ success: true, datasets: visibleDatasets, durationSource: 'deriv-dynamic' }, { headers: noStore() });
+    const readableDatasets = withReadableDatasetNames(visibleDatasets as Array<Record<string, any>>);
+    if (!symbol) return NextResponse.json({ success: true, datasets: readableDatasets, durationSource: 'deriv-dynamic' }, { headers: noStore() });
     const resolved = await getCachedOrDiscoverDuration(symbol);
     const brokerTrainingHorizons = expandTrainingDurations(resolved.discovery.ranges);
     return NextResponse.json({
       success: true,
-      datasets: visibleDatasets,
+      datasets: readableDatasets,
       durationSource: resolved.source,
       durationRefreshing: resolved.refreshing,
       durationCachedAt: resolved.cachedAt,
