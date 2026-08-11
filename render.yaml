@@ -32,10 +32,24 @@ services:
         value: "1"
       - key: ML_WORKER_POLL_INTERVAL_MS
         value: "2000"
+      - key: ML_WORKER_HEARTBEAT_INTERVAL_MS
+        value: "5000"
+      - key: ML_WORKER_LEASE_TIMEOUT_MS
+        value: "90000"
       - key: ML_TRAINING_TIMEOUT_MS
-        sync: false
+        value: "1800000"
       - key: ML_TRAINING_STALE_AFTER_MS
-        sync: false
+        value: "120000"
+      - key: OMP_NUM_THREADS
+        value: "1"
+      - key: OPENBLAS_NUM_THREADS
+        value: "1"
+      - key: MKL_NUM_THREADS
+        value: "1"
+      - key: NUMEXPR_NUM_THREADS
+        value: "1"
+      - key: TORCH_NUM_THREADS
+        value: "1"
       - key: DATABASE_URL
         fromService:
           type: web
