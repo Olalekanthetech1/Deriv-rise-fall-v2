@@ -1,6 +1,7 @@
 import { NextRequest, NextResponse } from 'next/server';
 import { verifySessionToken } from '../auth/route';
 import { extract37TickFeatures } from '@/lib/ml-feature-extractor';
+import { mlRuntimeClient } from '@/lib/ml-runtime-client';
 
 function isAuthValid(req: NextRequest): boolean {
   const cookieToken = req.cookies.get('admin_session_token')?.value;
@@ -43,8 +44,7 @@ export async function POST(req: NextRequest) {
     const featureExtractTimeMs = Number(endFeat - startFeat) / 1_000_000;
 
     const startInference = process.hrtime.bigint();
-    const { xgboostDaemon } = await import('@/lib/xgboost-daemon');
-    const inference = await xgboostDaemon.sendCommand('predict', {
+    const inference = await mlRuntimeClient.sendCommand('predict', {
       symbol,
       ticks,
     });
@@ -52,20 +52,20 @@ export async function POST(req: NextRequest) {
     const modelInferenceTimeMs = Number(endInference - startInference) / 1_000_000;
 
     if (!inference?.success) {
-      return NextResponse.json({ success: false, error: inference?.error || 'Native ML inference unavailable.' }, { status: 503 });
+      return NextResponse.json({ success: false, error: inference?.error || 'Canonical ML runtime inference unavailable.' }, { status: 503 });
     }
 
     const endTotal = process.hrtime.bigint();
     const serverExecutionTimeMs = Number(endTotal - startTotal) / 1_000_000;
 
     let diagnosisStatus: 'optimal' | 'warning' | 'critical' = 'optimal';
-    let diagnosisMessage = 'Native model inference and feature extraction completed.';
+    let diagnosisMessage = 'Canonical ML runtime inference and feature extraction completed.';
     if (serverExecutionTimeMs > 50) {
       diagnosisStatus = 'critical';
-      diagnosisMessage = `Native inference pipeline exceeded 50ms (${serverExecutionTimeMs.toFixed(2)}ms).`;
+      diagnosisMessage = `Canonical inference pipeline exceeded 50ms (${serverExecutionTimeMs.toFixed(2)}ms).`;
     } else if (serverExecutionTimeMs > 15) {
       diagnosisStatus = 'warning';
-      diagnosisMessage = `Native inference pipeline exceeded the 15ms diagnostic target (${serverExecutionTimeMs.toFixed(2)}ms).`;
+      diagnosisMessage = `Canonical inference pipeline exceeded the 15ms diagnostic target (${serverExecutionTimeMs.toFixed(2)}ms).`;
     }
 
     return NextResponse.json({
@@ -75,7 +75,7 @@ export async function POST(req: NextRequest) {
       featureExtractTimeMs: Number(featureExtractTimeMs.toFixed(3)),
       modelInferenceTimeMs: Number(modelInferenceTimeMs.toFixed(3)),
       featureCount: features.length,
-      candidateModel: inference.modelType || inference.modelName || 'native-python-runtime',
+      candidateModel: inference.modelType || inference.modelName || 'canonical-python-runtime',
       diagnosisStatus,
       diagnosisMessage,
       timestamp: new Date().toISOString(),
