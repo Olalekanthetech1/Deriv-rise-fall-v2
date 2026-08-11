@@ -1,11 +1,9 @@
 import { NextRequest, NextResponse } from 'next/server';
 import { TrainSchema } from '@/lib/validation-schemas';
-import { getDb, registerModelInDb } from '@/lib/db';
-import { ensureMinTicks } from '@/lib/ticks-helper';
+import { getDb } from '@/lib/db';
 import { initializeMlPipelineConfig } from '@/lib/ml-pipeline-config';
-import { getMlRuntimeSchemaContract } from '@/lib/ml-runtime-schema';
-import { buildSequenceFeatureDataset, buildTabularFeatureDataset } from '@/lib/ml-feature-dataset';
-import { getMlModelDefinition, getMlModelKeys, getSequenceModelKeys } from '@/lib/ml-model-registry';
+import { getMlModelKeys, type MlModelKey } from '@/lib/ml-model-registry';
+import { enqueueTrainingJob, type TrainingQueueJob } from '@/lib/ml-training-queue';
 import { verifySessionToken } from '../../admin/auth/route';
 
 const CATEGORY_MAP: Record<string, string[]> = {
@@ -14,7 +12,7 @@ const CATEGORY_MAP: Record<string, string[]> = {
   forex: ['FRXEURUSD', 'FRXGBPUSD', 'FRXUSDJPY', 'FRXAUDUSD', 'FRXUSDCAD'],
   commodities: ['CWMXAUUSD'],
 };
-CATEGORY_MAP.ALL = Object.values(CATEGORY_MAP).flat();
+CATEGORY_MAP.ALL = [...new Set(Object.values(CATEGORY_MAP).flat())];
 
 function isAdmin(req: NextRequest): boolean {
   const cookieToken = req.cookies.get('admin_session_token')?.value;
@@ -22,125 +20,103 @@ function isAdmin(req: NextRequest): boolean {
   return verifySessionToken(cookieToken) || verifySessionToken(headerToken);
 }
 
+function normalizeSymbol(value: string): string {
+  return value.trim().toUpperCase();
+}
+
+async function findEligibleDatasetId(sql: ReturnType<typeof getDb>, symbol: string, horizonTicks: number): Promise<string | null> {
+  if (!sql) return null;
+  const rows = await sql`
+    SELECT id::text AS id
+    FROM training_datasets
+    WHERE asset_symbol = ${symbol}
+      AND horizon_ticks = ${horizonTicks}::integer
+      AND status = 'completed'
+      AND leakage_check_passed = TRUE
+      AND sample_count > 0
+    ORDER BY created_at DESC
+    LIMIT 1
+  `;
+  return rows.length ? String(rows[0].id) : null;
+}
+
+function modelTypesFromRequest(modelType: MlModelKey | 'all', retrainAll: boolean): string[] {
+  return modelType === 'all' || retrainAll ? getMlModelKeys() : [modelType];
+}
+
 export async function POST(req: NextRequest) {
   if (!isAdmin(req)) return NextResponse.json({ error: 'Unauthorized admin access.' }, { status: 401 });
 
   try {
     const parsed = TrainSchema.safeParse(await req.json().catch(() => ({})));
-    if (!parsed.success) return NextResponse.json({ error: 'Invalid training parameters', details: parsed.error.format() }, { status: 400 });
+    if (!parsed.success) {
+      return NextResponse.json({ error: 'Invalid training parameters', details: parsed.error.format() }, { status: 400 });
+    }
 
-    const { symbol, category, retrainAll, modelType, durationSecs, maxDepth, learningRate, numEstimators, subsample, epochs, batchSize } = parsed.data;
+    const {
+      symbol,
+      category,
+      retrainAll,
+      modelType,
+      durationSecs,
+    } = parsed.data;
+
     await initializeMlPipelineConfig();
-    const schema = await getMlRuntimeSchemaContract();
-    const requiredContextTicks = Math.max(schema.canonicalFeatureWindowTicks, schema.sequenceLength);
-    const minimumTrainingTicks = requiredContextTicks + Math.max(1, durationSecs);
-    const symbols = category && CATEGORY_MAP[category] ? CATEGORY_MAP[category] : (retrainAll || symbol === 'ALL') ? CATEGORY_MAP.ALL : [symbol];
-    const models = modelType === 'all' || retrainAll ? getMlModelKeys() : [modelType];
-    const sequenceModels = new Set(getSequenceModelKeys());
-    const daemon = (await import('@/lib/xgboost-daemon')).xgboostDaemon;
     const sql = getDb();
-    const results: any[] = [];
+    if (!sql) return NextResponse.json({ error: 'DATABASE_UNAVAILABLE' }, { status: 503 });
 
-    for (const sym of symbols) {
-      const ticks = await ensureMinTicks(sym, minimumTrainingTicks);
-      if (!ticks || ticks.length < minimumTrainingTicks) {
-        for (const model of models) results.push({ symbol: sym, modelType: model, success: false, error: 'INSUFFICIENT_REAL_TICKS', requiredTicks: minimumTrainingTicks, availableTicks: ticks?.length ?? 0 });
+    const symbols = category && CATEGORY_MAP[category]
+      ? CATEGORY_MAP[category]
+      : (retrainAll || symbol === 'ALL')
+        ? CATEGORY_MAP.ALL
+        : [symbol];
+    const requestedModelTypes = modelTypesFromRequest(modelType, retrainAll) as string[];
+    const queued: TrainingQueueJob[] = [];
+    const skipped: Array<{ symbol: string; error: string }> = [];
+
+    for (const rawSymbol of symbols) {
+      const normalized = normalizeSymbol(rawSymbol);
+      const datasetId = await findEligibleDatasetId(sql, normalized, durationSecs);
+      if (!datasetId) {
+        skipped.push({
+          symbol: normalized,
+          error: `NO_ELIGIBLE_DATASET: no completed leakage-validated dataset exists for ${normalized} at ${durationSecs} ticks. Build/select a dataset first.`,
+        });
         continue;
       }
 
-      const assetCategory = category === 'forex' ? 1 : category === 'commodities' ? 2 : 0;
-      const context = { symbol: sym, durationSecs, assetCategory };
-      let tabularDataset: Awaited<ReturnType<typeof buildTabularFeatureDataset>> | null = null;
-      let sequenceDataset: Awaited<ReturnType<typeof buildSequenceFeatureDataset>> | null = null;
-
-      for (const model of models) {
-        if (sequenceModels.has(model)) {
-          sequenceDataset ??= await buildSequenceFeatureDataset(ticks, context);
-        } else {
-          tabularDataset ??= await buildTabularFeatureDataset(ticks, context);
-        }
-
-        const definition = getMlModelDefinition(model);
-        if (!definition) {
-          results.push({ symbol: sym, modelType: model, success: false, error: 'MODEL_NOT_REGISTERED' });
-          continue;
-        }
-
-        const hyperparams = {
-          ...definition.defaultHyperparameters,
-          maxDepth,
-          learningRate,
-          numEstimators,
-          subsample,
-          epochs,
-          batchSize,
-        };
-
-        const result = await daemon.sendCommand('train', {
-          symbol: sym,
-          durationSecs,
-          modelType: model,
-          assetCategory,
-          featureDataset: tabularDataset,
-          sequenceDataset,
-          hyperparams,
+      try {
+        const job = await enqueueTrainingJob({
+          datasetId,
+          modelTypes: requestedModelTypes,
         });
-
-        if (!result?.success) {
-          results.push({ symbol: sym, modelType: model, success: false, error: result?.error || 'Training failed', schemaVersion: result?.schemaVersion, schemaFingerprint: result?.schemaFingerprint });
-          continue;
-        }
-
-        results.push({ symbol: sym, modelType: model, ...result });
-
-        if (sql) {
-          try {
-            await registerModelInDb({
-              modelId: result.modelId,
-              modelName: `${sym} ${definition.displayName} Candidate Model`,
-              version: result.modelVersion || result.schemaVersion || 'native-runtime',
-              symbol: sym,
-              horizonSecs: durationSecs,
-              format: result.format || (sequenceModels.has(model) ? 'PT_STATE' : 'PKL'),
-              status: 'candidate',
-              accuracy: Number.isFinite(Number(result.accuracy)) ? Number(result.accuracy) : undefined,
-              backtestWinRate: undefined,
-              backtestProfitFactor: undefined,
-              modelFamily: definition.family,
-              framework: 'native-daemon',
-              featureSchemaVersion: result.schemaVersion || schema.featureSchemaVersion,
-              filePath: `${sym}_${durationSecs}s_${model}.pkl`,
-              hyperparameters: hyperparams,
-              metrics: {
-                lifecycleTier: definition.lifecycleTier,
-                schemaFingerprint: result.schemaFingerprint || schema.schemaFingerprint,
-                featureSchemaVersion: result.schemaVersion || schema.featureSchemaVersion,
-                featureCount: result.featureCount || schema.featureCount,
-                sequenceLength: result.sequenceLength || schema.sequenceLength,
-              },
-            });
-          } catch (dbErr) {
-            console.warn('[ML Registry Warning]:', dbErr);
-          }
-        }
+        queued.push(job);
+      } catch (error) {
+        const message = error instanceof Error ? error.message : String(error);
+        skipped.push({ symbol: normalized, error: message });
       }
     }
 
-    const successes = results.filter((result) => result.success).length;
+    const success = queued.length > 0;
     return NextResponse.json({
-      success: successes > 0,
-      symbol: symbols.length === 1 ? symbols[0] : `GROUP (${symbols.length})`,
-      modelTypes: models,
-      trainedCount: successes,
-      totalJobs: results.length,
-      requiredTrainingTicks: minimumTrainingTicks,
-      schemaVersion: schema.featureSchemaVersion,
-      schemaFingerprint: schema.schemaFingerprint,
-      featureCount: schema.featureCount,
-      results,
-      trainedAt: new Date().toISOString(),
-    });
-  } catch (err: any) {
-    return NextResponse.json({ error: err.message || 'Training failed' }, { status: 500 });
+      success,
+      queued: success,
+      executionBoundary: 'dedicated-ml-worker',
+      dataSource: 'persisted-real-tick-dataset',
+      queuedCount: queued.length,
+      skippedCount: skipped.length,
+      totalJobs: queued.length,
+      modelTypes: requestedModelTypes,
+      durationSecs,
+      jobs: queued,
+      skipped,
+      message: success
+        ? `Training queued for ${queued.length} eligible dataset(s). Execution is handled by the dedicated ML worker.`
+        : 'No eligible datasets were found for the requested training operation.',
+      trainedAt: null,
+    }, { status: success ? 202 : 422 });
+  } catch (error) {
+    const message = error instanceof Error ? error.message : 'Training could not be queued.';
+    return NextResponse.json({ error: message }, { status: 500 });
   }
 }
