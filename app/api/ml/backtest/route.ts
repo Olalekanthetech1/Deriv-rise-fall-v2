@@ -1,7 +1,7 @@
 import { NextRequest, NextResponse } from 'next/server';
 import { BacktestSchema } from '@/lib/validation-schemas';
 import { initDbSchema, saveBacktestResults } from '@/lib/db';
-import { xgboostDaemon } from '@/lib/xgboost-daemon';
+import { mlRuntimeClient } from '@/lib/ml-runtime-client';
 import { ensureMinTicks } from '@/lib/ticks-helper';
 import { buildBacktestFeatureVectors } from '@/lib/ml-feature-dataset';
 
@@ -31,7 +31,7 @@ export async function POST(req: NextRequest) {
       });
     }
 
-    const backtestRes = await xgboostDaemon.sendCommand('backtest', {
+    const backtestRes = await mlRuntimeClient.sendCommand('backtest', {
       symbol,
       prices: ticks.map((tick) => tick.price),
       horizons,
@@ -39,7 +39,7 @@ export async function POST(req: NextRequest) {
     });
 
     if (!backtestRes || !backtestRes.success) {
-      throw new Error(`Python backtest daemon failed: ${backtestRes?.error || 'Unknown Error'}`);
+      throw new Error(`Native ML runtime backtest failed: ${backtestRes?.error || 'Unknown Error'}`);
     }
 
     if (backtestRes.horizonMatrix) {
