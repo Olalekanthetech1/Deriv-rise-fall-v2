@@ -1,18 +1,29 @@
 import { Ratelimit } from '@upstash/ratelimit';
 import { Redis } from '@upstash/redis';
 
-// In-memory fallback is intentionally best-effort. Production deployments should provide Upstash Redis
-// so rate limits are shared across instances.
+// Process-local limiter used for high-frequency telemetry and as a fail-open-to-safe fallback
+// when the distributed limiter is unavailable. This is intentionally bounded and expiring.
 const memoryStore = new Map<string, { count: number; resetAt: number }>();
+const MAX_MEMORY_KEYS = 10_000;
 export let inMemoryBlocks = 0;
+
+function pruneMemoryStore(now: number) {
+  if (memoryStore.size < MAX_MEMORY_KEYS) return;
+
+  for (const [key, record] of memoryStore) {
+    if (record.resetAt < now) memoryStore.delete(key);
+    if (memoryStore.size < MAX_MEMORY_KEYS * 0.8) break;
+  }
+}
 
 function getInMemoryRateLimit(key: string, limit: number, windowMs: number) {
   const now = Date.now();
   const record = memoryStore.get(key);
 
-  if (!record || record.resetAt < now) {
+  if (!record || record.resetAt <= now) {
+    pruneMemoryStore(now);
     memoryStore.set(key, { count: 1, resetAt: now + windowMs });
-    return { success: true, limit, remaining: limit - 1, reset: now + windowMs };
+    return { success: true, limit, remaining: Math.max(0, limit - 1), reset: now + windowMs };
   }
 
   if (record.count >= limit) {
@@ -21,7 +32,7 @@ function getInMemoryRateLimit(key: string, limit: number, windowMs: number) {
   }
 
   record.count += 1;
-  return { success: true, limit, remaining: limit - record.count, reset: record.resetAt };
+  return { success: true, limit, remaining: Math.max(0, limit - record.count), reset: record.resetAt };
 }
 
 export let redisClient: Redis | null = null;
@@ -33,15 +44,12 @@ if (process.env.UPSTASH_REDIS_REST_URL && process.env.UPSTASH_REDIS_REST_TOKEN) 
   }
 }
 
+// Do not perform another Redis request when Redis is already the failing dependency.
+// Persistent block metrics can be recorded asynchronously by a dedicated observability path.
 export async function incrementRedisBlock() {
-  if (redisClient) {
-    try {
-      await redisClient.incr('rate_limit_blocks');
-    } catch {}
-  }
+  inMemoryBlocks++;
 }
 
-// ML operations: high throughput because model endpoints can legitimately be called frequently.
 const mlRatelimit = redisClient
   ? new Ratelimit({
       redis: redisClient,
@@ -50,7 +58,6 @@ const mlRatelimit = redisClient
     })
   : null;
 
-// General API traffic.
 const apiRatelimit = redisClient
   ? new Ratelimit({
       redis: redisClient,
@@ -59,7 +66,6 @@ const apiRatelimit = redisClient
     })
   : null;
 
-// Authentication endpoints require a materially stricter limit to slow credential attacks.
 const authRatelimit = redisClient
   ? new Ratelimit({
       redis: redisClient,
@@ -68,7 +74,6 @@ const authRatelimit = redisClient
     })
   : null;
 
-// Tick/feed traffic is high volume by design.
 const wsRatelimit = redisClient
   ? new Ratelimit({
       redis: redisClient,
@@ -77,27 +82,43 @@ const wsRatelimit = redisClient
     })
   : null;
 
-export async function checkRateLimit(key: string, type: 'ml' | 'api' | 'auth' | 'ws' = 'api') {
-  let result;
+const limits = {
+  ml: 300,
+  api: 600,
+  auth: 10,
+  ws: 3000,
+  telemetry: 120,
+} as const;
 
-  if (type === 'ml') {
-    result = mlRatelimit
-      ? await mlRatelimit.limit(key)
-      : getInMemoryRateLimit(key, 300, 60000);
-  } else if (type === 'auth') {
-    result = authRatelimit
-      ? await authRatelimit.limit(key)
-      : getInMemoryRateLimit(key, 10, 60000);
-  } else if (type === 'ws') {
-    result = wsRatelimit
-      ? await wsRatelimit.limit(key)
-      : getInMemoryRateLimit(key, 3000, 60000);
-  } else {
-    result = apiRatelimit
-      ? await apiRatelimit.limit(key)
-      : getInMemoryRateLimit(key, 600, 60000);
+export type RateLimitType = keyof typeof limits;
+
+function getMemoryLimit(key: string, type: RateLimitType) {
+  return getInMemoryRateLimit(key, limits[type], 60_000);
+}
+
+export async function checkRateLimit(key: string, type: RateLimitType = 'api') {
+  // Telemetry/status polling is intentionally local. It can be called every few seconds and
+  // must not consume the Upstash request budget needed by security-sensitive traffic.
+  if (type === 'telemetry') {
+    return getMemoryLimit(key, type);
   }
 
-  if (!result.success && redisClient) await incrementRedisBlock();
-  return result;
+  const limiter = type === 'ml'
+    ? mlRatelimit
+    : type === 'auth'
+      ? authRatelimit
+      : type === 'ws'
+        ? wsRatelimit
+        : apiRatelimit;
+
+  if (!limiter) return getMemoryLimit(key, type);
+
+  try {
+    return await limiter.limit(key);
+  } catch (error) {
+    // Upstash quota/network failures must never turn the API gateway into a 500 generator.
+    // Fall back to a bounded process-local limiter and preserve safe throttling semantics.
+    console.warn('Distributed rate limiter unavailable; using local fallback.', error);
+    return getMemoryLimit(key, type);
+  }
 }
