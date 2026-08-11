@@ -75,7 +75,7 @@ export async function recordWorkerHeartbeat(workerId: string, status: 'online' |
   await sql`
     INSERT INTO ml_training_worker_heartbeats (worker_id,status,heartbeat_at,updated_at)
     VALUES (${workerId},${status},NOW(),NOW())
-    ON CONFLICT (worker_id) DO UPDATE SET status=EXCLUDED.status,heartbeat_at=EXCLUDED.heartbeat_at,updated_at=NOW()
+    ON CONFLICT (worker_id) DO UPDATE SET status=EXCLUDED.status,heartbeat_at=NOW(),updated_at=NOW()
   `;
 }
 
@@ -185,8 +185,8 @@ export async function finishTrainingJob(jobId: string, workerId: string, status:
 
 /**
  * Recover jobs owned by a worker that disappeared without a graceful shutdown.
- * A live worker heartbeats every few seconds; a 90s lease therefore gives ample
- * room for transient DB/network pauses while still recovering Render restarts quickly.
+ * A live worker heartbeats every few seconds; the lease gives room for transient
+ * DB/network pauses while still recovering Render restarts quickly.
  */
 export async function recoverAbandonedTrainingJobs(): Promise<number> {
   const sql = await getQueueDb();
@@ -199,8 +199,7 @@ export async function recoverAbandonedTrainingJobs(): Promise<number> {
     WHERE q.status='running'
       AND (
         w.worker_id IS NULL
-        OR w.status='stopping'
-        OR w.heartbeat_at < NOW() - (${leaseMs}::bigint * INTERVAL '1 millisecond')
+        OR (w.heartbeat_at < NOW() - (${leaseMs}::bigint * INTERVAL '1 millisecond'))
       )
   `;
   if (!rows.length) return 0;
@@ -223,7 +222,7 @@ export async function recoverAbandonedTrainingJobs(): Promise<number> {
   return rows.length;
 }
 
-/** Legacy stale-run recovery retained for API compatibility. */
+/** Legacy name retained for existing callers. */
 export async function recoverStaleTrainingJobs() {
   return recoverAbandonedTrainingJobs();
 }
