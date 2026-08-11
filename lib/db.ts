@@ -32,15 +32,7 @@ export function getDbOrThrow() {
 }
 
 const SCHEMA_VERSION = 1;
-const UUID_PATTERN = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
 let initialized = false;
-
-function normalizeOptionalUuid(value: string | undefined, fieldName: string): string | null {
-  const normalized = typeof value === 'string' ? value.trim() : '';
-  if (!normalized) return null;
-  if (!UUID_PATTERN.test(normalized)) throw new Error(`INVALID_${fieldName.toUpperCase()}_UUID`);
-  return normalized;
-}
 
 export async function initDbSchema(): Promise<boolean> {
   if (initialized) return true;
@@ -423,71 +415,6 @@ export async function getRegisteredModels(symbol?: string, status?: string) {
   } catch (error) {
     console.error('[getRegisteredModels Error]:', error);
     return [];
-  }
-}
-
-export async function registerModelInDb(data: {
-  modelId: string;
-  modelName: string;
-  version: string;
-  symbol: string;
-  horizonSecs?: number;
-  format?: string;
-  status?: string;
-  accuracy?: number;
-  backtestWinRate?: number;
-  backtestProfitFactor?: number;
-  filePath?: string;
-  hyperparameters?: unknown;
-  metrics?: unknown;
-  modelFamily?: string;
-  assetClass?: string;
-  featureSchemaVersion?: string;
-  framework?: string;
-  datasetId?: string;
-  trainingRunId?: string;
-}) {
-  const dbUrl = getDbConnectionString();
-  if (!dbUrl || !(await initDbSchema())) return false;
-
-  try {
-    const sql = neon(dbUrl);
-    const metrics = data.metrics && typeof data.metrics === 'object' ? data.metrics : {};
-    const datasetId = normalizeOptionalUuid(data.datasetId, 'dataset_id');
-    const trainingRunId = normalizeOptionalUuid(data.trainingRunId, 'training_run_id');
-    await sql`
-      INSERT INTO ml_model_registry_v2 (
-        model_id, model_family, version, asset_symbol, asset_class, horizon_ticks,
-        dataset_id, format, status, feature_schema_version, framework, training_run_id,
-        metrics, hyperparameters, updated_at
-      ) VALUES (
-        ${data.modelId}::text, ${data.modelFamily || data.modelName}::text, ${data.version}::text, ${data.symbol}::text,
-        ${data.assetClass || 'unknown'}::varchar, ${data.horizonSecs || 5}::integer, ${datasetId}::uuid,
-        ${data.format || 'onnx'}::varchar, ${data.status || 'candidate'}::varchar, ${data.featureSchemaVersion || 'v1'}::varchar,
-        ${data.framework || null}::varchar, ${trainingRunId}::uuid,
-        ${JSON.stringify({ accuracy: data.accuracy, backtestWinRate: data.backtestWinRate, backtestProfitFactor: data.backtestProfitFactor, ...metrics })}::jsonb,
-        ${JSON.stringify(data.hyperparameters || {})}::jsonb, NOW()
-      )
-      ON CONFLICT (model_id) DO UPDATE SET
-        model_family = EXCLUDED.model_family,
-        version = EXCLUDED.version,
-        asset_symbol = EXCLUDED.asset_symbol,
-        asset_class = EXCLUDED.asset_class,
-        horizon_ticks = EXCLUDED.horizon_ticks,
-        dataset_id = EXCLUDED.dataset_id,
-        format = EXCLUDED.format,
-        status = EXCLUDED.status,
-        feature_schema_version = EXCLUDED.feature_schema_version,
-        framework = EXCLUDED.framework,
-        training_run_id = EXCLUDED.training_run_id,
-        metrics = EXCLUDED.metrics,
-        hyperparameters = EXCLUDED.hyperparameters,
-        updated_at = NOW()
-    `;
-    return true;
-  } catch (error) {
-    console.error('[registerModelInDb Error]:', error);
-    return false;
   }
 }
 
