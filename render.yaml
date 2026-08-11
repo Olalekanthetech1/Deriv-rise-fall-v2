@@ -22,9 +22,9 @@ services:
     name: deriv-ai-ml-worker
     runtime: docker
     dockerfilePath: ./Dockerfile
+    dockerCommand: npm run ml:worker
     region: frankfurt
     plan: starter
-    startCommand: npm run ml:worker
     envVars:
       - key: NODE_ENV
         value: "production"
@@ -37,4 +37,7 @@ services:
       - key: ML_TRAINING_STALE_AFTER_MS
         sync: false
       - key: DATABASE_URL
-        sync: false
+        fromService:
+          type: web
+          name: deriv-ai-trading-hub
+          envVarKey: DATABASE_URL
