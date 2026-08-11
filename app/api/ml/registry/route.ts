@@ -1,5 +1,6 @@
 import { NextRequest, NextResponse } from 'next/server';
 import { getRegisteredModels, promoteModelInRegistry, initDbSchema, getDb } from '@/lib/db';
+import { getMlModelDefinition } from '@/lib/ml-model-registry';
 import { verifySessionToken } from '../../admin/auth/route';
 
 function isAuthValid(req: NextRequest): boolean {
@@ -70,6 +71,42 @@ export async function POST(req: NextRequest) {
       const horizon = Number(horizonSecs);
       if (!Number.isFinite(horizon) || horizon <= 0) {
         return NextResponse.json({ error: 'A positive numeric horizonSecs value is required.' }, { status: 400 });
+      }
+
+      const sql = getDb();
+      if (!sql) return NextResponse.json({ success: false, error: 'Model registry database is unavailable.' }, { status: 503 });
+
+      const rows = await sql`
+        SELECT model_id, asset_symbol, horizon_ticks, model_family, framework, metrics, status
+        FROM ml_model_registry_v2
+        WHERE model_id = ${modelId}
+        LIMIT 1
+      `;
+      const registered = rows[0] as any;
+      if (!registered) {
+        return NextResponse.json({ success: false, error: 'Model promotion failed: model is not registered.' }, { status: 409 });
+      }
+
+      if (String(registered.asset_symbol) !== symbol) {
+        return NextResponse.json({ success: false, error: 'Model promotion rejected: symbol does not match the persisted model lineage.' }, { status: 409 });
+      }
+
+      if (Number(registered.horizon_ticks) !== horizon) {
+        return NextResponse.json({ success: false, error: 'Model promotion rejected: horizon does not match the persisted model lineage.' }, { status: 409 });
+      }
+
+      const definition = getMlModelDefinition(String(registered.model_family).toLowerCase());
+      const lifecycleTier = String((registered.metrics as Record<string, unknown> | null)?.lifecycleTier || definition?.lifecycleTier || '').toLowerCase();
+      if (lifecycleTier !== 'production_candidate') {
+        return NextResponse.json({
+          success: false,
+          error: 'Model promotion rejected: experimental models must remain isolated from production.',
+          lifecycleTier: lifecycleTier || 'unknown',
+        }, { status: 409 });
+      }
+
+      if (String(registered.status).toLowerCase() !== 'candidate' && String(registered.status).toLowerCase() !== 'staging') {
+        return NextResponse.json({ success: false, error: `Model promotion rejected: status ${registered.status || 'unknown'} is not promotable.` }, { status: 409 });
       }
 
       const success = await promoteModelInRegistry(modelId, symbol, horizon);
