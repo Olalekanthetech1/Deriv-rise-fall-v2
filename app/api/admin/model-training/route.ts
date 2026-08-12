@@ -5,7 +5,6 @@ import { listTrainingRuns } from '@/lib/ml-training-orchestrator';
 import { clearFailedTrainingRunHistory, clearTerminalTrainingQueueHistory } from '@/lib/ml-training-history';
 import { enqueueTrainingJob, listTrainingQueueJobs, recoverAbandonedTrainingJobs } from '@/lib/ml-training-queue';
 import { resolveTrainingDedup } from '@/lib/ml-training-dedup';
-import { getDb } from '@/lib/db';
 import { mlRuntimeClient } from '@/lib/ml-runtime-client';
 import { formatReadableAsset } from '@/lib/ml-display-formatters';
 
@@ -15,7 +14,6 @@ function isAdmin(req: NextRequest): boolean {
   return Boolean(verifySessionToken(cookieToken) || verifySessionToken(headerToken));
 }
 function noStore() { return { 'Cache-Control': 'no-store, max-age=0' }; }
-function isUuid(value: unknown): value is string { return typeof value === 'string' && /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(value); }
 
 function withLiveDiagnostics(runs: any[]) {
   return runs.map((run) => ({
@@ -43,60 +41,6 @@ function withLiveDiagnostics(runs: any[]) {
   }));
 }
 
-async function mergeActiveQueueIntoRuns(runs: any[], queue: any[]) {
-  const visibleQueue = queue.filter((job) => ['queued', 'running', 'failed'].includes(String(job.status)));
-  if (!visibleQueue.length) return runs;
-
-  const existingRunIds = new Set(runs.map((run) => String(run.run_id)));
-  const jobs = visibleQueue.filter((job) => !job.trainingRunId || !existingRunIds.has(String(job.trainingRunId)));
-  if (!jobs.length) return runs;
-
-  const sql = getDb();
-  if (!sql) return runs;
-  const datasetIds = [...new Set(jobs.map((job) => String(job.datasetId)).filter(isUuid))];
-  if (!datasetIds.length) return runs;
-
-  const rows = await sql`
-    SELECT id,asset_symbol,duration_value,duration_unit,duration_seconds,horizon_ticks
-    FROM training_datasets
-    WHERE id = ANY(${datasetIds}::uuid[])
-  `;
-  const datasets = new Map(rows.map((row: any) => [String(row.id), row]));
-
-  const queuedRuns = jobs.map((job) => {
-    const dataset = datasets.get(String(job.datasetId));
-    const requestedModels: MlModelKey[] = (Array.isArray(job.modelTypes) && job.modelTypes.length ? job.modelTypes : getMlModelKeys()) as MlModelKey[];
-    const status = String(job.status);
-    const modelStatus = status === 'failed' ? 'failed' : status;
-    return {
-      run_id: String(job.trainingRunId || job.jobId),
-      dataset_id: String(job.datasetId),
-      asset_symbol: dataset?.asset_symbol ? String(dataset.asset_symbol) : String(job.datasetId),
-      duration_value: Number(dataset?.duration_value || 0),
-      duration_unit: dataset?.duration_unit ? String(dataset.duration_unit) : '',
-      duration_seconds: dataset?.duration_seconds != null ? Number(dataset.duration_seconds) : null,
-      horizon_ticks: Number(dataset?.horizon_ticks || 0),
-      status,
-      completed_models: 0,
-      failed_models: status === 'failed' ? requestedModels.length : 0,
-      requested_models: requestedModels,
-      models: requestedModels.map((model_type) => ({
-        model_type,
-        status: modelStatus,
-        error: job.error || undefined,
-        heartbeat_at: job.heartbeatAt || null,
-      })),
-      created_at: job.createdAt || new Date().toISOString(),
-      completed_at: null,
-      heartbeat_at: job.heartbeatAt || null,
-      queue_job_id: String(job.jobId),
-      execution_boundary: 'dedicated-ml-worker',
-    };
-  });
-
-  return [...queuedRuns, ...runs];
-}
-
 function withReadableAssets(runs: any[]) {
   return runs.map((run) => ({
     ...run,
@@ -112,10 +56,11 @@ export async function GET(req: NextRequest) {
     await recoverAbandonedTrainingJobs();
     const symbol = req.nextUrl.searchParams.get('symbol')?.trim().toUpperCase() || undefined;
     const [runs, queue] = await Promise.all([listTrainingRuns(symbol), listTrainingQueueJobs()]);
-    const visibleRuns = await mergeActiveQueueIntoRuns(runs, queue);
     return NextResponse.json({
       success: true,
-      runs: withReadableAssets(withLiveDiagnostics(visibleRuns)),
+      // `runs` is the canonical persisted training-run collection only.
+      // Queue jobs remain in `queue` and must never be synthesized into run records.
+      runs: withReadableAssets(withLiveDiagnostics(runs)),
       queue,
       modelTypes: getMlModelKeys(),
       dataSource: 'live-database-plus-native-runtime-plus-worker-queue',
