@@ -10,13 +10,19 @@ type ModelRun = { model_type:string; status:string; model_id?:string; metrics?:R
 type Run = { run_id:string; dataset_id:string; asset_symbol:string; raw_asset_symbol?:string; duration_value:number; duration_unit:string; duration_seconds:number|null; horizon_ticks:number; status:string; completed_models:number; failed_models:number; requested_models:ModelKey[]; models:ModelRun[]; created_at:string; completed_at?:string|null; heartbeat_at?:string|null };
 type BatchItem = { dataset_id:string; status:string; requested_models:ModelKey[]; skipped_models:ModelKey[]; completed_models:number; failed_models:number; asset_symbol?:string; duration_value?:number; duration_unit?:string; horizon_ticks?:number; run_id?:string|null; error?:string|null };
 type Batch = { batch_id:string; status:string; requested_datasets:number; requested_models:number; total_jobs:number; completed_jobs:number; failed_jobs:number; skipped_jobs:number; heartbeat_at?:string|null; completed_at?:string|null; error?:string|null; items:BatchItem[] };
-
 type HorizonOption = { key:string; value:number; unit:string; seconds:number; label:string };
+type TimeframeUnit = 't'|'s'|'m'|'h';
 
 const MODEL_LABELS: Record<ModelKey,string> = { xgboost:'XGBoost', lightgbm:'LightGBM', catboost:'CatBoost', tcn:'TCN', lstm:'LSTM / GRU', hmm:'HMM Regime', isolation_forest:'Isolation Forest' };
 const ALL_MODELS = Object.keys(MODEL_LABELS) as ModelKey[];
 const UNIT_LABELS: Record<string,string> = { t:'ticks', s:'seconds', m:'minutes', h:'hours', d:'days' };
 const UNIT_SHORT: Record<string,string> = { t:'t', s:'s', m:'m', h:'h', d:'d' };
+const TIMEFRAME_UNITS: Array<{ key:TimeframeUnit; short:string; label:string }> = [
+  { key:'t', short:'T', label:'Ticks' },
+  { key:'s', short:'S', label:'Seconds' },
+  { key:'m', short:'M', label:'Minutes' },
+  { key:'h', short:'H', label:'Hours' },
+];
 const durationText = (value:number, unit:string) => `${value} ${UNIT_LABELS[unit] || unit}`;
 const metric = (metrics?:Record<string,unknown>) => { const value = Number(metrics?.accuracy); return Number.isFinite(value) ? `${value.toFixed(2)}%` : '—'; };
 const failureStatus = (status:string) => ['failed','timed_out','cancelled'].includes(status);
@@ -55,6 +61,7 @@ export default function TrainingPipelinePage() {
   const [error,setError] = useState<string|null>(null);
   const [message,setMessage] = useState<string|null>(null);
   const [assetFilter,setAssetFilter] = useState('all');
+  const [timeframeUnit,setTimeframeUnit] = useState<TimeframeUnit>('s');
   const [horizonFilter,setHorizonFilter] = useState('all');
 
   const readyDatasets = useMemo(() => datasets.filter((d) => d.status === 'completed' && d.leakage_check_passed), [datasets]);
@@ -62,17 +69,24 @@ export default function TrainingPipelinePage() {
   const horizonOptions = useMemo<HorizonOption[]>(() => {
     const map = new Map<string,HorizonOption>();
     for (const dataset of readyDatasets) {
+      const unit = String(dataset.duration_unit || '').toLowerCase();
+      if (!['t','s','m','h'].includes(unit)) continue;
+      const value = Number(dataset.duration_value);
+      if (!Number.isFinite(value) || value <= 0) continue;
       const seconds = durationSeconds(dataset);
-      const key = Number.isFinite(dataset.duration_seconds) ? `sec:${seconds}` : `${dataset.duration_value}:${dataset.duration_unit}`;
-      if (!map.has(key)) map.set(key, { key, value: dataset.duration_value, unit: dataset.duration_unit, seconds, label: `${dataset.duration_value}${UNIT_SHORT[dataset.duration_unit] || dataset.duration_unit}` });
+      const key = `${unit}:${value}`;
+      if (!map.has(key)) map.set(key, { key, value, unit, seconds, label: `${value}${UNIT_SHORT[unit] || unit}` });
     }
     return [...map.values()].sort((a,b) => a.seconds - b.seconds || a.label.localeCompare(b.label));
   }, [readyDatasets]);
+  const availableUnits = useMemo(() => new Set(horizonOptions.map((option) => option.unit)), [horizonOptions]);
+  const visibleHorizonOptions = useMemo(() => horizonOptions.filter((option) => option.unit === timeframeUnit), [horizonOptions, timeframeUnit]);
   const filteredDatasets = useMemo(() => readyDatasets.filter((dataset) => {
     const assetMatch = assetFilter === 'all' || dataset.asset_symbol === assetFilter;
-    const horizonMatch = horizonFilter === 'all' || horizonOptions.some((option) => option.key === horizonFilter && Math.abs(durationSeconds(dataset) - option.seconds) < 0.000001);
-    return assetMatch && horizonMatch;
-  }), [readyDatasets, assetFilter, horizonFilter, horizonOptions]);
+    const unitMatch = String(dataset.duration_unit || '').toLowerCase() === timeframeUnit;
+    const exactHorizonMatch = horizonFilter === 'all' || `${String(dataset.duration_unit || '').toLowerCase()}:${Number(dataset.duration_value)}` === horizonFilter;
+    return assetMatch && unitMatch && exactHorizonMatch;
+  }), [readyDatasets, assetFilter, timeframeUnit, horizonFilter]);
   const selected = useMemo(() => datasets.find((d) => d.id === selectedDataset), [datasets, selectedDataset]);
   const runningRuns = useMemo(() => runs.filter((run) => run.status === 'running'), [runs]);
   const failedRunCount = useMemo(() => runs.filter((run) => failureStatus(run.status)).length, [runs]);
@@ -120,10 +134,15 @@ export default function TrainingPipelinePage() {
     setSelectedDataset(filteredDatasets[0]?.id || '');
   }, [filteredDatasets, selectedDataset]);
   useEffect(() => {
-    if (horizonFilter !== 'all' && !horizonOptions.some((option) => option.key === horizonFilter)) setHorizonFilter('all');
+    if (!availableUnits.has(timeframeUnit)) {
+      const fallback = (['t','s','m','h'] as TimeframeUnit[]).find((unit) => availableUnits.has(unit));
+      if (fallback) setTimeframeUnit(fallback);
+    }
+    if (horizonFilter !== 'all' && !visibleHorizonOptions.some((option) => option.key === horizonFilter)) setHorizonFilter('all');
     if (assetFilter !== 'all' && !assetOptions.some((option) => option.asset_symbol === assetFilter)) setAssetFilter('all');
-  }, [horizonOptions, assetOptions, horizonFilter, assetFilter]);
+  }, [availableUnits, timeframeUnit, horizonFilter, visibleHorizonOptions, assetFilter, assetOptions]);
 
+  function selectTimeframe(unit:TimeframeUnit) { setTimeframeUnit(unit); setHorizonFilter('all'); }
   function toggleDataset(id:string) { setSelectedDatasets((current) => current.includes(id) ? current.filter((item) => item !== id) : [...current,id]); }
   function toggleModel(model:ModelKey) { setModels((current) => current.includes(model) ? current.filter((item) => item !== model) : [...current,model]); }
   function selectFilteredDatasets() {
@@ -196,14 +215,14 @@ export default function TrainingPipelinePage() {
     {error && <div className="mb-5 rounded-2xl border border-red-400/20 bg-red-400/[0.05] p-4 text-sm text-red-200">{error}</div>}
     {message && <div className="mb-5 flex items-center gap-2 rounded-2xl border border-emerald-400/20 bg-emerald-400/[0.05] p-4 text-sm text-emerald-200"><CheckCircle2 className="h-4 w-4"/>{message}</div>}
 
-    <section className="mb-6 rounded-3xl border border-cyan-400/15 bg-cyan-400/[0.025] p-5"><div className="mb-4 flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between"><div className="flex items-center gap-2"><Layers3 className="h-4 w-4 text-cyan-300"/><div><h2 className="text-sm font-bold">Training Plan — Multiple Datasets</h2><p className="mt-1 text-xs text-slate-500">Filter by asset and horizon, then select individual datasets or all currently visible eligible datasets.</p></div></div><div className="flex flex-wrap gap-2"><button onClick={selectFilteredDatasets} disabled={!filteredDatasets.length || busy || batchActive} className="rounded-xl border border-white/10 bg-white/5 px-3 py-2 text-xs font-semibold text-cyan-200 disabled:opacity-40">{allFilteredSelected ? 'Clear filtered' : 'Select all filtered'}</button><button onClick={clearDatasetSelection} disabled={!selectedDatasets.length || busy || batchActive} className="rounded-xl border border-white/10 bg-white/5 px-3 py-2 text-xs font-semibold text-slate-300 disabled:opacity-40">Clear selection</button></div></div>
+    <section className="mb-6 rounded-3xl border border-cyan-400/15 bg-cyan-400/[0.025] p-5"><div className="mb-4 flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between"><div className="flex items-center gap-2"><Layers3 className="h-4 w-4 text-cyan-300"/><div><h2 className="text-sm font-bold">Training Plan — Multiple Datasets</h2><p className="mt-1 text-xs text-slate-500">Filter by asset and timeframe unit, then select individual datasets or all currently visible eligible datasets.</p></div></div><div className="flex flex-wrap gap-2"><button onClick={selectFilteredDatasets} disabled={!filteredDatasets.length || busy || batchActive} className="rounded-xl border border-white/10 bg-white/5 px-3 py-2 text-xs font-semibold text-cyan-200 disabled:opacity-40">{allFilteredSelected ? 'Clear filtered' : 'Select all filtered'}</button><button onClick={clearDatasetSelection} disabled={!selectedDatasets.length || busy || batchActive} className="rounded-xl border border-white/10 bg-white/5 px-3 py-2 text-xs font-semibold text-slate-300 disabled:opacity-40">Clear selection</button></div></div>
 
-      <div className="mb-4 grid gap-3 md:grid-cols-2"><label className="rounded-xl border border-white/10 bg-black/20 p-3"><span className="mb-1 flex items-center gap-2 text-[10px] font-bold uppercase tracking-wider text-slate-500"><Filter className="h-3.5 w-3.5"/>Asset</span><select value={assetFilter} onChange={(e) => setAssetFilter(e.target.value)} disabled={busy || batchActive} className="w-full bg-transparent text-sm font-semibold outline-none"><option value="all">All assets</option>{assetOptions.map((asset) => <option key={asset.asset_symbol} value={asset.asset_symbol}>{asset.asset_symbol}</option>)}</select></label><label className="rounded-xl border border-cyan-400/15 bg-cyan-400/[0.04] p-3"><span className="mb-1 flex items-center gap-2 text-[10px] font-bold uppercase tracking-wider text-cyan-300"><Filter className="h-3.5 w-3.5"/>Horizon</span><select value={horizonFilter} onChange={(e) => setHorizonFilter(e.target.value)} disabled={busy || batchActive} className="w-full bg-transparent text-sm font-semibold outline-none"><option value="all">All horizons</option>{horizonOptions.map((option) => <option key={option.key} value={option.key}>{option.label} — {durationText(option.value,option.unit)}</option>)}</select></label></div>
+      <div className="mb-4 grid gap-3 md:grid-cols-2"><label className="rounded-xl border border-white/10 bg-black/20 p-3"><span className="mb-1 flex items-center gap-2 text-[10px] font-bold uppercase tracking-wider text-slate-500"><Filter className="h-3.5 w-3.5"/>Asset</span><select value={assetFilter} onChange={(e) => setAssetFilter(e.target.value)} disabled={busy || batchActive} className="w-full bg-transparent text-sm font-semibold outline-none"><option value="all">All assets</option>{assetOptions.map((asset) => <option key={asset.asset_symbol} value={asset.asset_symbol}>{asset.asset_symbol}</option>)}</select></label><div className="rounded-xl border border-cyan-400/15 bg-cyan-400/[0.04] p-3"><span className="mb-2 flex items-center gap-2 text-[10px] font-bold uppercase tracking-wider text-cyan-300"><Filter className="h-3.5 w-3.5"/>Timeframe Unit</span><div className="grid grid-cols-4 gap-2">{TIMEFRAME_UNITS.map((unit) => { const available = availableUnits.has(unit.key); return <button key={unit.key} type="button" onClick={() => selectTimeframe(unit.key)} disabled={!available || busy || batchActive} title={`${unit.label}${available ? '' : ' — no eligible datasets'}`} className={`rounded-xl border px-3 py-2.5 text-center transition ${timeframeUnit === unit.key ? 'border-cyan-400/35 bg-cyan-400/15 text-cyan-100' : available ? 'border-white/10 bg-black/20 text-slate-300 hover:border-cyan-400/20' : 'border-white/5 bg-black/10 text-slate-700'} disabled:cursor-not-allowed disabled:opacity-50`}><span className="block text-sm font-black">{unit.short}</span><span className="mt-0.5 block text-[9px] uppercase tracking-wider">{unit.label}</span></button>; })}</div></div></div>
 
-      <div className="mb-4 flex flex-wrap gap-2"><button onClick={() => setHorizonFilter('all')} disabled={busy || batchActive} className={`rounded-full border px-3 py-1.5 text-xs font-bold ${horizonFilter === 'all' ? 'border-cyan-400/30 bg-cyan-400/10 text-cyan-200' : 'border-white/10 bg-black/20 text-slate-500'}`}>All</button>{horizonOptions.map((option) => <button key={option.key} onClick={() => setHorizonFilter(option.key)} disabled={busy || batchActive} className={`rounded-full border px-3 py-1.5 text-xs font-bold ${horizonFilter === option.key ? 'border-cyan-400/30 bg-cyan-400/10 text-cyan-200' : 'border-white/10 bg-black/20 text-slate-500'}`}>{option.label}</button>)}</div>
+      <div className="mb-4"><div className="mb-2 flex items-center justify-between"><span className="text-[10px] font-bold uppercase tracking-wider text-slate-500">{TIMEFRAME_UNITS.find((unit) => unit.key === timeframeUnit)?.label || 'Timeframes'}</span><span className="text-[10px] text-slate-600">{visibleHorizonOptions.length} available</span></div><div className="flex max-h-36 flex-wrap gap-2 overflow-y-auto rounded-2xl border border-white/5 bg-black/10 p-2"><button type="button" onClick={() => setHorizonFilter('all')} disabled={busy || batchActive} className={`rounded-full border px-3 py-1.5 text-xs font-bold ${horizonFilter === 'all' ? 'border-cyan-400/35 bg-cyan-400/15 text-cyan-100' : 'border-white/10 bg-black/20 text-slate-500'}`}>All</button>{visibleHorizonOptions.map((option) => <button type="button" key={option.key} onClick={() => setHorizonFilter(option.key)} disabled={busy || batchActive} className={`rounded-full border px-3 py-1.5 text-xs font-bold ${horizonFilter === option.key ? 'border-cyan-400/35 bg-cyan-400/15 text-cyan-100' : 'border-white/10 bg-black/20 text-slate-400 hover:border-cyan-400/20'}`}>{option.label}</button>)}{!visibleHorizonOptions.length && <span className="px-2 py-1.5 text-xs text-slate-600">No eligible datasets for this unit.</span>}</div></div>
 
       <div className="mb-3 flex items-center justify-between text-[11px] text-slate-500"><span>Showing <strong className="text-slate-300">{filteredDatasets.length}</strong> of {readyDatasets.length} eligible datasets</span><span>Selected <strong className="text-cyan-200">{selectedDatasets.length}</strong></span></div>
-      {filteredDatasets.length === 0 ? <div className="rounded-2xl border border-dashed border-white/10 p-8 text-center text-sm text-slate-500">No eligible datasets match the current filters.</div> : <div className="grid max-h-72 gap-2 overflow-auto sm:grid-cols-2 lg:grid-cols-3">{filteredDatasets.map((dataset) => <button key={dataset.id} onClick={() => toggleDataset(dataset.id)} disabled={busy || batchActive} className={`flex items-center justify-between rounded-xl border px-3 py-3 text-left ${selectedDatasets.includes(dataset.id) ? 'border-cyan-400/25 bg-cyan-400/[0.08]' : 'border-white/10 bg-black/20'}`}><span><span className="block text-xs font-bold">{dataset.asset_symbol} · {durationText(dataset.duration_value,dataset.duration_unit)}</span><span className="mt-1 block text-[10px] text-slate-500">{dataset.sample_count.toLocaleString()} samples · {dataset.horizon_ticks.toLocaleString()} ticks</span></span>{selectedDatasets.includes(dataset.id) ? <CheckCircle2 className="h-4 w-4 text-emerald-300"/> : <XCircle className="h-4 w-4 text-slate-700"/>}</button>)}</div>}
+      {filteredDatasets.length === 0 ? <div className="rounded-2xl border border-dashed border-white/10 p-8 text-center text-sm text-slate-500">No eligible datasets match the current timeframe filters.</div> : <div className="grid max-h-72 gap-2 overflow-auto sm:grid-cols-2 lg:grid-cols-3">{filteredDatasets.map((dataset) => <button key={dataset.id} onClick={() => toggleDataset(dataset.id)} disabled={busy || batchActive} className={`flex items-center justify-between rounded-xl border px-3 py-3 text-left ${selectedDatasets.includes(dataset.id) ? 'border-cyan-400/25 bg-cyan-400/[0.08]' : 'border-white/10 bg-black/20'}`}><span><span className="block text-xs font-bold">{dataset.asset_symbol} · {durationText(dataset.duration_value,dataset.duration_unit)}</span><span className="mt-1 block text-[10px] text-slate-500">{dataset.sample_count.toLocaleString()} samples · {dataset.horizon_ticks.toLocaleString()} ticks</span></span>{selectedDatasets.includes(dataset.id) ? <CheckCircle2 className="h-4 w-4 text-emerald-300"/> : <XCircle className="h-4 w-4 text-slate-700"/>}</button>)}</div>}
 
       <div className="mt-4 grid gap-3 sm:grid-cols-2 lg:grid-cols-4"><label className="flex items-center gap-2 rounded-xl border border-white/10 bg-black/20 px-3 py-3 text-xs"><input type="checkbox" checked={skipCompleted} onChange={(e) => setSkipCompleted(e.target.checked)} disabled={busy || batchActive}/><span><strong>Skip completed</strong><span className="block text-[10px] text-slate-500">Do not retrain compatible registered models.</span></span></label><label className="flex items-center gap-2 rounded-xl border border-white/10 bg-black/20 px-3 py-3 text-xs"><input type="checkbox" checked={retryFailed} onChange={(e) => setRetryFailed(e.target.checked)} disabled={busy || batchActive}/><span><strong>Retry failed</strong><span className="block text-[10px] text-slate-500">Leave failed models eligible for a future plan.</span></span></label><div className="rounded-xl border border-white/10 bg-black/20 px-3 py-3"><span className="block text-[10px] uppercase text-slate-600">Datasets</span><strong className="text-lg">{selectedDatasets.length}</strong></div><div className="rounded-xl border border-cyan-400/15 bg-cyan-400/[0.05] px-3 py-3"><span className="block text-[10px] uppercase text-slate-600">Estimated jobs</span><strong className="text-lg text-cyan-200">{estimatedJobs.toLocaleString()}</strong></div></div><button onClick={() => void startBatch()} disabled={!selectedDatasets.length || !models.length || busy || batchActive || runningRuns.length > 0 || loading} className="mt-4 flex w-full items-center justify-center gap-2 rounded-xl bg-cyan-400 px-4 py-3 text-sm font-black text-slate-950 disabled:opacity-50"><Play className="h-4 w-4"/>{busy ? 'Working…' : `Train ${selectedDatasets.length} dataset${selectedDatasets.length === 1 ? '' : 's'} × ${models.length} model${models.length === 1 ? '' : 's'}`}</button>
     </section>
