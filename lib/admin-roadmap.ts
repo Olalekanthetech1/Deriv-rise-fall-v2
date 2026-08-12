@@ -21,7 +21,7 @@ export const adminRoadmap: RoadmapSection[] = [
   { id: 'asset-strategy', title: 'Asset-Aware Model Strategy', description: 'Runtime asset-class and market-type strategy selection with duration-aware model adaptation and persisted lineage.', status: 'next' },
   { id: 'champion-challenger', title: 'Champion/Challenger Evaluation', description: 'Compare persisted production champions with candidates and enforce server-side promotion gates.', status: 'next' },
   { id: 'prediction-integration', title: 'Prediction & Trading Integration', description: 'Production prediction boundary readiness, model lineage and signal-path verification.', status: 'next' },
-  { id: 'final-verification', title: 'Production Verification', description: 'Build verification, deployment checks, controlled signal-path tests and final integrity audit.', status: 'planned' },
+  { id: 'final-verification', title: 'Production Verification', description: 'Controlled runtime, scheduler, registry and diagnostic signal-path checks with correlation evidence and no-trade safety.', status: 'next' },
 ];
 
 export function countRoadmapStatus(status: RoadmapStatus) { return adminRoadmap.filter((section) => section.status === status).length; }
