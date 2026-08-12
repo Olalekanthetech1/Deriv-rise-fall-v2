@@ -5,6 +5,8 @@ const root = process.cwd();
 const guardFile = path.resolve(process.argv[1] || '');
 const bannedPaths = [
   'lib/xgboost-engine.ts',
+  'lib/xgboost-daemon.ts',
+  'lib/onnx-engine.ts',
   'lib/lightgbm-engine.ts',
   'lib/catboost-engine.ts',
   'lib/tcn-engine.ts',
@@ -27,7 +29,7 @@ for (const relativePath of bannedPaths) {
 const sourceRoots = ['app', 'components', 'lib', 'scripts'];
 const extensions = new Set(['.ts', '.tsx', '.js', '.mjs', '.py']);
 const bannedTokens = [
-  './xgboost-engine', './lightgbm-engine', './catboost-engine', './tcn-engine',
+  './xgboost-engine', './xgboost-daemon', './onnx-engine', './lightgbm-engine', './catboost-engine', './tcn-engine',
   './lstm-engine', './transformer-engine', './hmm-engine', './isolation-forest-engine',
   'ml_runtime_v5', 'xgboost_engine.py', 'multi-model-evaluator', 'probability-calibration-engine',
 ];
