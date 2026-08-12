@@ -13,10 +13,11 @@
     "verify-ml-architecture": "node scripts/verify-ml-architecture.mjs",
     "verify-gate6-legacy": "node scripts/tests/gate6-legacy-boundary-guard.mjs",
     "verify-signal-forensics": "node scripts/tests/signal-forensics-invariants.mjs",
+    "verify-model-operations": "node scripts/tests/model-operations-invariants.mjs",
     "db:storage:audit": "node scripts/db-storage-maintenance.mjs",
     "db:storage:prune": "node scripts/db-storage-maintenance.mjs --prune-ticks",
     "postinstall": "node scripts/copy-smartcharts-assets.js",
-    "prebuild": "node scripts/copy-smartcharts-assets.js && npm run verify-ml-architecture && npm run verify-gate6-legacy && npm run verify-signal-forensics"
+    "prebuild": "node scripts/copy-smartcharts-assets.js && npm run verify-ml-architecture && npm run verify-gate6-legacy && npm run verify-signal-forensics && npm run verify-model-operations"
   },
   "dependencies": {
     "@deriv-com/smartcharts-champion": "^1.9.13",
@@ -45,7 +46,7 @@
     "@radix-ui/react-slot": "^1.2.0",
     "@radix-ui/react-switch": "^1.2.0",
     "@radix-ui/react-tabs": "^1.1.0",
-    "@radix-ui/react-toast": "^1.2.0",
+    "@radix-ui/react-toast": "^1.1.0",
     "@radix-ui/react-toggle": "^1.1.0",
     "@radix-ui/react-toggle-group": "^1.1.19",
     "@radix-ui/react-tooltip": "^1.1.0",
