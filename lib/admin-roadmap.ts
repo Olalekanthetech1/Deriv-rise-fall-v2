@@ -8,6 +8,7 @@ export const adminRoadmap: RoadmapSection[] = [
   { id: 'operational-intelligence', title: 'Operational Intelligence', description: 'Cross-system correlation of health, telemetry, ML registry and production state for faster investigation.', status: 'complete' },
   { id: 'intelligence', title: 'Trading Intelligence', description: 'Signals, confidence, strategy outcomes, features, horizons and model intelligence.', status: 'complete' },
   { id: 'models', title: 'Model Operations', description: 'Registry, validation, promotion, rollback and retraining lifecycle.', status: 'complete' },
+  { id: 'model-cleanup', title: 'Model Cleanup', description: 'Safely remove obsolete candidate and staging registry records before a clean training cycle.', status: 'complete' },
   { id: 'experiments', title: 'Testing & Research', description: 'Backtests, paper/shadow tests, multi-horizon evaluation and persistent experiment history.', status: 'complete' },
   { id: 'infrastructure', title: 'Runtime & Infrastructure', description: 'Latency, APIs, WebSockets, database, cron and runtime diagnostics.', status: 'complete' },
   { id: 'observability', title: 'Observability', description: 'Application, trading, ML, API, error and audit telemetry.', status: 'complete' },
