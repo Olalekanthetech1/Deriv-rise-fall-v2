@@ -48,6 +48,7 @@ export async function ensureTrainingBatchSchema(sql: any): Promise<void> {
   await sql`CREATE INDEX IF NOT EXISTS idx_ml_training_batches_heartbeat ON ml_training_batches (status, heartbeat_at) WHERE status='running'`;
   await sql`CREATE INDEX IF NOT EXISTS idx_ml_training_batch_items_batch ON ml_training_batch_items (batch_id, created_at)`;
   await sql`CREATE INDEX IF NOT EXISTS idx_ml_training_batch_items_status ON ml_training_batch_items (status, heartbeat_at)`;
+  await sql`CREATE UNIQUE INDEX IF NOT EXISTS idx_ml_training_batches_one_active ON ml_training_batches ((1)) WHERE status IN ('queued','running')`;
 }
 
 export async function getTrainingBatchDb() {
