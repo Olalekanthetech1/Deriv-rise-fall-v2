@@ -130,8 +130,17 @@ export async function createTrainingBatchQueued(plan: TrainingBatchPlan) {
     blockedFailedJobs += blockedFailedModels.length;
   }
 
-  await sql`INSERT INTO ml_training_batches (batch_id,status,requested_datasets,requested_models,total_jobs,completed_jobs,failed_jobs,skipped_jobs,worker_id,metadata)
-    VALUES (${batchId}::uuid,${totalJobs ? 'queued' : 'completed'},${datasetIds.length},${modelTypes.length},${totalJobs},0,0,${skippedJobs + blockedFailedJobs},NULL,${JSON.stringify({ datasetIds, modelTypes, skipCompleted:plan.skipCompleted !== false, retryFailed:plan.retryFailed === true, blockedFailedJobs, executionBoundary:'dedicated-ml-worker' })}::jsonb)`;
+  const createdBatch = await sql`
+    INSERT INTO ml_training_batches (batch_id,status,requested_datasets,requested_models,total_jobs,completed_jobs,failed_jobs,skipped_jobs,worker_id,metadata)
+    VALUES (${batchId}::uuid,${totalJobs ? 'queued' : 'completed'},${datasetIds.length},${modelTypes.length},${totalJobs},0,0,${skippedJobs + blockedFailedJobs},NULL,${JSON.stringify({ datasetIds, modelTypes, skipCompleted:plan.skipCompleted !== false, retryFailed:plan.retryFailed === true, blockedFailedJobs, executionBoundary:'dedicated-ml-worker' })}::jsonb)
+    ON CONFLICT DO NOTHING
+    RETURNING batch_id
+  `;
+  if (!createdBatch.length) {
+    const existing = await sql`SELECT batch_id,status FROM ml_training_batches WHERE status IN ('queued','running') ORDER BY created_at DESC LIMIT 1`;
+    if (existing.length) throw new Error(`TRAINING_BATCH_ALREADY_RUNNING:${String(existing[0].batch_id)}:${String(existing[0].status)}`);
+    throw new Error('TRAINING_BATCH_CREATE_CONFLICT');
+  }
 
   for (const item of plans) {
     await sql`INSERT INTO ml_training_batch_items (batch_id,dataset_id,status,requested_models,skipped_models,completed_models,failed_models,metadata)
