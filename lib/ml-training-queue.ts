@@ -74,7 +74,7 @@ export async function recordWorkerHeartbeat(workerId: string, status: 'online' |
   if (!sql) return;
   await sql`
     INSERT INTO ml_training_worker_heartbeats (worker_id,status,heartbeat_at,updated_at)
-    VALUES (${workerId},${status},NOW(),NOW())
+    VALUES (${workerId}::text,${status}::varchar,NOW(),NOW())
     ON CONFLICT (worker_id) DO UPDATE SET status=EXCLUDED.status,heartbeat_at=NOW(),updated_at=NOW()
   `;
 }
@@ -102,7 +102,7 @@ export async function enqueueTrainingJob(request: TrainingQueueRequest): Promise
   try {
     const rows = await sql`
       INSERT INTO ml_training_job_queue (job_id,dataset_id,model_types,status,batch_id,batch_item_id)
-      VALUES (${jobId},${request.datasetId},${JSON.stringify(request.modelTypes || [])}::jsonb,'queued',${request.batchId || null},${request.batchItemId || null})
+      VALUES (${jobId}::uuid,${request.datasetId}::uuid,${JSON.stringify(request.modelTypes || [])}::jsonb,'queued'::varchar,${request.batchId || null}::uuid,${request.batchItemId ?? null}::bigint)
       RETURNING job_id,dataset_id,model_types,status,attempts,worker_id,training_run_id,batch_id,batch_item_id,heartbeat_at,error,created_at,updated_at
     `;
     return mapQueueJob(rows[0]);
@@ -134,15 +134,15 @@ export async function claimNextTrainingJob(workerId: string): Promise<TrainingQu
       FOR UPDATE SKIP LOCKED
     )
     UPDATE ml_training_job_queue q
-    SET status='running',worker_id=${workerId},attempts=q.attempts+1,heartbeat_at=NOW(),updated_at=NOW()
+    SET status='running'::varchar,worker_id=${workerId}::text,attempts=q.attempts+1,heartbeat_at=NOW(),updated_at=NOW()
     FROM candidate WHERE q.job_id=candidate.job_id
     RETURNING q.job_id,q.dataset_id,q.model_types,q.status,q.attempts,q.worker_id,q.training_run_id,q.batch_id,q.batch_item_id,q.heartbeat_at,q.error,q.created_at,q.updated_at
   `;
   if (!rows.length) return null;
   const job = mapQueueJob(rows[0]);
   if (job.batchId) {
-    await sql`UPDATE ml_training_batches SET status='running',worker_id=${workerId},heartbeat_at=NOW(),started_at=COALESCE(started_at,NOW()),updated_at=NOW() WHERE batch_id=${job.batchId} AND status IN ('queued','partial','running')`;
-    if (job.batchItemId) await sql`UPDATE ml_training_batch_items SET status='running',started_at=COALESCE(started_at,NOW()),heartbeat_at=NOW(),updated_at=NOW() WHERE id=${job.batchItemId} AND status IN ('queued','partial')`;
+    await sql`UPDATE ml_training_batches SET status='running'::varchar,worker_id=${workerId}::text,heartbeat_at=NOW(),started_at=COALESCE(started_at,NOW()),updated_at=NOW() WHERE batch_id=${job.batchId}::uuid AND status IN ('queued','partial','running')`;
+    if (job.batchItemId) await sql`UPDATE ml_training_batch_items SET status='running'::varchar,started_at=COALESCE(started_at,NOW()),heartbeat_at=NOW(),updated_at=NOW() WHERE id=${job.batchItemId}::bigint AND status IN ('queued','partial')`;
   }
   return job;
 }
@@ -150,22 +150,24 @@ export async function claimNextTrainingJob(workerId: string): Promise<TrainingQu
 export async function heartbeatTrainingJob(jobId: string, workerId: string, trainingRunId?: string) {
   const sql = await getQueueDb();
   if (!sql) return;
-  const rows = await sql`UPDATE ml_training_job_queue SET heartbeat_at=NOW(),training_run_id=COALESCE(${trainingRunId || null},training_run_id),updated_at=NOW() WHERE job_id=${jobId} AND worker_id=${workerId} AND status='running' RETURNING batch_id`;
+  const rows = await sql`UPDATE ml_training_job_queue SET heartbeat_at=NOW(),training_run_id=COALESCE(${trainingRunId || null}::uuid,training_run_id),updated_at=NOW() WHERE job_id=${jobId}::uuid AND worker_id=${workerId}::text AND status='running' RETURNING batch_id`;
   const batchId = rows[0]?.batch_id ? String(rows[0].batch_id) : null;
-  if (batchId) await sql`UPDATE ml_training_batches SET heartbeat_at=NOW(),updated_at=NOW() WHERE batch_id=${batchId} AND status IN ('queued','running','partial')`;
+  if (batchId) await sql`UPDATE ml_training_batches SET heartbeat_at=NOW(),updated_at=NOW() WHERE batch_id=${batchId}::uuid AND status IN ('queued','running','partial')`;
 }
 
 export async function finishTrainingJob(jobId: string, workerId: string, status: 'completed' | 'failed', error?: string, trainingRunId?: string, result?: TrainingQueueResult) {
   const sql = await getQueueDb();
   if (!sql) return;
-  const rows = await sql`UPDATE ml_training_job_queue SET status=${status},error=${error || result?.error || null},training_run_id=COALESCE(${trainingRunId || result?.trainingRunId || null},training_run_id),heartbeat_at=NULL,updated_at=NOW() WHERE job_id=${jobId} AND worker_id=${workerId} RETURNING batch_id,batch_item_id`;
+  const errorText = error || result?.error || null;
+  const resolvedTrainingRunId = trainingRunId || result?.trainingRunId || null;
+  const rows = await sql`UPDATE ml_training_job_queue SET status=${status}::varchar,error=${errorText}::text,training_run_id=COALESCE(${resolvedTrainingRunId}::uuid,training_run_id),heartbeat_at=NULL,updated_at=NOW() WHERE job_id=${jobId}::uuid AND worker_id=${workerId}::text RETURNING batch_id,batch_item_id`;
   const batchId = rows[0]?.batch_id ? String(rows[0].batch_id) : null;
   const batchItemId = rows[0]?.batch_item_id ? Number(rows[0].batch_item_id) : null;
   if (!batchId || !batchItemId) return;
   const completedModels = Number(result?.completedModels || 0);
   const failedModels = Number(result?.failedModels || (status === 'failed' ? 1 : 0));
   const itemStatus = status === 'failed' ? 'failed' : failedModels > 0 && completedModels > 0 ? 'partial' : 'completed';
-  await sql`UPDATE ml_training_batch_items SET status=${itemStatus},run_id=${trainingRunId || result?.trainingRunId || null},completed_models=${completedModels},failed_models=${failedModels},completed_at=NOW(),heartbeat_at=NULL,error=${error || result?.error || null},updated_at=NOW() WHERE id=${batchItemId}`;
+  await sql`UPDATE ml_training_batch_items SET status=${itemStatus}::varchar,run_id=${resolvedTrainingRunId}::uuid,completed_models=${completedModels}::int,failed_models=${failedModels}::int,completed_at=NOW(),heartbeat_at=NULL,error=${errorText}::text,updated_at=NOW() WHERE id=${batchItemId}::bigint`;
   const counts = await sql`
     SELECT COUNT(*)::int AS total_items,
       COUNT(*) FILTER (WHERE status IN ('completed','skipped'))::int AS done_items,
@@ -173,14 +175,16 @@ export async function finishTrainingJob(jobId: string, workerId: string, status:
       COALESCE(SUM(completed_models),0)::int AS completed_jobs,
       COALESCE(SUM(failed_models),0)::int AS failed_jobs,
       COUNT(*) FILTER (WHERE status='skipped')::int AS skipped_items
-    FROM ml_training_batch_items WHERE batch_id=${batchId}
+    FROM ml_training_batch_items WHERE batch_id=${batchId}::uuid
   `;
   const row = counts[0];
   const done = Number(row?.done_items || 0);
   const total = Number(row?.total_items || 0);
   const terminal = done >= total;
   const batchStatus = terminal ? (Number(row?.failed_items || 0) === 0 ? 'completed' : Number(row?.completed_jobs || 0) > 0 || Number(row?.skipped_items || 0) > 0 ? 'partial' : 'failed') : 'running';
-  await sql`UPDATE ml_training_batches SET status=${batchStatus},completed_jobs=${Number(row?.completed_jobs || 0)},failed_jobs=${Number(row?.failed_jobs || 0)},skipped_jobs=${Number(row?.skipped_items || 0)},completed_at=${terminal ? new Date().toISOString() : null},heartbeat_at=${terminal ? null : new Date().toISOString()},updated_at=NOW() WHERE batch_id=${batchId}`;
+  const completedAt = terminal ? new Date().toISOString() : null;
+  const heartbeatAt = terminal ? null : new Date().toISOString();
+  await sql`UPDATE ml_training_batches SET status=${batchStatus}::varchar,completed_jobs=${Number(row?.completed_jobs || 0)}::int,failed_jobs=${Number(row?.failed_jobs || 0)}::int,skipped_jobs=${Number(row?.skipped_items || 0)}::int,completed_at=${completedAt}::timestamptz,heartbeat_at=${heartbeatAt}::timestamptz,updated_at=NOW() WHERE batch_id=${batchId}::uuid`;
 }
 
 export async function recoverAbandonedTrainingJobs(): Promise<number> {
@@ -203,16 +207,16 @@ export async function recoverAbandonedTrainingJobs(): Promise<number> {
     const jobId = String(row.job_id);
     const trainingRunId = row.training_run_id ? String(row.training_run_id) : null;
     if (trainingRunId) {
-      await sql`UPDATE ml_training_run_models SET status='timed_out',error='ML worker lease expired; training run was interrupted by worker loss.',completed_at=COALESCE(completed_at,NOW()),heartbeat_at=NULL WHERE run_id=${trainingRunId} AND status IN ('running','queued')`;
-      await sql`UPDATE ml_training_runs SET status='timed_out',error='ML worker lease expired; training run was interrupted by worker loss.',completed_at=COALESCE(completed_at,NOW()),heartbeat_at=NULL,updated_at=NOW() WHERE run_id=${trainingRunId} AND status='running'`;
+      await sql`UPDATE ml_training_run_models SET status='timed_out',error='ML worker lease expired; training run was interrupted by worker loss.',completed_at=COALESCE(completed_at,NOW()),heartbeat_at=NULL WHERE run_id=${trainingRunId}::uuid AND status IN ('running','queued')`;
+      await sql`UPDATE ml_training_runs SET status='timed_out',error='ML worker lease expired; training run was interrupted by worker loss.',completed_at=COALESCE(completed_at,NOW()),heartbeat_at=NULL,updated_at=NOW() WHERE run_id=${trainingRunId}::uuid AND status='running'`;
     }
     if (row.batch_item_id) {
-      await sql`UPDATE ml_training_batch_items SET status='queued',heartbeat_at=NULL,error='ML worker lease expired; item returned to queue.',updated_at=NOW() WHERE id=${Number(row.batch_item_id)} AND status='running'`;
+      await sql`UPDATE ml_training_batch_items SET status='queued',heartbeat_at=NULL,error='ML worker lease expired; item returned to queue.',updated_at=NOW() WHERE id=${Number(row.batch_item_id)}::bigint AND status='running'`;
     }
     if (row.batch_id) {
-      await sql`UPDATE ml_training_batches SET status='queued',worker_id=NULL,heartbeat_at=NULL,error='ML worker lease expired; batch returned to queue.',updated_at=NOW() WHERE batch_id=${String(row.batch_id)} AND status IN ('running','partial')`;
+      await sql`UPDATE ml_training_batches SET status='queued',worker_id=NULL,heartbeat_at=NULL,error='ML worker lease expired; batch returned to queue.',updated_at=NOW() WHERE batch_id=${String(row.batch_id)}::uuid AND status IN ('running','partial')`;
     }
-    await sql`UPDATE ml_training_job_queue SET status='queued',worker_id=NULL,heartbeat_at=NULL,error='ML worker lease expired; job returned to queue.',available_at=NOW(),updated_at=NOW() WHERE job_id=${jobId} AND status='running'`;
+    await sql`UPDATE ml_training_job_queue SET status='queued',worker_id=NULL,heartbeat_at=NULL,error='ML worker lease expired; job returned to queue.',available_at=NOW(),updated_at=NOW() WHERE job_id=${jobId}::uuid AND status='running'`;
   }
   return rows.length;
 }
