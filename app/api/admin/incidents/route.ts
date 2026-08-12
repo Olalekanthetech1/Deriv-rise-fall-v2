@@ -2,27 +2,12 @@ import { NextRequest, NextResponse } from 'next/server';
 import { neon, type NeonQueryFunction } from '@neondatabase/serverless';
 import { ensureObservabilitySchema, recordObservabilityEvent } from '@/lib/observability';
 import { verifySessionToken } from '@/app/api/admin/auth/route';
-
-type IncidentStatus = 'open' | 'acknowledged' | 'investigating' | 'resolved';
-const validStatuses = new Set<IncidentStatus>(['open', 'acknowledged', 'investigating', 'resolved']);
+import { canTransitionIncident, normalizeIncidentStatus, type IncidentStatus } from '@/lib/incident-lifecycle';
 
 function authorized(req: NextRequest) {
   const cookie = req.cookies.get('admin_session_token')?.value;
   const header = req.headers.get('x-admin-token') || req.headers.get('authorization')?.replace(/^Bearer\s+/i, '');
   return verifySessionToken(cookie) || verifySessionToken(header);
-}
-
-function normalizeStatus(value: unknown): IncidentStatus | null {
-  const status = String(value ?? '').toLowerCase() as IncidentStatus;
-  return validStatuses.has(status) ? status : null;
-}
-
-function canTransition(from: IncidentStatus, to: IncidentStatus) {
-  if (from === to) return true;
-  if (from === 'open') return ['acknowledged', 'investigating', 'resolved'].includes(to);
-  if (from === 'acknowledged') return ['investigating', 'resolved'].includes(to);
-  if (from === 'investigating') return to === 'resolved';
-  return to === 'open';
 }
 
 async function syncRecentIncidents(sql: NeonQueryFunction<false, false>) {
@@ -85,7 +70,7 @@ export async function GET(req: NextRequest) {
     const summaryRows = await sql`SELECT status, count(*)::int AS count FROM admin_incidents GROUP BY status`;
     const summary = { open: 0, acknowledged: 0, investigating: 0, resolved: 0 };
     for (const row of summaryRows as any[]) {
-      const key = normalizeStatus(row.status);
+      const key = normalizeIncidentStatus(row.status);
       if (key) summary[key] = Number(row.count) || 0;
     }
     return NextResponse.json({ ok: true, available: true, generatedAt: new Date().toISOString(), incidents: rows, summary }, { headers: { 'Cache-Control': 'no-store' } });
@@ -104,17 +89,17 @@ export async function PATCH(req: NextRequest) {
     if (!(await ensureObservabilitySchema())) return NextResponse.json({ error: 'Incident storage is unavailable.' }, { status: 503 });
     const body = await req.json().catch(() => ({}));
     const id = Number(body.id);
-    const nextStatus = normalizeStatus(body.status);
+    const nextStatus = normalizeIncidentStatus(body.status);
     if (!Number.isSafeInteger(id) || id <= 0 || !nextStatus) return NextResponse.json({ error: 'Valid incident id and status are required.' }, { status: 400 });
 
     const sql = neon(dbUrl);
     const currentRows = await sql`SELECT id, severity, status, title, service, symbol, model_id FROM admin_incidents WHERE id = ${id} LIMIT 1`;
     if (!currentRows.length) return NextResponse.json({ error: 'Incident not found.' }, { status: 404 });
     const current = currentRows[0] as any;
-    const currentStatus = normalizeStatus(current.status);
-    if (!currentStatus || !canTransition(currentStatus, nextStatus)) return NextResponse.json({ error: `Invalid incident transition: ${current.status} → ${nextStatus}.` }, { status: 409 });
+    const currentStatus = normalizeIncidentStatus(current.status);
+    if (!currentStatus || !canTransitionIncident(currentStatus, nextStatus)) return NextResponse.json({ error: `Invalid incident transition: ${current.status} → ${nextStatus}.` }, { status: 409 });
 
-    const acknowledgedAt = nextStatus === 'acknowledged' && !currentStatus.includes('acknowledged') ? new Date().toISOString() : null;
+    const acknowledgedAt = nextStatus === 'acknowledged' && currentStatus === 'open' ? new Date().toISOString() : null;
     const investigatingAt = nextStatus === 'investigating' ? new Date().toISOString() : null;
     const resolvedAt = nextStatus === 'resolved' ? new Date().toISOString() : null;
 
