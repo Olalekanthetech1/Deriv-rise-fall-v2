@@ -23,7 +23,8 @@ function readableAssetName(symbol: string, storedDisplayName?: unknown): string 
 function normalizeRegistryModel(model: Record<string, any>) {
   const rawSymbol = String(model.asset_symbol || model.symbol || '').trim();
   const rawModelFamily = String(model.model_family || '').trim();
-  const definition = getMlModelDefinition(rawModelFamily.toLowerCase());
+  const persistedModelKey = String((model.metrics as Record<string, unknown> | null)?.modelKey || '').trim().toLowerCase();
+  const definition = getMlModelDefinition(persistedModelKey) || getMlModelDefinition(rawModelFamily.toLowerCase());
   const horizonTicks = Number(model.horizon_ticks ?? model.horizon_secs);
 
   return {
@@ -36,6 +37,30 @@ function normalizeRegistryModel(model: Record<string, any>) {
     raw_horizon_ticks: Number.isFinite(horizonTicks) ? horizonTicks : undefined,
     asset_display_name: readableAssetName(rawSymbol, model.asset_display_name),
   };
+}
+
+async function resolveCanonicalModelDefinition(sql: any, registered: Record<string, any>) {
+  const metrics = registered.metrics as Record<string, unknown> | null;
+  const persistedModelKey = typeof metrics?.modelKey === 'string' ? metrics.modelKey.trim().toLowerCase() : '';
+  if (persistedModelKey) {
+    const definition = getMlModelDefinition(persistedModelKey);
+    if (definition) return { definition, modelKey: persistedModelKey, source: 'persisted-metadata' as const };
+  }
+
+  const trainingRunId = String(registered.training_run_id || '').trim();
+  const modelId = String(registered.model_id || '').trim();
+  if (!trainingRunId || !modelId) return { definition: undefined, modelKey: '', source: 'unresolved' as const };
+
+  const rows = await sql`
+    SELECT model_type
+    FROM ml_training_run_models
+    WHERE run_id = ${trainingRunId}::uuid
+      AND model_id = ${modelId}
+    LIMIT 1
+  `;
+  const modelKey = String(rows[0]?.model_type || '').trim().toLowerCase();
+  const definition = modelKey ? getMlModelDefinition(modelKey) : undefined;
+  return { definition, modelKey, source: 'training-run-lineage' as const };
 }
 
 export async function GET(req: NextRequest) {
@@ -124,10 +149,17 @@ export async function POST(req: NextRequest) {
         return NextResponse.json({ success: false, error: 'Model promotion rejected: horizon does not match the persisted model lineage.' }, { status: 409 });
       }
 
-      const definition = getMlModelDefinition(String(registered.model_family).toLowerCase());
-      const lifecycleTier = String((registered.metrics as Record<string, unknown> | null)?.lifecycleTier || definition?.lifecycleTier || '').toLowerCase();
+      const { definition, modelKey, source } = await resolveCanonicalModelDefinition(sql, registered);
+      const persistedLifecycleTier = String((registered.metrics as Record<string, unknown> | null)?.lifecycleTier || '').toLowerCase();
+      const lifecycleTier = persistedLifecycleTier || String(definition?.lifecycleTier || '').toLowerCase();
       if (lifecycleTier !== 'production_candidate') {
-        return NextResponse.json({ success: false, error: 'Model promotion rejected: experimental models must remain isolated from production.', lifecycleTier: lifecycleTier || 'unknown' }, { status: 409 });
+        return NextResponse.json({
+          success: false,
+          error: 'Model promotion rejected: experimental models must remain isolated from production.',
+          lifecycleTier: lifecycleTier || 'unknown',
+          modelKey: modelKey || null,
+          lifecycleResolutionSource: source,
+        }, { status: 409 });
       }
 
       if (String(registered.status).toLowerCase() !== 'candidate' && String(registered.status).toLowerCase() !== 'staging') {
@@ -173,6 +205,8 @@ export async function POST(req: NextRequest) {
         promotedAt: new Date().toISOString(),
         governance,
         championModelId: champion?.model_id || null,
+        modelKey: modelKey || null,
+        lifecycleResolutionSource: source,
       });
     }
 
