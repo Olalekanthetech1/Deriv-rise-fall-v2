@@ -50,10 +50,13 @@ require(challenger, /accuracyDelta/, 'Champion/Challenger must compare governed 
 require(challenger, /f1Delta/, 'Champion/Challenger must compare governed F1 metrics');
 require(challenger, /strictly improves/i, 'Champion/Challenger must require measurable improvement');
 
-require(retrainingApi, /retraining-automation|enqueue|training/i, 'Retraining Admin API must reach the canonical retraining service/queue');
+require(retrainingApi, /training|enqueue|queue/i, 'Retraining Admin API must reach the canonical training boundary');
 require(retrainingService, /ml_training_job_queue|queue/i, 'Retraining automation must preserve the durable queue boundary');
 
-require(observability, /recordObservabilityEvent|getObservability/i, 'Admin observability must remain a canonical telemetry surface');
+require(observability, /ensureObservabilitySchema/, 'Admin observability must use the canonical persisted telemetry schema');
+require(observability, /admin_observability_events/, 'Admin observability must read persisted observability events');
+require(observability, /coverage/, 'Admin observability must report telemetry coverage rather than fabricate availability');
+require(observability, /Cache-Control.*no-store/, 'Admin observability must remain non-cacheable');
 require(incidents, /observability|incident/i, 'Incident Center must remain connected to operational evidence');
 require(verification, /signals\/predict/, 'Final verification must exercise the canonical signal path');
 require(realtime, /signals\/predict/, 'Realtime signal consumer must use the canonical signal path');
