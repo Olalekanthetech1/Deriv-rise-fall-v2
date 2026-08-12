@@ -7,7 +7,6 @@ import { ArrowLeft, CalendarClock, CheckCircle2, Play, RefreshCw, ShieldAlert, T
 type RetrainingStatus = {
   status?: string;
   scheduleConfigured?: boolean;
-  scheduleIntervalMs?: number | null;
   scheduleIntervalHours?: number | null;
   lastTrainedAt?: string | null;
   timeSinceLastTrainMinutes?: number | null;
@@ -38,7 +37,7 @@ export default function RetrainingPage() {
     setLoading(true);
     setError(null);
     try {
-      const response = await fetch('/api/ml/cron-retrain', { cache: 'no-store' });
+      const response = await fetch('/api/admin/retraining', { cache: 'no-store' });
       if (response.status === 401) { window.location.replace('/admin'); return; }
       const body: RetrainingStatus = await response.json().catch(() => ({}));
       if (!response.ok) throw new Error(body.error || `Retraining status returned HTTP ${response.status}.`);
@@ -56,7 +55,7 @@ export default function RetrainingPage() {
     if (!window.confirm(`Start a forced retraining request for ${symbol}? This queues training work and may consume significant compute.`)) return;
     setRunning(true); setMessage(null); setError(null);
     try {
-      const response = await fetch('/api/ml/cron-retrain', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ symbol, force: true }) });
+      const response = await fetch('/api/admin/retraining', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ symbol, force: true }) });
       const body = await response.json().catch(() => ({}));
       if (response.status === 401) { window.location.replace('/admin'); return; }
       if (!response.ok || body.success === false) throw new Error(body.error || `Retraining request returned HTTP ${response.status}.`);
@@ -90,7 +89,7 @@ export default function RetrainingPage() {
     </section>
 
     <section className="grid gap-5 lg:grid-cols-[1fr_0.8fr]">
-      <article className="rounded-2xl border border-white/10 bg-white/[0.025] p-5"><div className="mb-5"><h2 className="text-base font-bold">Scheduler Diagnostics</h2><p className="mt-1 text-xs leading-5 text-slate-500">The page reads the actual retraining endpoint. No health state is inferred from configuration alone.</p></div><dl className="divide-y divide-white/5 text-sm"><div className="flex items-center justify-between gap-4 py-3"><dt className="text-slate-500">Backend status</dt><dd className="font-mono text-slate-200">{data?.status || 'loading…'}</dd></div><div className="flex items-center justify-between gap-4 py-3"><dt className="text-slate-500">Schedule configured</dt><dd className="font-mono text-slate-200">{configured ? 'true' : 'false'}</dd></div><div className="flex items-center justify-between gap-4 py-3"><dt className="text-slate-500">Time since last train</dt><dd className="font-mono text-slate-200">{data?.timeSinceLastTrainMinutes != null ? `${data.timeSinceLastTrainMinutes} min` : '—'}</dd></div><div className="flex items-center justify-between gap-4 py-3"><dt className="text-slate-500">Due now</dt><dd className={`font-mono ${due ? 'text-amber-300' : 'text-slate-200'}`}>{data?.isDue == null ? '—' : String(data.isDue)}</dd></div></dl></article>
+      <article className="rounded-2xl border border-white/10 bg-white/[0.025] p-5"><div className="mb-5"><h2 className="text-base font-bold">Scheduler Diagnostics</h2><p className="mt-1 text-xs leading-5 text-slate-500">The page reads the canonical Admin retraining endpoint. No health state is inferred from configuration alone.</p></div><dl className="divide-y divide-white/5 text-sm"><div className="flex items-center justify-between gap-4 py-3"><dt className="text-slate-500">Backend status</dt><dd className="font-mono text-slate-200">{data?.status || 'loading…'}</dd></div><div className="flex items-center justify-between gap-4 py-3"><dt className="text-slate-500">Schedule configured</dt><dd className="font-mono text-slate-200">{configured ? 'true' : 'false'}</dd></div><div className="flex items-center justify-between gap-4 py-3"><dt className="text-slate-500">Time since last train</dt><dd className="font-mono text-slate-200">{data?.timeSinceLastTrainMinutes != null ? `${data.timeSinceLastTrainMinutes} min` : '—'}</dd></div><div className="flex items-center justify-between gap-4 py-3"><dt className="text-slate-500">Due now</dt><dd className={`font-mono ${due ? 'text-amber-300' : 'text-slate-200'}`}>{data?.isDue == null ? '—' : String(data.isDue)}</dd></div></dl></article>
       <article className="rounded-2xl border border-amber-400/15 bg-amber-400/[0.025] p-5"><div className="mb-5"><h2 className="text-base font-bold">Controlled Manual Run</h2><p className="mt-1 text-xs leading-5 text-slate-500">Use this only when you intentionally want to queue retraining outside the normal schedule.</p></div><label className="mb-2 block text-xs font-semibold text-slate-400">Training scope</label><select value={symbol} onChange={(event) => setSymbol(event.target.value)} className="mb-4 w-full rounded-xl border border-white/10 bg-black/30 px-3 py-3 text-xs text-slate-200 outline-none"><option value="ALL_ASSETS">ALL_ASSETS</option><option value="R_10">R_10</option><option value="R_25">R_25</option><option value="R_50">R_50</option><option value="R_75">R_75</option><option value="R_100">R_100</option></select><button onClick={runNow} disabled={running} className="flex w-full items-center justify-center gap-2 rounded-xl bg-cyan-400 px-4 py-3 text-sm font-bold text-slate-950 hover:bg-cyan-300 disabled:cursor-not-allowed disabled:opacity-60">{running ? <RefreshCw className="h-4 w-4 animate-spin" /> : <Play className="h-4 w-4" />}{running ? 'Queueing…' : 'Force Retraining Run'}</button><p className="mt-3 text-[10px] leading-4 text-slate-600">Execution remains server-side and authenticated. The UI does not bypass scheduler or database eligibility checks.</p></article>
     </section>
   </div></main>;
