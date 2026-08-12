@@ -1,3 +1,4 @@
+import crypto from 'crypto';
 import { neon } from '@neondatabase/serverless';
 import { getDbConnectionString, initDbSchema } from '@/lib/db';
 import {
@@ -28,6 +29,10 @@ type StoredRunRow = {
 
 function normalizeSymbol(symbol: string): string {
   return symbol.trim().toUpperCase();
+}
+
+function normalizeSymbols(symbols: string[]): string[] {
+  return [...new Set(symbols.map(normalizeSymbol).filter((symbol) => /^[A-Z0-9_./:-]{2,64}$/.test(symbol)))];
 }
 
 async function getLatestLogicalRun(sql: Sql, symbol: string): Promise<StoredRunRow | null> {
@@ -102,11 +107,6 @@ function maxTime(a: string | null, b: string | null): string | null {
   return new Date(a).getTime() >= new Date(b).getTime() ? a : b;
 }
 
-/**
- * Treats `targetCount` as the cumulative dataset target for a symbol.
- * Increasing 5,000 -> 10,000 therefore ingests only the missing 5,000
- * and folds that batch into the same logical backfill run.
- */
 export async function ingestDerivHistoricalBackfill(input: {
   symbol: string;
   targetCount: number;
@@ -133,14 +133,7 @@ export async function ingestDerivHistoricalBackfill(input: {
         recordsRejected: 0,
         status: 'completed' as const,
         resumedExistingSession: false,
-        progress: {
-          requested: targetCount,
-          received: currentCount,
-          inserted: currentCount,
-          rejected: 0,
-          percent: 100,
-          remaining: 0,
-        },
+        progress: { requested: targetCount, received: currentCount, inserted: currentCount, rejected: 0, percent: 100, remaining: 0 },
       };
     }
 
@@ -167,14 +160,7 @@ export async function ingestDerivHistoricalBackfill(input: {
       recordsInserted: currentCount,
       status: 'completed' as const,
       resumedExistingSession: true,
-      progress: {
-        requested: targetCount,
-        received: Math.max(latestRun.recordsReceived, currentCount),
-        inserted: currentCount,
-        rejected: latestRun.recordsRejected,
-        percent: 100,
-        remaining: 0,
-      },
+      progress: { requested: targetCount, received: Math.max(latestRun.recordsReceived, currentCount), inserted: currentCount, rejected: latestRun.recordsRejected, percent: 100, remaining: 0 },
     };
   }
 
@@ -182,25 +168,14 @@ export async function ingestDerivHistoricalBackfill(input: {
   const checkpoint = await getHistoricalIngestionCheckpoint(symbol);
   const endEpoch = checkpoint?.lastTickEpoch ? Math.max(1, Math.floor(checkpoint.lastTickEpoch) - 1) : undefined;
 
-  // Force a new physical ingestion batch. The controller merges it into the
-  // existing logical run below, so changing the target never restarts history.
-  const batchRun = await ingestDerivHistoricalTicks({
-    symbol,
-    count: missingCount,
-    resumeFromCheckpoint: false,
-    endEpoch,
-  });
+  const batchRun = await ingestDerivHistoricalTicks({ symbol, count: missingCount, resumeFromCheckpoint: false, endEpoch });
 
   if (!latestRun) {
     return {
       ...batchRun,
       requestedCount: targetCount,
       resumedExistingSession: false,
-      progress: {
-        ...batchRun.progress,
-        requested: targetCount,
-        remaining: Math.max(0, targetCount - batchRun.recordsInserted),
-      },
+      progress: { ...batchRun.progress, requested: targetCount, remaining: Math.max(0, targetCount - batchRun.recordsInserted) },
     };
   }
 
@@ -232,13 +207,7 @@ export async function ingestDerivHistoricalBackfill(input: {
         first_tick_time = ${firstTickTime},
         last_tick_time = ${lastTickTime},
         error_message = NULL,
-        metadata = ${JSON.stringify({
-          ...latestRun.metadata,
-          requestedCount: targetCount,
-          resumedAt: new Date().toISOString(),
-          cumulativeProgress,
-          batches: mergedBatches,
-        })}::jsonb
+        metadata = ${JSON.stringify({ ...latestRun.metadata, requestedCount: targetCount, resumedAt: new Date().toISOString(), cumulativeProgress, batches: mergedBatches })}::jsonb
     WHERE id = ${latestRun.runId}
   `;
 
@@ -259,16 +228,70 @@ export async function ingestDerivHistoricalBackfill(input: {
     firstTickTime,
     lastTickTime,
     errorMessage: null,
-    metadata: {
-      ...latestRun.metadata,
-      requestedCount: targetCount,
-      cumulativeProgress,
-      batches: mergedBatches,
-    },
+    metadata: { ...latestRun.metadata, requestedCount: targetCount, cumulativeProgress, batches: mergedBatches },
     resumedExistingSession: true,
-    progress: {
-      ...cumulativeProgress,
-      remaining: Math.max(0, targetCount - totalInserted),
-    },
+    progress: { ...cumulativeProgress, remaining: Math.max(0, targetCount - totalInserted) },
+  };
+}
+
+export async function ingestDerivHistoricalBatch(input: {
+  symbols: string[];
+  targetCount: number;
+  resumeFromCheckpoint: boolean;
+  concurrency?: number;
+}) {
+  const symbols = normalizeSymbols(input.symbols);
+  if (!symbols.length) throw new Error('At least one valid Deriv symbol is required.');
+  if (symbols.length > 25) throw new Error('A maximum of 25 assets can be ingested in one batch.');
+
+  const concurrency = Math.min(2, Math.max(1, Math.floor(input.concurrency || 2)));
+  const results: Array<{ symbol: string; success: boolean; status: string; recordsInserted: number; requestedCount: number; errorMessage: string | null }> = [];
+
+  for (let index = 0; index < symbols.length; index += concurrency) {
+    const chunk = symbols.slice(index, index + concurrency);
+    const chunkResults = await Promise.all(chunk.map(async (symbol) => {
+      try {
+        let result: any;
+        if (input.resumeFromCheckpoint) {
+          result = await ingestDerivHistoricalBackfill({ symbol, targetCount: input.targetCount });
+        } else {
+          const checkpoint = await getHistoricalIngestionCheckpoint(symbol);
+          const endEpoch = checkpoint?.lastTickEpoch ? Math.max(1, Math.floor(checkpoint.lastTickEpoch) - 1) : undefined;
+          result = await ingestDerivHistoricalTicks({ symbol, count: input.targetCount, resumeFromCheckpoint: false, endEpoch });
+        }
+        return {
+          symbol,
+          success: true,
+          status: String(result.status || 'completed'),
+          recordsInserted: Number(result.progress?.inserted ?? result.recordsInserted ?? 0),
+          requestedCount: Number(result.progress?.requested ?? result.requestedCount ?? input.targetCount),
+          errorMessage: result.errorMessage ? String(result.errorMessage) : null,
+        };
+      } catch (error) {
+        return {
+          symbol,
+          success: false,
+          status: 'failed',
+          recordsInserted: 0,
+          requestedCount: input.targetCount,
+          errorMessage: error instanceof Error ? error.message : 'Historical ingestion failed.',
+        };
+      }
+    }));
+    results.push(...chunkResults);
+  }
+
+  const completed = results.filter((result) => result.success && result.status === 'completed').length;
+  const partial = results.filter((result) => result.success && result.status === 'partial').length;
+  const failed = results.filter((result) => !result.success || result.status === 'failed').length;
+
+  return {
+    success: failed === 0,
+    status: failed === symbols.length ? 'failed' : failed > 0 || partial > 0 ? 'partial' : 'completed',
+    requestedAssets: symbols.length,
+    completedAssets: completed,
+    partialAssets: partial,
+    failedAssets: failed,
+    results,
   };
 }
