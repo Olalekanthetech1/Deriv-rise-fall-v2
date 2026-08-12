@@ -38,6 +38,44 @@ function attachClientRoundTripTiming(data: any, roundTripMs: number): any {
   return next;
 }
 
+function compactSequenceDatasetForTransport(dataset: unknown): unknown {
+  if (!dataset || typeof dataset !== 'object' || Array.isArray(dataset)) return dataset;
+  const current = dataset as Record<string, any>;
+  const sequences = current.featureSequences;
+  if (!Array.isArray(sequences)) return dataset;
+  if (sequences.length === 0) {
+    return {
+      ...current,
+      featureSequences: {
+        transportVersion: 1,
+        featureRows: [],
+      },
+    };
+  }
+
+  const first = sequences[0];
+  if (!Array.isArray(first) || first.length === 0) {
+    throw new Error('INVALID_SEQUENCE_TRANSPORT_PAYLOAD');
+  }
+
+  const featureRows: unknown[] = [...first];
+  for (let index = 1; index < sequences.length; index += 1) {
+    const sequence = sequences[index];
+    if (!Array.isArray(sequence) || sequence.length !== first.length) {
+      throw new Error(`INVALID_SEQUENCE_TRANSPORT_ALIGNMENT:${index}`);
+    }
+    featureRows.push(sequence[sequence.length - 1]);
+  }
+
+  return {
+    ...current,
+    featureSequences: {
+      transportVersion: 1,
+      featureRows,
+    },
+  };
+}
+
 class MlRuntimeClient {
   private child: ChildProcess | null = null;
   private pending = new Map<string, PendingRequest>();
@@ -196,9 +234,14 @@ class MlRuntimeClient {
     if (!schemaContract || typeof schemaContract !== 'object' || typeof schemaContract.schemaFingerprint !== 'string') {
       throw new Error('Invalid ML schema contract.');
     }
-    const sanitized: Record<string, unknown> = { ...payload, schemaContract };
+    const sanitized: Record<string, any> = { ...payload, schemaContract };
     if (typeof sanitized.symbol === 'string') sanitized.symbol = sanitized.symbol.replace(/[^A-Za-z0-9_]/g, '');
     if (sanitized.ticks !== undefined && !Array.isArray(sanitized.ticks)) throw new Error('ticks must be an array');
+
+    if (action === 'train_partitioned') {
+      sanitized.trainSequenceDataset = compactSequenceDatasetForTransport(sanitized.trainSequenceDataset);
+      sanitized.validationSequenceDataset = compactSequenceDatasetForTransport(sanitized.validationSequenceDataset);
+    }
 
     const id = `req_${Date.now()}_${++this.reqIdCounter}`;
     const packet = JSON.stringify({ action, id, ...sanitized }) + '\n';
