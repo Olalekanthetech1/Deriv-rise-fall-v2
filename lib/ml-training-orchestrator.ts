@@ -95,6 +95,7 @@ async function reconcileStaleTrainingRuns(sql: any): Promise<number> {
     const runId = String(row.run_id);
     await sql`UPDATE ml_training_run_models SET status=CASE WHEN status='running' THEN 'timed_out' ELSE 'cancelled' END,error=CASE WHEN status='running' THEN 'Training worker heartbeat expired; the active worker was no longer observable.' ELSE 'Training run became stale before this model started.' END,completed_at=COALESCE(completed_at, NOW()),heartbeat_at=NULL WHERE run_id=${runId}::uuid AND status IN ('running','queued')`;
     await sql`UPDATE ml_training_runs SET status='timed_out',error='Training worker heartbeat expired; the run was reconciled as stale.',completed_at=COALESCE(completed_at, NOW()),heartbeat_at=NULL,metadata=COALESCE(metadata,'{}'::jsonb) || jsonb_build_object('staleRecovery', jsonb_build_object('reconciledAt', NOW(), 'staleAfterMs', (${staleMs}::bigint))),updated_at=NOW() WHERE run_id=${runId}::uuid AND status='running'`;
+    await sql`DELETE FROM ml_training_run_reservations WHERE run_id=${runId}::uuid`;
   }
   return staleRuns.length;
 }
@@ -120,6 +121,11 @@ export async function trainDatasetModels(request: TrainingRequest) {
   if (!url || !(await initDbSchema())) throw new Error('DATABASE_UNAVAILABLE');
   const sql = neon(url);
   await ensureTrainingDurationSchema(sql);
+  await sql`CREATE TABLE IF NOT EXISTS ml_training_run_reservations (
+    dataset_id UUID PRIMARY KEY,
+    run_id UUID NOT NULL UNIQUE,
+    created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+  )`;
   await reconcileStaleTrainingRuns(sql);
 
   const rows = await sql`SELECT id,name,asset_symbol,duration_value,duration_unit,duration_seconds,horizon_type,horizon_ticks,status,leakage_check_passed,feature_schema_version,sample_count,train_count,validation_count,test_count,metadata FROM training_datasets WHERE id=${datasetId} LIMIT 1`;
@@ -167,8 +173,16 @@ export async function trainDatasetModels(request: TrainingRequest) {
   const runId = crypto.randomUUID();
   const activeWorkerId = workerId();
   const strategyMetadata = { ...strategy, sequenceLength, featureTopology: schema.featureWindows, featureSchemaVersion: schema.featureSchemaVersion, schemaFingerprint: schema.schemaFingerprint, assetMetadata };
-  await sql`INSERT INTO ml_training_runs (run_id,dataset_id,asset_symbol,duration_value,duration_unit,duration_seconds,horizon_ticks,status,requested_models,started_at,heartbeat_at,worker_id,metadata,strategy_key,strategy_version,strategy_metadata) VALUES (${runId}::uuid,${datasetId}::text,${String(dataset.asset_symbol)}::varchar,${durationValue}::integer,${durationUnit}::varchar,${durationSeconds}::numeric,${effectiveHorizonTicks}::integer,'running'::varchar,${JSON.stringify(definitions.map((d) => d.key))}::jsonb,NOW(),NOW(),${activeWorkerId}::varchar,${JSON.stringify({featureSchemaVersion:schema.featureSchemaVersion,schemaFingerprint:schema.schemaFingerprint,datasetFeatureSchemaVersion: datasetSchemaVersion,datasetSchemaCompatibility: schemaCompatible ? 'compatible' : 'exact',featureTopology:schema.featureWindows,sequenceLength,workerId:activeWorkerId})}::jsonb,${strategy.key}::varchar,${strategy.version}::varchar,${JSON.stringify(strategyMetadata)}::jsonb)`;
-  for (const d of definitions) await sql`INSERT INTO ml_training_run_models(run_id,model_type,status) VALUES(${runId}::uuid,${d.key}::varchar,'queued'::varchar)`;
+  const reservation = await sql`INSERT INTO ml_training_run_reservations (dataset_id,run_id) VALUES (${datasetId}::uuid,${runId}::uuid) ON CONFLICT (dataset_id) DO NOTHING RETURNING dataset_id`;
+  if (!reservation.length) throw new Error('TRAINING_ALREADY_RUNNING');
+
+  try {
+    await sql`INSERT INTO ml_training_runs (run_id,dataset_id,asset_symbol,duration_value,duration_unit,duration_seconds,horizon_ticks,status,requested_models,started_at,heartbeat_at,worker_id,metadata,strategy_key,strategy_version,strategy_metadata) VALUES (${runId}::uuid,${datasetId}::text,${String(dataset.asset_symbol)}::varchar,${durationValue}::integer,${durationUnit}::varchar,${durationSeconds}::numeric,${effectiveHorizonTicks}::integer,'running'::varchar,${JSON.stringify(definitions.map((d) => d.key))}::jsonb,NOW(),NOW(),${activeWorkerId}::varchar,${JSON.stringify({featureSchemaVersion:schema.featureSchemaVersion,schemaFingerprint:schema.schemaFingerprint,datasetFeatureSchemaVersion: datasetSchemaVersion,datasetSchemaCompatibility: schemaCompatible ? 'compatible' : 'exact',featureTopology:schema.featureWindows,sequenceLength,workerId:activeWorkerId})}::jsonb,${strategy.key}::varchar,${strategy.version}::varchar,${JSON.stringify(strategyMetadata)}::jsonb)`;
+    for (const d of definitions) await sql`INSERT INTO ml_training_run_models(run_id,model_type,status) VALUES(${runId}::uuid,${d.key}::varchar,'queued'::varchar)`;
+  } catch (error) {
+    await sql`DELETE FROM ml_training_run_reservations WHERE run_id=${runId}::uuid`;
+    throw error;
+  }
 
   const results: any[] = [];
   let completed = 0;
@@ -241,6 +255,7 @@ export async function trainDatasetModels(request: TrainingRequest) {
 
   const finalStatus = failed === 0 ? 'completed' : completed > 0 ? 'partial' : 'failed';
   await sql`UPDATE ml_training_runs SET status=${finalStatus}::varchar,completed_models=${completed}::integer,failed_models=${failed}::integer,completed_at=COALESCE(completed_at,NOW()),heartbeat_at=NULL,metadata=COALESCE(metadata,'{}'::jsonb) || jsonb_build_object('timeoutCount', ${timeoutCount}::integer),updated_at=NOW() WHERE run_id=${runId}::uuid`;
+  if (finalStatus !== 'completed') await sql`DELETE FROM ml_training_run_reservations WHERE run_id=${runId}::uuid`;
   return { runId, status: finalStatus, completedModels: completed, failedModels: failed, totalModels: definitions.length, strategy: { key: strategy.key, version: strategy.version, sequenceLength, featureTopology: schema.featureWindows }, dataset: { id: datasetId, symbol: dataset.asset_symbol, durationValue, durationUnit, durationSeconds, effectiveHorizonTicks }, results };
 }
 
