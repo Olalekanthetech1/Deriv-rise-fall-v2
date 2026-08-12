@@ -1,9 +1,11 @@
 import { NextRequest, NextResponse } from 'next/server';
+import { randomUUID } from 'node:crypto';
 import { TickPoint } from '@/lib/ml-feature-extractor';
 import { evaluateProductionEnsemble, ProductionEnsembleResult } from '@/lib/production-ensemble';
 import { initDbSchema, getDb } from '@/lib/db';
 import { ensureMinTicks } from '@/lib/ticks-helper';
 import { buildConsensus, createDuration, durationToSeconds } from '@/lib/signal-manager';
+import { verifySessionToken } from '../../admin/auth/route';
 
 export interface DurationPrediction {
   value: number;
@@ -71,7 +73,7 @@ function buildSignalItems(ensemble: ProductionEnsembleResult, duration: ReturnTy
         expiresAt: expiry,
         winRate: 'Native model probability',
         description: `${evaluation.details} · Gate ${executable ? 'passed' : 'blocked'} (${ensemble.strategyGate.confidenceGateThreshold}%)`,
-        strategyGateAccepted: executable,
+        strategyGateAccepted: ensemble.strategyGate.accepted,
         strategyGateThreshold: ensemble.strategyGate.confidenceGateThreshold,
         strategyGateRiskTier: ensemble.strategyGate.riskTier,
         strategyGateReasons: ensemble.strategyGate.reasons,
@@ -100,7 +102,22 @@ function buildModeRecommendations(signals: SignalResponseItem[]) {
   }));
 }
 
+function isAdminDiagnosticAuthorized(req: NextRequest): boolean {
+  const cookieToken = req.cookies.get('admin_session_token')?.value;
+  const headerToken = req.headers.get('x-admin-token') || req.headers.get('authorization')?.replace(/^Bearer\s+/i, '');
+  return verifySessionToken(cookieToken) || verifySessionToken(headerToken);
+}
+
 export async function POST(req: NextRequest) {
+  const incomingCorrelationId = req.headers.get('x-correlation-id')?.trim();
+  const correlationId = incomingCorrelationId && incomingCorrelationId.length <= 128 ? incomingCorrelationId : randomUUID();
+  const diagnostic = req.headers.get('x-admin-diagnostic') === 'true';
+  const responseHeaders = { 'Cache-Control': 'no-store', 'x-correlation-id': correlationId };
+
+  if (diagnostic && !isAdminDiagnosticAuthorized(req)) {
+    return NextResponse.json({ success: false, diagnostic: true, correlationId, error: 'Admin authorization is required for diagnostic signal verification.' }, { status: 401, headers: responseHeaders });
+  }
+
   try {
     await initDbSchema();
     const body = await req.json().catch(() => ({}));
@@ -170,7 +187,7 @@ export async function POST(req: NextRequest) {
 
     const winStats = { total: totalVerified, winCount, accuracy };
     const primary = generatedSignals[0];
-    if (sql && ensemble.strategyGate.accepted) {
+    if (sql && ensemble.strategyGate.accepted && !diagnostic) {
       try {
         await sql`INSERT INTO trades (symbol, contract_type, stake, status, prediction_confidence, strategy) VALUES (${symbol}, ${primary.direction}, 10, 'PREDICTED', ${primary.confidence}, 'Native Production Ensemble Signal · Asset-Aware Gate')`;
       } catch (dbErr) {
@@ -180,6 +197,8 @@ export async function POST(req: NextRequest) {
 
     return NextResponse.json({
       success: true,
+      diagnostic,
+      correlationId,
       assetContext: ensemble.assetContext,
       strategyGate: ensemble.strategyGate,
       prediction: { signal: ensemble.direction === 'RISE' ? 'CALL' : 'PUT', confidence: ensemble.confidence, probabilityUp: ensemble.probUp, probabilityDown: ensemble.probDown, symbol, features: ensemble.features, timestamp: now, modelVersion: 'native-production-ensemble' },
@@ -192,9 +211,9 @@ export async function POST(req: NextRequest) {
       anomalyScore: ensemble.anomalyScore,
       modelBreakdown: ensemble.modelBreakdown,
       multiModelEnsemble: ensemble,
-    }, { headers: { 'Cache-Control': 'no-store' } });
+    }, { headers: responseHeaders });
   } catch (err: unknown) {
-    console.error('[Signal Prediction Error]:', err);
-    return NextResponse.json({ success: false, error: err instanceof Error ? err.message : 'Signal prediction failed' }, { status: 503 });
+    console.error(`[Signal Prediction Error] correlationId=${correlationId}:`, err);
+    return NextResponse.json({ success: false, diagnostic, correlationId, error: err instanceof Error ? err.message : 'Signal prediction failed' }, { status: 503, headers: responseHeaders });
   }
 }
