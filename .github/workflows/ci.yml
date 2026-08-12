@@ -31,8 +31,8 @@ jobs:
       - name: Typecheck
         run: npm run typecheck
 
-      - name: Prediction / Trading integration governance invariant
-        run: node scripts/tests/prediction-trading-integration-invariants.mjs
+      - name: Cross-module integration governance invariant
+        run: node scripts/tests/cross-module-integration-invariants.mjs
 
       - name: Production build
         run: npm run build
