@@ -15,10 +15,11 @@
     "verify-signal-forensics": "node scripts/tests/signal-forensics-invariants.mjs",
     "verify-model-operations": "node scripts/tests/model-operations-invariants.mjs",
     "verify-ml-config": "node scripts/tests/ml-config-invariants.mjs",
+    "verify-retraining-automation": "node scripts/tests/retraining-automation-invariants.mjs",
     "db:storage:audit": "node scripts/db-storage-maintenance.mjs",
     "db:storage:prune": "node scripts/db-storage-maintenance.mjs --prune-ticks",
     "postinstall": "node scripts/copy-smartcharts-assets.js",
-    "prebuild": "node scripts/copy-smartcharts-assets.js && npm run verify-ml-architecture && npm run verify-gate6-legacy && npm run verify-signal-forensics && npm run verify-model-operations && npm run verify-ml-config"
+    "prebuild": "node scripts/copy-smartcharts-assets.js && npm run verify-ml-architecture && npm run verify-gate6-legacy && npm run verify-signal-forensics && npm run verify-model-operations && npm run verify-ml-config && npm run verify-retraining-automation"
   },
   "dependencies": {
     "@deriv-com/smartcharts-champion": "^1.9.13",
