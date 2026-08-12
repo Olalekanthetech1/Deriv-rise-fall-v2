@@ -54,6 +54,49 @@ def _attach_request_context(output: dict, request: dict) -> dict:
     return next_output
 
 
+def _expand_compact_sequence_dataset(dataset: object) -> None:
+    """Expand the compact transport representation into legacy sequence windows in Python memory."""
+    if not isinstance(dataset, dict):
+        return
+
+    compact = dataset.get("featureSequences")
+    if not isinstance(compact, dict):
+        return
+
+    feature_rows = compact.get("featureRows")
+    labels = dataset.get("labels")
+    sequence_length = dataset.get("sequenceLength")
+    if not isinstance(feature_rows, list) or not isinstance(labels, list):
+        raise ValueError("INVALID_COMPACT_SEQUENCE_DATASET")
+
+    try:
+        sequence_length_int = int(sequence_length)
+    except (TypeError, ValueError):
+        raise ValueError("INVALID_COMPACT_SEQUENCE_LENGTH")
+
+    if sequence_length_int <= 0:
+        raise ValueError("INVALID_COMPACT_SEQUENCE_LENGTH")
+
+    expected_sequences = max(0, len(feature_rows) - sequence_length_int + 1)
+    if expected_sequences != len(labels):
+        raise ValueError(
+            f"COMPACT_SEQUENCE_ALIGNMENT_MISMATCH: rows={len(feature_rows)} sequenceLength={sequence_length_int} labels={len(labels)}"
+        )
+
+    dataset["featureSequences"] = [
+        feature_rows[index:index + sequence_length_int]
+        for index in range(expected_sequences)
+    ]
+
+
+def _expand_compact_sequence_payload(request: dict) -> None:
+    """Expand compact sequence transport for both training and validation partitions."""
+    for key in ("trainSequenceDataset", "validationSequenceDataset"):
+        dataset = request.get(key)
+        if isinstance(dataset, dict):
+            _expand_compact_sequence_dataset(dataset)
+
+
 def dispatch(request: dict) -> dict:
     runtime.configure_schema(request.get("schemaContract"))
     action = request.get("action")
@@ -65,6 +108,7 @@ def dispatch(request: dict) -> dict:
         return runtime.train_one(request.get("modelType", "xgboost"), request)
 
     if action == "train_partitioned":
+        _expand_compact_sequence_payload(request)
         return duration_training.train_partitioned(request.get("modelType", "xgboost"), request)
 
     if action == "predict_ensemble":
