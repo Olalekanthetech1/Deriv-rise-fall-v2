@@ -5,6 +5,7 @@ import { evaluateProductionEnsemble, ProductionEnsembleResult } from '@/lib/prod
 import { initDbSchema, getDb } from '@/lib/db';
 import { ensureMinTicks } from '@/lib/ticks-helper';
 import { buildConsensus, createDuration, durationToSeconds } from '@/lib/signal-manager';
+import { verifySessionToken } from '../../admin/auth/route';
 
 export interface DurationPrediction {
   value: number;
@@ -72,7 +73,7 @@ function buildSignalItems(ensemble: ProductionEnsembleResult, duration: ReturnTy
         expiresAt: expiry,
         winRate: 'Native model probability',
         description: `${evaluation.details} · Gate ${executable ? 'passed' : 'blocked'} (${ensemble.strategyGate.confidenceGateThreshold}%)`,
-        strategyGateAccepted: executable,
+        strategyGateAccepted: ensemble.strategyGate.accepted,
         strategyGateThreshold: ensemble.strategyGate.confidenceGateThreshold,
         strategyGateRiskTier: ensemble.strategyGate.riskTier,
         strategyGateReasons: ensemble.strategyGate.reasons,
@@ -101,11 +102,21 @@ function buildModeRecommendations(signals: SignalResponseItem[]) {
   }));
 }
 
+function isAdminDiagnosticAuthorized(req: NextRequest): boolean {
+  const cookieToken = req.cookies.get('admin_session_token')?.value;
+  const headerToken = req.headers.get('x-admin-token') || req.headers.get('authorization')?.replace(/^Bearer\s+/i, '');
+  return verifySessionToken(cookieToken) || verifySessionToken(headerToken);
+}
+
 export async function POST(req: NextRequest) {
   const incomingCorrelationId = req.headers.get('x-correlation-id')?.trim();
   const correlationId = incomingCorrelationId && incomingCorrelationId.length <= 128 ? incomingCorrelationId : randomUUID();
   const diagnostic = req.headers.get('x-admin-diagnostic') === 'true';
   const responseHeaders = { 'Cache-Control': 'no-store', 'x-correlation-id': correlationId };
+
+  if (diagnostic && !isAdminDiagnosticAuthorized(req)) {
+    return NextResponse.json({ success: false, diagnostic: true, correlationId, error: 'Admin authorization is required for diagnostic signal verification.' }, { status: 401, headers: responseHeaders });
+  }
 
   try {
     await initDbSchema();
