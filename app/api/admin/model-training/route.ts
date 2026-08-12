@@ -4,6 +4,7 @@ import { getMlModelKeys, type MlModelKey } from '@/lib/ml-model-registry';
 import { listTrainingRuns } from '@/lib/ml-training-orchestrator';
 import { clearFailedTrainingRunHistory, clearTerminalTrainingQueueHistory } from '@/lib/ml-training-history';
 import { enqueueTrainingJob, listTrainingQueueJobs, recoverAbandonedTrainingJobs } from '@/lib/ml-training-queue';
+import { resolveTrainingDedup } from '@/lib/ml-training-dedup';
 import { getDb } from '@/lib/db';
 import { mlRuntimeClient } from '@/lib/ml-runtime-client';
 import { formatReadableAsset } from '@/lib/ml-display-formatters';
@@ -11,7 +12,7 @@ import { formatReadableAsset } from '@/lib/ml-display-formatters';
 function isAdmin(req: NextRequest): boolean {
   const cookieToken = req.cookies.get('admin_session_token')?.value;
   const headerToken = req.headers.get('x-admin-token') || req.headers.get('authorization')?.replace(/^Bearer\s+/i, '');
-  return verifySessionToken(cookieToken) || verifySessionToken(headerToken);
+  return Boolean(verifySessionToken(cookieToken) || verifySessionToken(headerToken));
 }
 function noStore() { return { 'Cache-Control': 'no-store, max-age=0' }; }
 function isUuid(value: unknown): value is string { return typeof value === 'string' && /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(value); }
@@ -132,17 +133,30 @@ export async function POST(req: NextRequest) {
     if (!datasetId) return NextResponse.json({ success: false, error: 'datasetId is required. Select a completed leakage-validated dataset.' }, { status: 400, headers: noStore() });
     const requested = Array.isArray(body?.modelTypes) ? body.modelTypes.filter((value: unknown): value is MlModelKey => typeof value === 'string' && getMlModelKeys().includes(value as MlModelKey)) : undefined;
     if (Array.isArray(body?.modelTypes) && body.modelTypes.length > 0 && (!requested || requested.length !== body.modelTypes.length)) return NextResponse.json({ success: false, error: 'One or more requested model types are not registered for production training. Experimental models must be launched explicitly from the Experimental Lab.' }, { status: 400, headers: noStore() });
-    const job = await enqueueTrainingJob({ datasetId, modelTypes: requested });
+
+    const retryFailed = body?.retryFailed === true;
+    const requestedModels = requested?.length ? requested : getMlModelKeys();
+    const dedup = await resolveTrainingDedup(datasetId, requestedModels, retryFailed);
+
+    if (!dedup.allowedModelTypes.length) {
+      if (dedup.skippedCompletedModelTypes.length) throw new Error(`TRAINING_ALREADY_COMPLETED:${dedup.skippedCompletedModelTypes.join(',')}`);
+      if (dedup.blockedFailedModelTypes.length) throw new Error(`TRAINING_RETRY_FAILED_EXPLICIT:${dedup.blockedFailedModelTypes.join(',')}`);
+      throw new Error('NO_NEW_MODEL_TRAINING_REQUIRED');
+    }
+
+    const job = await enqueueTrainingJob({ datasetId, modelTypes: dedup.allowedModelTypes });
     return NextResponse.json({
       success: true,
       queued: true,
       dataSource: 'persisted-real-tick-dataset',
       workerBoundary: 'dedicated-ml-worker',
+      skippedCompletedModelTypes: dedup.skippedCompletedModelTypes,
+      blockedFailedModelTypes: dedup.blockedFailedModelTypes,
       ...job,
     }, { status: 202, headers: noStore() });
   } catch (error) {
     const message = error instanceof Error ? error.message : 'Model training could not be queued.';
-    const status = /TRAINING_ALREADY_(RUNNING|QUEUED)/i.test(message) ? 409 : /REQUIRED/i.test(message) ? 400 : /DATABASE/i.test(message) ? 503 : 500;
+    const status = /TRAINING_ALREADY_|TRAINING_RETRY_FAILED_EXPLICIT|NO_NEW_MODEL_TRAINING_REQUIRED/i.test(message) ? 409 : /REQUIRED/i.test(message) ? 400 : /DATABASE/i.test(message) ? 503 : 500;
     return NextResponse.json({ success: false, error: message }, { status, headers: noStore() });
   }
 }

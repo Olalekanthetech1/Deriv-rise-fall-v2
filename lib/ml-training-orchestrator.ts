@@ -84,7 +84,7 @@ function sequencePartitions(rows: any[], sequenceLength: number, schema: any) {
 }
 
 async function updateRun(sql: any, runId: string, status: string, completedModels: number, failedModels: number, completedAt: string | null = null, metadata: Record<string, unknown> = {}) {
-  await sql`UPDATE ml_training_runs SET status=${status},completed_models=${completedModels},failed_models=${failedModels},completed_at=${completedAt},metadata=${JSON.stringify(metadata)}::jsonb,updated_at=NOW() WHERE run_id=${runId}`;
+  await sql`UPDATE ml_training_runs SET status=${status}::varchar,completed_models=${completedModels}::integer,failed_models=${failedModels}::integer,completed_at=${completedAt}::timestamptz,metadata=${JSON.stringify(metadata)}::jsonb,updated_at=NOW() WHERE run_id=${runId}::uuid`;
 }
 
 async function reconcileStaleTrainingRuns(sql: any): Promise<number> {
@@ -93,8 +93,8 @@ async function reconcileStaleTrainingRuns(sql: any): Promise<number> {
   if (!staleRuns.length) return 0;
   for (const row of staleRuns) {
     const runId = String(row.run_id);
-    await sql`UPDATE ml_training_run_models SET status=CASE WHEN status='running' THEN 'timed_out' ELSE 'cancelled' END,error=CASE WHEN status='running' THEN 'Training worker heartbeat expired; the active worker was no longer observable.' ELSE 'Training run became stale before this model started.' END,completed_at=COALESCE(completed_at, NOW()),heartbeat_at=NULL WHERE run_id=${runId} AND status IN ('running','queued')`;
-    await sql`UPDATE ml_training_runs SET status='timed_out',error='Training worker heartbeat expired; the run was reconciled as stale.',completed_at=COALESCE(completed_at, NOW()),heartbeat_at=NULL,metadata=COALESCE(metadata,'{}'::jsonb) || jsonb_build_object('staleRecovery', jsonb_build_object('reconciledAt', NOW(), 'staleAfterMs', (${staleMs}::bigint))),updated_at=NOW() WHERE run_id=${runId} AND status='running'`;
+    await sql`UPDATE ml_training_run_models SET status=CASE WHEN status='running' THEN 'timed_out' ELSE 'cancelled' END,error=CASE WHEN status='running' THEN 'Training worker heartbeat expired; the active worker was no longer observable.' ELSE 'Training run became stale before this model started.' END,completed_at=COALESCE(completed_at, NOW()),heartbeat_at=NULL WHERE run_id=${runId}::uuid AND status IN ('running','queued')`;
+    await sql`UPDATE ml_training_runs SET status='timed_out',error='Training worker heartbeat expired; the run was reconciled as stale.',completed_at=COALESCE(completed_at, NOW()),heartbeat_at=NULL,metadata=COALESCE(metadata,'{}'::jsonb) || jsonb_build_object('staleRecovery', jsonb_build_object('reconciledAt', NOW(), 'staleAfterMs', (${staleMs}::bigint))),updated_at=NOW() WHERE run_id=${runId}::uuid AND status='running'`;
   }
   return staleRuns.length;
 }
@@ -102,8 +102,8 @@ async function reconcileStaleTrainingRuns(sql: any): Promise<number> {
 function startTrainingHeartbeat(sql: any, runId: string, modelType: string, activeWorkerId: string) {
   const beat = async () => {
     try {
-      await sql`UPDATE ml_training_runs SET heartbeat_at=NOW(), worker_id=${activeWorkerId}, updated_at=NOW() WHERE run_id=${runId} AND status='running'`;
-      await sql`UPDATE ml_training_run_models SET heartbeat_at=NOW() WHERE run_id=${runId} AND model_type=${modelType} AND status='running'`;
+      await sql`UPDATE ml_training_runs SET heartbeat_at=NOW(), worker_id=${activeWorkerId}::varchar, updated_at=NOW() WHERE run_id=${runId}::uuid AND status='running'`;
+      await sql`UPDATE ml_training_run_models SET heartbeat_at=NOW() WHERE run_id=${runId}::uuid AND model_type=${modelType}::varchar AND status='running'`;
     } catch {
       // Heartbeat failures must not hide model errors.
     }
@@ -153,7 +153,7 @@ export async function trainDatasetModels(request: TrainingRequest) {
   }
   if (partitions.train.sampleCount < 2 || new Set(partitions.train.labels).size < 2 || partitions.validation.sampleCount < 2 || new Set(partitions.validation.labels).size < 2) throw new Error('INSUFFICIENT_TWO_CLASS_TRAIN_VALIDATION_DATA');
 
-  const assetRows = await sql`SELECT asset_class,market_type,metadata FROM market_assets WHERE symbol=${String(dataset.asset_symbol)} LIMIT 1`;
+  const assetRows = await sql`SELECT asset_class,market_type,metadata FROM market_assets WHERE symbol=${String(dataset.asset_symbol)}::varchar LIMIT 1`;
   const assetClass = String(assetRows[0]?.asset_class || 'unknown');
   const marketType = String(assetRows[0]?.market_type || 'unknown');
   const assetMetadata = assetRows[0]?.metadata && typeof assetRows[0].metadata === 'object' ? assetRows[0].metadata : {};
@@ -167,8 +167,8 @@ export async function trainDatasetModels(request: TrainingRequest) {
   const runId = crypto.randomUUID();
   const activeWorkerId = workerId();
   const strategyMetadata = { ...strategy, sequenceLength, featureTopology: schema.featureWindows, featureSchemaVersion: schema.featureSchemaVersion, schemaFingerprint: schema.schemaFingerprint, assetMetadata };
-  await sql`INSERT INTO ml_training_runs (run_id,dataset_id,asset_symbol,duration_value,duration_unit,duration_seconds,horizon_ticks,status,requested_models,started_at,heartbeat_at,worker_id,metadata,strategy_key,strategy_version,strategy_metadata) VALUES (${runId},${datasetId},${String(dataset.asset_symbol)},${durationValue},${durationUnit},${durationSeconds},${effectiveHorizonTicks},'running',${JSON.stringify(definitions.map((d) => d.key))}::jsonb,NOW(),NOW(),${activeWorkerId},${JSON.stringify({featureSchemaVersion:schema.featureSchemaVersion,schemaFingerprint:schema.schemaFingerprint,datasetFeatureSchemaVersion: datasetSchemaVersion,datasetSchemaCompatibility: schemaCompatible ? 'compatible' : 'exact',featureTopology:schema.featureWindows,sequenceLength,workerId:activeWorkerId})}::jsonb,${strategy.key},${strategy.version},${JSON.stringify(strategyMetadata)}::jsonb)`;
-  for (const d of definitions) await sql`INSERT INTO ml_training_run_models(run_id,model_type,status) VALUES(${runId},${d.key},'queued')`;
+  await sql`INSERT INTO ml_training_runs (run_id,dataset_id,asset_symbol,duration_value,duration_unit,duration_seconds,horizon_ticks,status,requested_models,started_at,heartbeat_at,worker_id,metadata,strategy_key,strategy_version,strategy_metadata) VALUES (${runId}::uuid,${datasetId}::text,${String(dataset.asset_symbol)}::varchar,${durationValue}::integer,${durationUnit}::varchar,${durationSeconds}::numeric,${effectiveHorizonTicks}::integer,'running'::varchar,${JSON.stringify(definitions.map((d) => d.key))}::jsonb,NOW(),NOW(),${activeWorkerId}::varchar,${JSON.stringify({featureSchemaVersion:schema.featureSchemaVersion,schemaFingerprint:schema.schemaFingerprint,datasetFeatureSchemaVersion: datasetSchemaVersion,datasetSchemaCompatibility: schemaCompatible ? 'compatible' : 'exact',featureTopology:schema.featureWindows,sequenceLength,workerId:activeWorkerId})}::jsonb,${strategy.key}::varchar,${strategy.version}::varchar,${JSON.stringify(strategyMetadata)}::jsonb)`;
+  for (const d of definitions) await sql`INSERT INTO ml_training_run_models(run_id,model_type,status) VALUES(${runId}::uuid,${d.key}::varchar,'queued'::varchar)`;
 
   const results: any[] = [];
   let completed = 0;
@@ -176,7 +176,7 @@ export async function trainDatasetModels(request: TrainingRequest) {
   let timeoutCount = 0;
 
   for (const definition of definitions) {
-    await sql`UPDATE ml_training_run_models SET status='running',started_at=NOW(),heartbeat_at=NOW() WHERE run_id=${runId} AND model_type=${definition.key}`;
+    await sql`UPDATE ml_training_run_models SET status='running'::varchar,started_at=NOW(),heartbeat_at=NOW() WHERE run_id=${runId}::uuid AND model_type=${definition.key}::varchar`;
     const stopHeartbeat = startTrainingHeartbeat(sql, runId, definition.key, activeWorkerId);
     let modelTimedOut = false;
     try {
@@ -204,13 +204,13 @@ export async function trainDatasetModels(request: TrainingRequest) {
         strategyMetadata: { sequenceLength, featureTopology: schema.featureWindows, minimumSamples: strategy.minimumSamples[definition.key], assetClass: strategy.assetClass, marketType: strategy.marketType },
         metrics, hyperparameters: configuredHyperparameters,
       });
-      await sql`UPDATE ml_training_run_models SET status='completed',model_id=${modelId},metrics=${JSON.stringify(metrics)}::jsonb,completed_at=NOW(),heartbeat_at=NULL WHERE run_id=${runId} AND model_type=${definition.key}`;
+      await sql`UPDATE ml_training_run_models SET status='completed'::varchar,model_id=${modelId}::text,metrics=${JSON.stringify(metrics)}::jsonb,completed_at=NOW(),heartbeat_at=NULL WHERE run_id=${runId}::uuid AND model_type=${definition.key}::varchar`;
       completed += 1;
       results.push({ modelType: definition.key, success: true, modelId, metrics, engine: result.engine });
     } catch (error) {
       const message = error instanceof Error ? error.message : 'Native training failed.';
       modelTimedOut = message.startsWith('ML_TRAINING_TIMEOUT');
-      await sql`UPDATE ml_training_run_models SET status=${modelTimedOut ? 'timed_out' : 'failed'},error=${message},completed_at=NOW(),heartbeat_at=NULL WHERE run_id=${runId} AND model_type=${definition.key}`;
+      await sql`UPDATE ml_training_run_models SET status=${modelTimedOut ? 'timed_out' : 'failed'}::varchar,error=${message}::text,completed_at=NOW(),heartbeat_at=NULL WHERE run_id=${runId}::uuid AND model_type=${definition.key}::varchar`;
       failed += 1;
       if (modelTimedOut) timeoutCount += 1;
       results.push({ modelType: definition.key, success: false, timedOut: modelTimedOut, error: message });
@@ -240,7 +240,7 @@ export async function trainDatasetModels(request: TrainingRequest) {
   }
 
   const finalStatus = failed === 0 ? 'completed' : completed > 0 ? 'partial' : 'failed';
-  await sql`UPDATE ml_training_runs SET status=${finalStatus},completed_models=${completed},failed_models=${failed},completed_at=COALESCE(completed_at,NOW()),heartbeat_at=NULL,metadata=COALESCE(metadata,'{}'::jsonb) || jsonb_build_object('timeoutCount', ${timeoutCount}),updated_at=NOW() WHERE run_id=${runId}`;
+  await sql`UPDATE ml_training_runs SET status=${finalStatus}::varchar,completed_models=${completed}::integer,failed_models=${failed}::integer,completed_at=COALESCE(completed_at,NOW()),heartbeat_at=NULL,metadata=COALESCE(metadata,'{}'::jsonb) || jsonb_build_object('timeoutCount', ${timeoutCount}::integer),updated_at=NOW() WHERE run_id=${runId}::uuid`;
   return { runId, status: finalStatus, completedModels: completed, failedModels: failed, totalModels: definitions.length, strategy: { key: strategy.key, version: strategy.version, sequenceLength, featureTopology: schema.featureWindows }, dataset: { id: datasetId, symbol: dataset.asset_symbol, durationValue, durationUnit, durationSeconds, effectiveHorizonTicks }, results };
 }
 
@@ -251,7 +251,7 @@ export async function listTrainingRuns(symbol?: string) {
   await ensureTrainingDurationSchema(sql);
   await reconcileStaleTrainingRuns(sql);
   const rows = symbol
-    ? await sql`SELECT r.*,COALESCE(json_agg(m ORDER BY m.created_at) FILTER(WHERE m.id IS NOT NULL),'[]'::json) AS models FROM ml_training_runs r LEFT JOIN ml_training_run_models m ON m.run_id=r.run_id WHERE r.asset_symbol=${symbol} GROUP BY r.run_id ORDER BY r.created_at DESC LIMIT 50`
+    ? await sql`SELECT r.*,COALESCE(json_agg(m ORDER BY m.created_at) FILTER(WHERE m.id IS NOT NULL),'[]'::json) AS models FROM ml_training_runs r LEFT JOIN ml_training_run_models m ON m.run_id=r.run_id WHERE r.asset_symbol=${symbol}::varchar GROUP BY r.run_id ORDER BY r.created_at DESC LIMIT 50`
     : await sql`SELECT r.*,COALESCE(json_agg(m ORDER BY m.created_at) FILTER(WHERE m.id IS NOT NULL),'[]'::json) AS models FROM ml_training_runs r LEFT JOIN ml_training_run_models m ON m.run_id=r.run_id GROUP BY r.run_id ORDER BY r.created_at DESC LIMIT 50`;
   return rows;
 }
@@ -261,7 +261,7 @@ export async function clearTrainingRunHistory() {
   if (!url || !(await initDbSchema())) throw new Error('DATABASE_UNAVAILABLE');
   const sql = neon(url);
   await ensureTrainingDurationSchema(sql);
-  await sql`UPDATE ml_training_run_models SET status='cancelled',error=COALESCE(error,'Training history archived by admin.'),completed_at=COALESCE(completed_at,NOW()),heartbeat_at=NULL WHERE run_id IN (SELECT run_id FROM ml_training_runs WHERE status IN ('failed','partial','timed_out','cancelled')) AND status IN ('queued','running')`;
+  await sql`UPDATE ml_training_run_models SET status='cancelled'::varchar,error=COALESCE(error,'Training history archived by admin.'),completed_at=COALESCE(completed_at,NOW()),heartbeat_at=NULL WHERE run_id IN (SELECT run_id FROM ml_training_runs WHERE status IN ('failed','partial','timed_out','cancelled')) AND status IN ('queued','running')`;
   await sql`DELETE FROM ml_training_run_models WHERE run_id IN (SELECT run_id FROM ml_training_runs WHERE status IN ('failed','partial','timed_out','cancelled'))`;
   await sql`DELETE FROM ml_training_runs WHERE status IN ('failed','partial','timed_out','cancelled')`;
   return true;
