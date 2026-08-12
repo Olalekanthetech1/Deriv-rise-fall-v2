@@ -17,9 +17,9 @@ export const adminRoadmap: RoadmapSection[] = [
   { id: 'training-pipeline', title: 'Model Training Pipeline', description: 'Eight-model native training from persisted duration-aware datasets with per-model validation and audit lineage.', status: 'next' },
   { id: 'retraining', title: 'Retraining & Automation', description: 'Scheduler status, last-training evidence, due-state monitoring and controlled manual retraining.', status: 'next' },
   { id: 'asset-strategy', title: 'Asset-Aware Model Strategy', description: 'Runtime asset-class and market-type strategy selection with duration-aware model adaptation and persisted lineage.', status: 'next' },
-  { id: 'champion-challenger', title: 'Champion/Challenger Evaluation', description: 'Out-of-sample model comparison and promotion gates.', status: 'planned' },
-  { id: 'prediction-integration', title: 'Prediction & Trading Integration', description: 'Trained-model inference, execution lineage and trade persistence.', status: 'planned' },
-  { id: 'final-verification', title: 'Production Verification', description: 'Build verification, deployment checks and final integrity audit.', status: 'planned' },
+  { id: 'champion-challenger', title: 'Champion/Challenger Evaluation', description: 'Compare persisted production champions with candidates and enforce server-side promotion gates.', status: 'next' },
+  { id: 'prediction-integration', title: 'Prediction & Trading Integration', description: 'Production prediction boundary readiness, model lineage and signal-path verification.', status: 'next' },
+  { id: 'final-verification', title: 'Production Verification', description: 'Build verification, deployment checks, controlled signal-path tests and final integrity audit.', status: 'planned' },
 ];
 
 export function countRoadmapStatus(status: RoadmapStatus) { return adminRoadmap.filter((section) => section.status === status).length; }
