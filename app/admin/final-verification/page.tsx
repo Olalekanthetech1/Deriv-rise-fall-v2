@@ -44,13 +44,13 @@ export default function FinalVerificationPage() {
         evidence: health?.services ? `DB: ${health.services.database || 'unknown'} · Python: ${health.services.pythonDaemon || 'unknown'}` : undefined,
       });
 
-      const cronResponse = await fetch('/api/ml/cron-retrain', { cache: 'no-store' });
-      const cron = await cronResponse.json().catch(() => null);
+      const retrainingResponse = await fetch('/api/admin/retraining', { cache: 'no-store' });
+      const retraining = await retrainingResponse.json().catch(() => null);
       results.push({
         name: 'Retraining scheduler',
-        status: cronResponse.ok && cron?.status !== 'database_unavailable' ? 'PASS' : cronResponse.status === 503 ? 'WARN' : 'FAIL',
-        detail: cron?.status || `HTTP ${cronResponse.status}`,
-        evidence: cron?.scheduleConfigured ? `Interval: ${cron.scheduleIntervalHours}h · Last training: ${cron.lastTrainedAt || 'none'}` : 'ML_RETRAIN_INTERVAL_MS is not configured.',
+        status: retrainingResponse.ok && retraining?.status !== 'database_unavailable' ? 'PASS' : retrainingResponse.status === 503 ? 'WARN' : 'FAIL',
+        detail: retraining?.status || `HTTP ${retrainingResponse.status}`,
+        evidence: retraining?.scheduleConfigured ? `Interval: ${retraining.scheduleIntervalHours}h · Last training: ${retraining.lastTrainedAt || 'none'}` : 'ML_RETRAIN_INTERVAL_MS is not configured.',
       });
 
       const registryResponse = await fetch('/api/ml/registry?status=production', { cache: 'no-store' });
