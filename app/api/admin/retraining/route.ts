@@ -36,15 +36,15 @@ async function resolveLiveSymbols(req: NextRequest, symbol: string): Promise<str
   const response = await fetch(new URL('/api/symbols', req.url), { cache: 'no-store' });
   const body = await response.json().catch(() => null);
   if (!response.ok || !Array.isArray(body?.symbols)) throw new Error(body?.error || 'Live Deriv symbol discovery is unavailable.');
-  const symbols = body.symbols
-    .filter((item: unknown): item is { isOpen: boolean; symbol: string } => {
+  const symbols: string[] = body.symbols
+    .filter((item: unknown) => {
       if (!item || typeof item !== 'object') return false;
       const candidate = item as Record<string, unknown>;
       return candidate.isOpen === true && typeof candidate.symbol === 'string' && candidate.symbol.trim().length > 0;
     })
     .map((item: { symbol: string }) => item.symbol.trim());
   if (!symbols.length) throw new Error('No open Deriv symbols are available for fleet retraining.');
-  return [...new Set(symbols)];
+  return Array.from(new Set<string>(symbols));
 }
 
 async function getLastTrainedAt(sql: ReturnType<typeof getDb>): Promise<string | null> {
