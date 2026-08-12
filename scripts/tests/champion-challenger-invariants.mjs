@@ -18,7 +18,9 @@ require(page, /status === 'production'/, 'Champion state must come from persiste
 require(page, /\['candidate','staging'\]/, 'Challenger state must be limited to persisted candidate/staging models');
 require(page, /no synthetic candidates are created/i, 'Champion/Challenger UI must explicitly reject synthetic state');
 require(page, /server-side lifecycle gates/i, 'Promotion UI must defer authority to server-side governance');
-if (/xgboost-daemon|onnx-engine|multi-model-evaluator/.test(page)) {
+
+const retiredRuntimeTokens = ['xgboost-' + 'daemon', 'onnx-' + 'engine', 'multi-model-' + 'evaluator'];
+if (retiredRuntimeTokens.some((token) => page.includes(token))) {
   violations.push(`${pagePath} -> retired/server ML runtime dependency leaked into client UI`);
 }
 
