@@ -9,6 +9,7 @@ export const adminRoadmap: RoadmapSection[] = [
   { id: 'experiments', title: 'Testing & Research', description: 'Backtests, paper/shadow tests, multi-horizon evaluation and persistent experiment history.', status: 'complete' },
   { id: 'infrastructure', title: 'Runtime & Infrastructure', description: 'Latency, APIs, WebSockets, database, cron and runtime diagnostics.', status: 'complete' },
   { id: 'observability', title: 'Observability', description: 'Application, trading, ML, API, error and audit telemetry.', status: 'complete' },
+  { id: 'incident-center', title: 'Incident & Alert Center', description: 'Prioritized production incidents derived from health and persisted telemetry with rapid investigation paths.', status: 'next' },
   { id: 'security', title: 'Security & Configuration', description: 'Runtime environment posture, secrets exposure, session controls and security events.', status: 'complete' },
   { id: 'ml-config', title: 'ML Pipeline Configuration', description: 'Generate, validate, version and activate the effective ML pipeline configuration from canonical registries.', status: 'next' },
   { id: 'database', title: 'Database Operations', description: 'New-schema migration, live Neon verification, data integrity and safe maintenance.', status: 'complete' },
@@ -19,6 +20,7 @@ export const adminRoadmap: RoadmapSection[] = [
   { id: 'asset-strategy', title: 'Asset-Aware Model Strategy', description: 'Runtime asset-class and market-type strategy selection with duration-aware model adaptation and persisted lineage.', status: 'next' },
   { id: 'champion-challenger', title: 'Champion/Challenger Evaluation', description: 'Compare persisted production champions with candidates and enforce server-side promotion gates.', status: 'next' },
   { id: 'prediction-integration', title: 'Prediction & Trading Integration', description: 'Production prediction boundary readiness, model lineage and signal-path verification.', status: 'next' },
+  { id: 'signal-forensics', title: 'Signal Forensics', description: 'Trace persisted ML, API and trading evidence with symbol, model, request and correlation lineage.', status: 'next' },
   { id: 'final-verification', title: 'Production Verification', description: 'Build verification, deployment checks, controlled signal-path tests and final integrity audit.', status: 'planned' },
 ];
 
