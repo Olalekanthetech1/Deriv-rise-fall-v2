@@ -7,6 +7,7 @@ import {
   recordWorkerHeartbeat,
   type TrainingQueueJob,
 } from '@/lib/ml-training-queue';
+import { mlRuntimeClient } from '@/lib/ml-runtime-client';
 import { trainDatasetModels } from '@/lib/ml-training-orchestrator';
 
 type ModelType = Parameters<typeof trainDatasetModels>[0]['modelTypes'];
@@ -27,6 +28,8 @@ process.env.OPENBLAS_NUM_THREADS = process.env.OPENBLAS_NUM_THREADS || '1';
 process.env.MKL_NUM_THREADS = process.env.MKL_NUM_THREADS || '1';
 process.env.NUMEXPR_NUM_THREADS = process.env.NUMEXPR_NUM_THREADS || '1';
 process.env.TORCH_NUM_THREADS = process.env.TORCH_NUM_THREADS || '1';
+process.env.TORCH_N_THREADS = process.env.TORCH_N_THREADS || '1';
+process.env.MALLOC_ARENA_MAX = process.env.MALLOC_ARENA_MAX || '2';
 
 function sleep(ms: number) { return new Promise((resolve) => setTimeout(resolve, ms)); }
 
@@ -76,6 +79,11 @@ async function processJob(job: TrainingQueueJob) {
     stopActiveHeartbeat?.();
     stopActiveHeartbeat = null;
     activeJob = null;
+    // Recycle the native Python runtime after every queue item so allocator,
+    // Torch and BLAS memory cannot accumulate across repeated jobs.
+    try { mlRuntimeClient.resetAfterTraining(); } catch (error) {
+      console.error('[ML Worker] runtime recycle failed:', error);
+    }
   }
 }
 
