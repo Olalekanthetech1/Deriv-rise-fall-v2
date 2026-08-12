@@ -5,7 +5,7 @@ import { verifySessionToken } from '../auth/route';
 function isAuthValid(req: NextRequest): boolean {
   const cookieToken = req.cookies.get('admin_session_token')?.value;
   const headerToken = req.headers.get('x-admin-token') || req.headers.get('authorization')?.replace(/^Bearer\s+/i, '');
-  return verifySessionToken(cookieToken) || verifySessionToken(headerToken);
+  return Boolean(verifySessionToken(cookieToken) || verifySessionToken(headerToken));
 }
 
 function normalizeIds(value: unknown): string[] {
