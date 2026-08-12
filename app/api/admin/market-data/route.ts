@@ -1,6 +1,6 @@
 import { NextRequest, NextResponse } from 'next/server';
 import { getHistoricalIngestionCheckpoint, ingestDerivHistoricalTicks, listHistoricalIngestionRuns } from '@/lib/deriv-historical-ingestion';
-import { ingestDerivHistoricalBackfill } from '@/lib/historical-backfill-controller';
+import { ingestDerivHistoricalBackfill, ingestDerivHistoricalBatch } from '@/lib/historical-backfill-controller';
 import { verifySessionToken } from '../auth/route';
 
 function isAuthenticated(req: NextRequest): boolean {
@@ -13,17 +13,22 @@ function jsonHeaders() {
   return { 'Cache-Control': 'no-store, max-age=0' };
 }
 
+function normalizeSymbols(value: unknown): string[] {
+  const values = Array.isArray(value) ? value : typeof value === 'string' ? value.split(',') : [];
+  return [...new Set(values.filter((item): item is string => typeof item === 'string').map((item) => item.trim().toUpperCase()).filter((item) => /^[A-Z0-9_./:-]{2,64}$/.test(item)))];
+}
+
 export async function GET(req: NextRequest) {
   if (!isAuthenticated(req)) {
     return NextResponse.json({ success: false, error: 'Unauthorized admin access.' }, { status: 401, headers: jsonHeaders() });
   }
 
   const url = new URL(req.url);
-  const symbol = url.searchParams.get('symbol')?.trim() || undefined;
-
-  const [recentRuns, checkpoint] = await Promise.all([
-    listHistoricalIngestionRuns(symbol ? 20 : 10),
-    getHistoricalIngestionCheckpoint(symbol),
+  const requestedSymbols = normalizeSymbols(url.searchParams.get('symbols') || url.searchParams.get('symbol') || '');
+  const checkpointSymbols = requestedSymbols.length ? requestedSymbols : [];
+  const [recentRuns, checkpoints] = await Promise.all([
+    listHistoricalIngestionRuns(requestedSymbols.length > 0 ? 50 : 10),
+    Promise.all(checkpointSymbols.map((symbol) => getHistoricalIngestionCheckpoint(symbol))),
   ]);
 
   return NextResponse.json(
@@ -31,7 +36,8 @@ export async function GET(req: NextRequest) {
       success: true,
       dataSource: 'live-database',
       recentRuns,
-      checkpoint,
+      checkpoint: checkpoints.length === 1 ? checkpoints[0] : null,
+      checkpoints,
       realDataOnly: true,
       syntheticDataDisabled: true,
     },
@@ -46,65 +52,45 @@ export async function POST(req: NextRequest) {
 
   try {
     const body = await req.json().catch(() => ({}));
-    const symbol = String(body?.symbol || '').trim();
+    const symbols = normalizeSymbols(body?.symbols ?? body?.symbol);
     const count = Number(body?.count ?? 5000);
     const resumeFromCheckpoint = Boolean(body?.resumeFromCheckpoint);
 
-    if (!symbol || symbol.length < 2) {
-      return NextResponse.json({ success: false, error: 'A valid Deriv symbol is required.' }, { status: 400, headers: jsonHeaders() });
+    if (!symbols.length) {
+      return NextResponse.json({ success: false, error: 'Select at least one valid Deriv asset.' }, { status: 400, headers: jsonHeaders() });
     }
 
     if (!Number.isFinite(count) || count < 50 || count > 50000) {
       return NextResponse.json({ success: false, error: 'Count must be between 50 and 50000.' }, { status: 400, headers: jsonHeaders() });
     }
 
-    if (resumeFromCheckpoint) {
-      const result = await ingestDerivHistoricalBackfill({
-        symbol,
-        targetCount: count,
-      });
+    if (symbols.length > 25) {
+      return NextResponse.json({ success: false, error: 'A maximum of 25 assets can be ingested in one batch.' }, { status: 422, headers: jsonHeaders() });
+    }
 
-      return NextResponse.json(
-        {
-          success: true,
-          ...result,
-          realDataOnly: true,
-          syntheticDataDisabled: true,
-        },
-        { headers: jsonHeaders() },
-      );
+    if (symbols.length > 1) {
+      const result = await ingestDerivHistoricalBatch({
+        symbols,
+        targetCount: count,
+        resumeFromCheckpoint,
+        concurrency: 2,
+      });
+      return NextResponse.json({ ...result, realDataOnly: true, syntheticDataDisabled: true }, { status: result.failedAssets === symbols.length ? 500 : 200, headers: jsonHeaders() });
+    }
+
+    const symbol = symbols[0];
+    if (resumeFromCheckpoint) {
+      const result = await ingestDerivHistoricalBackfill({ symbol, targetCount: count });
+      return NextResponse.json({ success: true, ...result, realDataOnly: true, syntheticDataDisabled: true }, { headers: jsonHeaders() });
     }
 
     const checkpoint = await getHistoricalIngestionCheckpoint(symbol);
     const endEpoch = checkpoint?.lastTickEpoch ? Math.max(1, Math.floor(checkpoint.lastTickEpoch) - 1) : undefined;
-
-    const result = await ingestDerivHistoricalTicks({
-      symbol,
-      count,
-      resumeFromCheckpoint: false,
-      endEpoch,
-    });
-
+    const result = await ingestDerivHistoricalTicks({ symbol, count, resumeFromCheckpoint: false, endEpoch });
     const { success: _ignoredSuccess, ...ingestionResult } = result as typeof result & { success?: unknown };
 
-    return NextResponse.json(
-      {
-        success: true,
-        ...ingestionResult,
-        checkpointUsed: checkpoint,
-        realDataOnly: true,
-        syntheticDataDisabled: true,
-      },
-      { headers: jsonHeaders() },
-    );
+    return NextResponse.json({ success: true, ...ingestionResult, checkpointUsed: checkpoint, realDataOnly: true, syntheticDataDisabled: true }, { headers: jsonHeaders() });
   } catch (error: any) {
-    return NextResponse.json(
-      {
-        success: false,
-        error: error?.message || 'Historical ingestion failed.',
-        realDataOnly: true,
-      },
-      { status: 500, headers: jsonHeaders() },
-    );
+    return NextResponse.json({ success: false, error: error?.message || 'Historical ingestion failed.', realDataOnly: true }, { status: 500, headers: jsonHeaders() });
   }
 }
