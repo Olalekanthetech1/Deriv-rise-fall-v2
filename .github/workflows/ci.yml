@@ -31,5 +31,8 @@ jobs:
       - name: Typecheck
         run: npm run typecheck
 
+      - name: Champion / Challenger governance invariant
+        run: node scripts/tests/champion-challenger-invariants.mjs
+
       - name: Production build
         run: npm run build

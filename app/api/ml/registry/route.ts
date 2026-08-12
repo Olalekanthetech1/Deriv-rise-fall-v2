@@ -2,6 +2,7 @@ import { NextRequest, NextResponse } from 'next/server';
 import { getRegisteredModels, promoteModelInRegistry, initDbSchema, getDb } from '@/lib/db';
 import { getMlModelDefinition } from '@/lib/ml-model-registry';
 import { verifySessionToken } from '../../admin/auth/route';
+import { evaluateChampionChallengerPromotion } from '@/lib/champion-challenger-governance';
 
 function isAuthValid(req: NextRequest): boolean {
   const cookieToken = req.cookies.get('admin_session_token')?.value;
@@ -64,7 +65,7 @@ export async function GET(req: NextRequest) {
       count: models?.length || 0,
       models: (models || []).map((model: Record<string, any>) => normalizeRegistryModel(model)),
       dataSource: 'live-database',
-    });
+    }, { headers: { 'Cache-Control': 'no-store' } });
   } catch (err: any) {
     return NextResponse.json({ success: false, error: err.message || 'Failed to fetch model registry' }, { status: 500 });
   }
@@ -105,7 +106,7 @@ export async function POST(req: NextRequest) {
       if (!sql) return NextResponse.json({ success: false, error: 'Model registry database is unavailable.' }, { status: 503 });
 
       const rows = await sql`
-        SELECT model_id, asset_symbol, horizon_ticks, model_family, framework, metrics, status
+        SELECT model_id, asset_symbol, horizon_ticks, model_family, framework, metrics, status, dataset_id, training_run_id, strategy_key, strategy_version, feature_schema_version
         FROM ml_model_registry_v2
         WHERE model_id = ${modelId}
         LIMIT 1
@@ -126,15 +127,36 @@ export async function POST(req: NextRequest) {
       const definition = getMlModelDefinition(String(registered.model_family).toLowerCase());
       const lifecycleTier = String((registered.metrics as Record<string, unknown> | null)?.lifecycleTier || definition?.lifecycleTier || '').toLowerCase();
       if (lifecycleTier !== 'production_candidate') {
-        return NextResponse.json({
-          success: false,
-          error: 'Model promotion rejected: experimental models must remain isolated from production.',
-          lifecycleTier: lifecycleTier || 'unknown',
-        }, { status: 409 });
+        return NextResponse.json({ success: false, error: 'Model promotion rejected: experimental models must remain isolated from production.', lifecycleTier: lifecycleTier || 'unknown' }, { status: 409 });
       }
 
       if (String(registered.status).toLowerCase() !== 'candidate' && String(registered.status).toLowerCase() !== 'staging') {
         return NextResponse.json({ success: false, error: `Model promotion rejected: status ${registered.status || 'unknown'} is not promotable.` }, { status: 409 });
+      }
+
+      if (!registered.dataset_id || !registered.training_run_id || !registered.strategy_key || !registered.strategy_version || !registered.feature_schema_version) {
+        return NextResponse.json({ success: false, error: 'Model promotion rejected: complete training and strategy lineage is required.' }, { status: 409 });
+      }
+
+      const championRows = await sql`
+        SELECT model_id, metrics
+        FROM ml_model_registry_v2
+        WHERE asset_symbol = ${symbol}
+          AND horizon_ticks = ${horizon}
+          AND status = 'production'
+          AND model_id <> ${modelId}
+        ORDER BY updated_at DESC
+        LIMIT 1
+      `;
+      const champion = championRows[0] as any | undefined;
+      const governance = evaluateChampionChallengerPromotion(registered, champion ?? null);
+      if (!governance.eligible) {
+        return NextResponse.json({
+          success: false,
+          error: `Model promotion rejected: ${governance.reason}`,
+          governance,
+          championModelId: champion?.model_id || null,
+        }, { status: 409 });
       }
 
       const success = await promoteModelInRegistry(modelId, symbol, horizon);
@@ -149,6 +171,8 @@ export async function POST(req: NextRequest) {
         horizonSecs: horizon,
         status: 'production',
         promotedAt: new Date().toISOString(),
+        governance,
+        championModelId: champion?.model_id || null,
       });
     }
 
