@@ -101,16 +101,16 @@ async function existingCompletedModels(sql: any, datasetId: string, candidates: 
 }
 
 async function updateBatch(sql: any, batchId: string, values: Partial<TrainingBatchRecord>) {
-  if (values.status !== undefined) await sql`UPDATE ml_training_batches SET status=${values.status},updated_at=NOW() WHERE batch_id=${batchId}`;
-  if (values.total_jobs !== undefined) await sql`UPDATE ml_training_batches SET total_jobs=${values.total_jobs},updated_at=NOW() WHERE batch_id=${batchId}`;
-  if (values.completed_jobs !== undefined) await sql`UPDATE ml_training_batches SET completed_jobs=${values.completed_jobs},updated_at=NOW() WHERE batch_id=${batchId}`;
-  if (values.failed_jobs !== undefined) await sql`UPDATE ml_training_batches SET failed_jobs=${values.failed_jobs},updated_at=NOW() WHERE batch_id=${batchId}`;
-  if (values.skipped_jobs !== undefined) await sql`UPDATE ml_training_batches SET skipped_jobs=${values.skipped_jobs},updated_at=NOW() WHERE batch_id=${batchId}`;
-  if (values.started_at !== undefined) await sql`UPDATE ml_training_batches SET started_at=${values.started_at},updated_at=NOW() WHERE batch_id=${batchId}`;
-  if (values.completed_at !== undefined) await sql`UPDATE ml_training_batches SET completed_at=${values.completed_at},updated_at=NOW() WHERE batch_id=${batchId}`;
-  if (values.heartbeat_at !== undefined) await sql`UPDATE ml_training_batches SET heartbeat_at=${values.heartbeat_at},updated_at=NOW() WHERE batch_id=${batchId}`;
-  if (values.worker_id !== undefined) await sql`UPDATE ml_training_batches SET worker_id=${values.worker_id},updated_at=NOW() WHERE batch_id=${batchId}`;
-  if (values.error !== undefined) await sql`UPDATE ml_training_batches SET error=${values.error},updated_at=NOW() WHERE batch_id=${batchId}`;
+  if (values.status !== undefined) await sql`UPDATE ml_training_batches SET status=${values.status},updated_at=NOW() WHERE batch_id=${batchId}::uuid`;
+  if (values.total_jobs !== undefined) await sql`UPDATE ml_training_batches SET total_jobs=${values.total_jobs},updated_at=NOW() WHERE batch_id=${batchId}::uuid`;
+  if (values.completed_jobs !== undefined) await sql`UPDATE ml_training_batches SET completed_jobs=${values.completed_jobs},updated_at=NOW() WHERE batch_id=${batchId}::uuid`;
+  if (values.failed_jobs !== undefined) await sql`UPDATE ml_training_batches SET failed_jobs=${values.failed_jobs},updated_at=NOW() WHERE batch_id=${batchId}::uuid`;
+  if (values.skipped_jobs !== undefined) await sql`UPDATE ml_training_batches SET skipped_jobs=${values.skipped_jobs},updated_at=NOW() WHERE batch_id=${batchId}::uuid`;
+  if (values.started_at !== undefined) await sql`UPDATE ml_training_batches SET started_at=${values.started_at},updated_at=NOW() WHERE batch_id=${batchId}::uuid`;
+  if (values.completed_at !== undefined) await sql`UPDATE ml_training_batches SET completed_at=${values.completed_at},updated_at=NOW() WHERE batch_id=${batchId}::uuid`;
+  if (values.heartbeat_at !== undefined) await sql`UPDATE ml_training_batches SET heartbeat_at=${values.heartbeat_at},updated_at=NOW() WHERE batch_id=${batchId}::uuid`;
+  if (values.worker_id !== undefined) await sql`UPDATE ml_training_batches SET worker_id=${values.worker_id},updated_at=NOW() WHERE batch_id=${batchId}::uuid`;
+  if (values.error !== undefined) await sql`UPDATE ml_training_batches SET error=${values.error},updated_at=NOW() WHERE batch_id=${batchId}::uuid`;
 }
 
 export async function createTrainingBatch(plan: TrainingBatchPlan) {
@@ -145,9 +145,9 @@ export async function createTrainingBatch(plan: TrainingBatchPlan) {
     totalJobs += requestedModels.length;
     skippedJobs += completedModels.length;
   }
-  await sql`INSERT INTO ml_training_batches (batch_id,status,requested_datasets,requested_models,total_jobs,completed_jobs,failed_jobs,skipped_jobs,worker_id,metadata) VALUES (${batchId},'queued',${datasetIds.length},${modelTypes.length},${totalJobs},0,0,${skippedJobs},${activeWorkerId},${JSON.stringify({datasetIds,modelTypes,skipCompleted:plan.skipCompleted !== false,retryFailed:plan.retryFailed === true})}::jsonb)`;
+  await sql`INSERT INTO ml_training_batches (batch_id,status,requested_datasets,requested_models,total_jobs,completed_jobs,failed_jobs,skipped_jobs,worker_id,metadata) VALUES (${batchId}::uuid,'queued',${datasetIds.length},${modelTypes.length},${totalJobs},0,0,${skippedJobs},${activeWorkerId},${JSON.stringify({datasetIds,modelTypes,skipCompleted:plan.skipCompleted !== false,retryFailed:plan.retryFailed === true})}::jsonb)`;
   for (const item of itemPlans) {
-    await sql`INSERT INTO ml_training_batch_items (batch_id,dataset_id,status,requested_models,skipped_models,completed_models,failed_models,metadata) VALUES (${batchId},${item.datasetId},${item.requestedModels.length ? 'queued' : 'skipped'},${JSON.stringify(item.requestedModels)}::jsonb,${JSON.stringify(item.skippedModels)}::jsonb,0,0,${JSON.stringify({retryFailed:plan.retryFailed === true})}::jsonb)`;
+    await sql`INSERT INTO ml_training_batch_items (batch_id,dataset_id,status,requested_models,skipped_models,completed_models,failed_models,metadata) VALUES (${batchId}::uuid,${item.datasetId},${item.requestedModels.length ? 'queued' : 'skipped'},${JSON.stringify(item.requestedModels)}::jsonb,${JSON.stringify(item.skippedModels)}::jsonb,0,0,${JSON.stringify({retryFailed:plan.retryFailed === true})}::jsonb)`;
   }
   void processTrainingBatch(batchId);
   return { batchId, status: totalJobs ? 'queued' : 'completed', requestedDatasets: datasetIds.length, requestedModels: modelTypes.length, totalJobs, skippedJobs, remainingJobs: totalJobs };
@@ -159,13 +159,13 @@ export async function processTrainingBatch(batchId: string) {
   const sql = neon(url);
   await ensureTrainingDurationSchema(sql);
   await ensureTrainingBatchSchema(sql);
-  const batchRows = await sql`SELECT * FROM ml_training_batches WHERE batch_id=${batchId} LIMIT 1`;
+  const batchRows = await sql`SELECT * FROM ml_training_batches WHERE batch_id=${batchId}::uuid LIMIT 1`;
   if (!batchRows.length) return;
   const activeWorkerId = String(batchRows[0].worker_id || workerId());
   await updateBatch(sql, batchId, { status: 'running', started_at: batchRows[0].started_at ? new Date(String(batchRows[0].started_at)).toISOString() : new Date().toISOString(), heartbeat_at: new Date().toISOString(), worker_id: activeWorkerId });
   const heartbeat = setInterval(() => { void updateBatch(sql, batchId, { heartbeat_at: new Date().toISOString() }).catch(() => undefined); }, 15000);
   try {
-    const items = await sql`SELECT * FROM ml_training_batch_items WHERE batch_id=${batchId} AND status='queued' ORDER BY id ASC`;
+    const items = await sql`SELECT * FROM ml_training_batch_items WHERE batch_id=${batchId}::uuid AND status='queued' ORDER BY id ASC`;
     for (const item of items) {
       await sql`UPDATE ml_training_batch_items SET status='running',started_at=NOW(),heartbeat_at=NOW(),updated_at=NOW() WHERE id=${item.id} AND status='queued'`;
       try {
@@ -175,17 +175,17 @@ export async function processTrainingBatch(batchId: string) {
         const completedModels = Number(result.completedModels || 0);
         const itemStatus: TrainingBatchItemStatus = result.status === 'completed' ? 'completed' : failedModels > 0 && completedModels > 0 ? 'partial' : 'failed';
         const errorText = failedModels ? JSON.stringify((result.results || []).filter((r: any) => !r.success)) : null;
-        await sql`UPDATE ml_training_batch_items SET status=${itemStatus},run_id=${result.runId},completed_models=${completedModels},failed_models=${failedModels},completed_at=NOW(),heartbeat_at=NULL,error=${errorText},updated_at=NOW() WHERE id=${item.id}`;
+        await sql`UPDATE ml_training_batch_items SET status=${itemStatus},run_id=${result.runId}::uuid,completed_models=${completedModels},failed_models=${failedModels},completed_at=NOW(),heartbeat_at=NULL,error=${errorText},updated_at=NOW() WHERE id=${item.id}`;
       } catch (error) {
         await sql`UPDATE ml_training_batch_items SET status='failed',error=${error instanceof Error ? error.message : 'Batch item failed.'},completed_at=NOW(),heartbeat_at=NULL,updated_at=NOW() WHERE id=${item.id}`;
       }
-      const counts = await sql`SELECT COALESCE(SUM(completed_models),0)::int AS completed_models,COALESCE(SUM(failed_models),0)::int AS failed_models FROM ml_training_batch_items WHERE batch_id=${batchId}`;
+      const counts = await sql`SELECT COALESCE(SUM(completed_models),0)::int AS completed_models,COALESCE(SUM(failed_models),0)::int AS failed_models FROM ml_training_batch_items WHERE batch_id=${batchId}::uuid`;
       await updateBatch(sql, batchId, { completed_jobs: Number(counts[0]?.completed_models || 0), failed_jobs: Number(counts[0]?.failed_models || 0), heartbeat_at: new Date().toISOString() });
     }
-    const final = await sql`SELECT COUNT(*)::int AS total_items,COUNT(*) FILTER (WHERE status='skipped')::int AS skipped_items,COUNT(*) FILTER (WHERE status='completed')::int AS completed_items,COUNT(*) FILTER (WHERE status IN ('failed','partial'))::int AS failed_items,COALESCE(SUM(completed_models),0)::int AS completed_jobs,COALESCE(SUM(failed_models),0)::int AS failed_jobs FROM ml_training_batch_items WHERE batch_id=${batchId}`;
+    const final = await sql`SELECT COUNT(*)::int AS total_items,COUNT(*) FILTER (WHERE status='skipped')::int AS skipped_items,COUNT(*) FILTER (WHERE status='completed')::int AS completed_items,COUNT(*) FILTER (WHERE status IN ('failed','partial'))::int AS failed_items,COALESCE(SUM(completed_models),0)::int AS completed_jobs,COALESCE(SUM(failed_models),0)::int AS failed_jobs FROM ml_training_batch_items WHERE batch_id=${batchId}::uuid`;
     const row = final[0];
     const terminalStatus: TrainingBatchStatus = Number(row.failed_items || 0) === 0 ? 'completed' : Number(row.completed_items || 0) > 0 || Number(row.skipped_items || 0) > 0 ? 'partial' : 'failed';
-    await updateBatch(sql, batchId, { status: terminalStatus, completed_jobs: Number(row.completed_jobs || 0), failed_jobs: Number(row.failed_jobs || 0), skipped_jobs: Number(row.skipped_items || 0), completed_at: new Date().toISOString(), heartbeat_at: null });
+    await updateBatch(sql, batchId, { status: terminalStatus, completed_jobs: Number(row.completed_jobs || 0), failed_jobs: Number(row.failed_jobs || 0), skipped_jobs: Number(row.skipped_jobs || 0), completed_at: new Date().toISOString(), heartbeat_at: null });
   } catch (error) {
     await updateBatch(sql, batchId, { status: 'failed', error: error instanceof Error ? error.message : 'Training batch failed.', completed_at: new Date().toISOString(), heartbeat_at: null });
   } finally {
@@ -199,10 +199,10 @@ export async function getTrainingBatch(batchId: string) {
   const sql = neon(url);
   await ensureTrainingDurationSchema(sql);
   await ensureTrainingBatchSchema(sql);
-  const rows = await sql`SELECT * FROM ml_training_batches WHERE batch_id=${batchId} LIMIT 1`;
+  const rows = await sql`SELECT * FROM ml_training_batches WHERE batch_id=${batchId}::uuid LIMIT 1`;
   if (!rows.length) throw new Error('TRAINING_BATCH_NOT_FOUND');
   const record = toBatchRecord(rows[0] as Record<string, unknown>);
-  const itemRows = await sql`SELECT i.*,d.name,d.asset_symbol,d.duration_value,d.duration_unit,d.horizon_ticks FROM ml_training_batch_items i LEFT JOIN training_datasets d ON d.id=i.dataset_id WHERE i.batch_id=${batchId} ORDER BY i.id ASC`;
+  const itemRows = await sql`SELECT i.*,d.name,d.asset_symbol,d.duration_value,d.duration_unit,d.horizon_ticks FROM ml_training_batch_items i LEFT JOIN training_datasets d ON d.id=i.dataset_id::uuid WHERE i.batch_id=${batchId}::uuid ORDER BY i.id ASC`;
   const items: TrainingBatchItem[] = itemRows.map((row: any) => ({ id: Number(row.id), batch_id: String(row.batch_id), dataset_id: String(row.dataset_id), status: String(row.status || 'queued') as TrainingBatchItemStatus, requested_models: normalizeModels(row.requested_models), skipped_models: normalizeModels(row.skipped_models), run_id: row.run_id ? String(row.run_id) : null, completed_models: Number(row.completed_models || 0), failed_models: Number(row.failed_models || 0), error: row.error ? String(row.error) : null, started_at: row.started_at ? new Date(row.started_at).toISOString() : null, completed_at: row.completed_at ? new Date(row.completed_at).toISOString() : null, heartbeat_at: row.heartbeat_at ? new Date(row.heartbeat_at).toISOString() : null, asset_symbol: row.asset_symbol ? String(row.asset_symbol) : undefined, duration_value: row.duration_value == null ? undefined : Number(row.duration_value), duration_unit: row.duration_unit ? String(row.duration_unit) : undefined, horizon_ticks: row.horizon_ticks == null ? undefined : Number(row.horizon_ticks) }));
   return { ...record, items };
 }
