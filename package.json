@@ -16,10 +16,11 @@
     "verify-model-operations": "node scripts/tests/model-operations-invariants.mjs",
     "verify-ml-config": "node scripts/tests/ml-config-invariants.mjs",
     "verify-retraining-automation": "node scripts/tests/retraining-automation-invariants.mjs",
+    "verify-asset-aware-strategy": "node scripts/tests/asset-aware-strategy-invariants.mjs",
     "db:storage:audit": "node scripts/db-storage-maintenance.mjs",
     "db:storage:prune": "node scripts/db-storage-maintenance.mjs --prune-ticks",
     "postinstall": "node scripts/copy-smartcharts-assets.js",
-    "prebuild": "node scripts/copy-smartcharts-assets.js && npm run verify-ml-architecture && npm run verify-gate6-legacy && npm run verify-signal-forensics && npm run verify-model-operations && npm run verify-ml-config && npm run verify-retraining-automation"
+    "prebuild": "node scripts/copy-smartcharts-assets.js && npm run verify-ml-architecture && npm run verify-gate6-legacy && npm run verify-signal-forensics && npm run verify-model-operations && npm run verify-ml-config && npm run verify-retraining-automation && npm run verify-asset-aware-strategy"
   },
   "dependencies": {
     "@deriv-com/smartcharts-champion": "^1.9.13",
@@ -77,7 +78,7 @@
     "tailwind-merge": "^2.6.1",
     "tailwindcss-animate": "^1.0.0",
     "tsx": "^4.23.1",
-    "vaul": "^1.1.2",
+    "vaul": "^1.1.0",
     "ws": "^8.21.2",
     "zod": "^4.4.3"
   },
