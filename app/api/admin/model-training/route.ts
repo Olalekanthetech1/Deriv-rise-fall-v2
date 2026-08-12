@@ -5,6 +5,7 @@ import { clearTrainingRunHistory, listTrainingRuns } from '@/lib/ml-training-orc
 import { enqueueTrainingJob, listTrainingQueueJobs, recoverStaleTrainingJobs } from '@/lib/ml-training-queue';
 import { getDb } from '@/lib/db';
 import { xgboostDaemon } from '@/lib/xgboost-daemon';
+import { requireTrainingWorkerReady } from '@/lib/ml-training-control-plane';
 
 function isAdmin(req: NextRequest): boolean {
   const cookieToken = req.cookies.get('admin_session_token')?.value;
@@ -121,18 +122,22 @@ export async function POST(req: NextRequest) {
     if (!datasetId) return NextResponse.json({ success: false, error: 'datasetId is required. Select a completed leakage-validated dataset.' }, { status: 400, headers: noStore() });
     const requested = Array.isArray(body?.modelTypes) ? body.modelTypes.filter((value: unknown): value is MlModelKey => typeof value === 'string' && getMlModelKeys().includes(value as MlModelKey)) : undefined;
     if (Array.isArray(body?.modelTypes) && body.modelTypes.length > 0 && (!requested || requested.length !== body.modelTypes.length)) return NextResponse.json({ success: false, error: 'One or more requested model types are not registered for production training. Experimental models must be launched explicitly from the Experimental Lab.' }, { status: 400, headers: noStore() });
+
+    const dispatch = await requireTrainingWorkerReady();
     const job = await enqueueTrainingJob({ datasetId, modelTypes: requested });
     return NextResponse.json({
       success: true,
       queued: true,
       dataSource: 'persisted-real-tick-dataset',
       workerBoundary: 'dedicated-ml-worker',
+      dispatch,
       ...job,
     }, { status: 202, headers: noStore() });
   } catch (error) {
     const message = error instanceof Error ? error.message : 'Model training could not be queued.';
-    const status = /TRAINING_ALREADY_(RUNNING|QUEUED)/i.test(message) ? 409 : /REQUIRED/i.test(message) ? 400 : /DATABASE/i.test(message) ? 503 : 500;
-    return NextResponse.json({ success: false, error: message }, { status, headers: noStore() });
+    const workerUnavailable = /TRAINING_WORKER_UNAVAILABLE/i.test(message);
+    const status = workerUnavailable ? 503 : /TRAINING_ALREADY_(RUNNING|QUEUED)/i.test(message) ? 409 : /REQUIRED/i.test(message) ? 400 : /DATABASE/i.test(message) ? 503 : 500;
+    return NextResponse.json({ success: false, error: workerUnavailable ? 'Training worker is unavailable. No new training job was queued.' : message, code: workerUnavailable ? message : undefined }, { status, headers: noStore() });
   }
 }
 
