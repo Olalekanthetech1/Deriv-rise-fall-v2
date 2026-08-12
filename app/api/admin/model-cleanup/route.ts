@@ -94,36 +94,73 @@ export async function POST(req: NextRequest) {
       }, { status: 409 });
     }
 
-    const auditPayload = JSON.stringify({
-      modelIds,
-      models: rows.map((row: any) => ({ modelId: row.model_id, status: row.status, symbol: row.asset_symbol, horizonTicks: row.horizon_ticks, trainingRunId: row.training_run_id })),
-      cleanupType: 'candidate_registry_cleanup',
-    });
-
-    await sql`
-      INSERT INTO ops_audit_events (category, severity, actor, action, resource_type, resource_id, metadata)
-      VALUES ('model_operations', 'warning', 'admin', 'delete_candidate_models', 'ml_model_registry_v2', ${modelIds.join(',')}, ${auditPayload}::jsonb)
+    // Atomic cleanup: deletion and audit are part of one PostgreSQL statement.
+    // Re-check eligibility inside the statement so concurrent changes cannot cause a partial delete.
+    const result = await sql`
+      WITH requested AS (
+        SELECT UNNEST(${modelIds}::text[]) AS model_id
+      ),
+      eligible AS (
+        SELECT r.model_id
+        FROM requested r
+        JOIN ml_model_registry_v2 m ON m.model_id = r.model_id
+        WHERE LOWER(m.status) IN ('candidate', 'staging')
+          AND NOT EXISTS (
+            SELECT 1
+            FROM ops_model_selection_events s
+            WHERE s.selected_model_id = r.model_id
+          )
+      ),
+      deleted AS (
+        DELETE FROM ml_model_registry_v2 m
+        WHERE m.model_id IN (SELECT model_id FROM eligible)
+          AND (SELECT COUNT(*) FROM eligible) = ${modelIds.length}
+        RETURNING m.model_id
+      ),
+      audit AS (
+        INSERT INTO ops_audit_events (category, severity, actor, action, resource_type, resource_id, metadata)
+        SELECT
+          'model_operations',
+          'warning',
+          'admin',
+          'delete_candidate_models',
+          'ml_model_registry_v2',
+          ${modelIds.join(',')},
+          jsonb_build_object(
+            'modelIds', COALESCE(jsonb_agg(d.model_id), '[]'::jsonb),
+            'cleanupType', 'candidate_registry_cleanup'
+          )
+        FROM deleted d
+        HAVING COUNT(*) = ${modelIds.length}
+        RETURNING id
+      )
+      SELECT d.model_id
+      FROM deleted d
+      JOIN audit a ON TRUE
     `;
 
-    const deleted = await sql`
-      DELETE FROM ml_model_registry_v2
-      WHERE model_id = ANY(${modelIds})
-        AND LOWER(status) IN ('candidate', 'staging')
-      RETURNING model_id
-    `;
+    if (result.length !== modelIds.length) {
+      const current = await sql`
+        SELECT model_id, status
+        FROM ml_model_registry_v2
+        WHERE model_id = ANY(${modelIds})
+      `;
+      const currentById = new Map(current.map((row: any) => [String(row.model_id), String(row.status)]));
+      const blocked = modelIds
+        .filter(id => currentById.has(id))
+        .map(id => ({ modelId: id, status: currentById.get(id) }));
 
-    if (deleted.length !== modelIds.length) {
       return NextResponse.json({
         success: false,
-        error: 'Cleanup completed only partially. Stop and inspect the registry before retrying.',
-        deletedModelIds: deleted.map((row: any) => row.model_id),
-      }, { status: 500 });
+        error: 'Cleanup aborted atomically: the selected set changed or a protected dependency is present. No requested model was deleted.',
+        blockedModels: blocked,
+      }, { status: 409 });
     }
 
     return NextResponse.json({
       success: true,
-      deletedCount: deleted.length,
-      deletedModelIds: deleted.map((row: any) => row.model_id),
+      deletedCount: result.length,
+      deletedModelIds: result.map((row: any) => row.model_id),
       note: 'Registry records and database-linked child records were removed according to existing foreign-key cascade/set-null rules. External artifact objects are not deleted by this operation.',
     });
   } catch (error: any) {
