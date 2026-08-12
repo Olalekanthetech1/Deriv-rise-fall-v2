@@ -5,6 +5,7 @@ export type RoadmapSection = { id: string; title: string; description: string; s
 export const adminRoadmap: RoadmapSection[] = [
   { id: 'control-plane', title: 'Operations Directory', description: 'Central index for every production administration surface and operational workflow.', status: 'complete' },
   { id: 'command-center', title: 'Command Center', description: 'System health, production state, critical alerts and operational readiness.', status: 'complete' },
+  { id: 'operational-intelligence', title: 'Operational Intelligence', description: 'Cross-system correlation of health, telemetry, ML registry and production state for faster investigation.', status: 'complete' },
   { id: 'intelligence', title: 'Trading Intelligence', description: 'Signals, confidence, strategy outcomes, features, horizons and model intelligence.', status: 'complete' },
   { id: 'models', title: 'Model Operations', description: 'Registry, validation, promotion, rollback and retraining lifecycle.', status: 'complete' },
   { id: 'experiments', title: 'Testing & Research', description: 'Backtests, paper/shadow tests, multi-horizon evaluation and persistent experiment history.', status: 'complete' },
