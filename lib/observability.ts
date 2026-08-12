@@ -50,6 +50,31 @@ export async function ensureObservabilitySchema(): Promise<boolean> {
     await sql`CREATE INDEX IF NOT EXISTS idx_admin_obs_category ON admin_observability_events (category, created_at DESC);`;
     await sql`CREATE INDEX IF NOT EXISTS idx_admin_obs_severity ON admin_observability_events (severity, created_at DESC);`;
     await sql`CREATE INDEX IF NOT EXISTS idx_admin_obs_correlation ON admin_observability_events (correlation_id) WHERE correlation_id IS NOT NULL;`;
+
+    await sql`
+      CREATE TABLE IF NOT EXISTS admin_incidents (
+        id BIGSERIAL PRIMARY KEY,
+        fingerprint VARCHAR(128) NOT NULL UNIQUE,
+        severity VARCHAR(20) NOT NULL,
+        status VARCHAR(24) NOT NULL DEFAULT 'open',
+        title VARCHAR(240) NOT NULL,
+        message TEXT NOT NULL,
+        service VARCHAR(80),
+        symbol VARCHAR(80),
+        model_id VARCHAR(120),
+        source_event_id BIGINT,
+        metadata JSONB,
+        first_seen_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+        last_seen_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+        acknowledged_at TIMESTAMPTZ,
+        investigating_at TIMESTAMPTZ,
+        resolved_at TIMESTAMPTZ,
+        updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+      );
+    `;
+    await sql`CREATE INDEX IF NOT EXISTS idx_admin_incidents_status ON admin_incidents (status, severity, last_seen_at DESC);`;
+    await sql`CREATE INDEX IF NOT EXISTS idx_admin_incidents_service ON admin_incidents (service, last_seen_at DESC);`;
+    await sql`CREATE INDEX IF NOT EXISTS idx_admin_incidents_last_seen ON admin_incidents (last_seen_at DESC);`;
     return true;
   } catch (error) {
     console.error('[Observability schema error]:', error);
