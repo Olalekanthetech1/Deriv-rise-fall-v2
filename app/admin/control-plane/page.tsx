@@ -6,6 +6,7 @@ const groups = [
     description: 'Investigate runtime health, telemetry and active incidents.',
     routes: [
       ['command-center', 'Command Center', 'Live operational readiness and service health.'],
+      ['operational-intelligence', 'Operational Intelligence', 'Correlate health, telemetry, ML state and production risk.'],
       ['observability', 'Observability', 'Persisted telemetry, correlation IDs and event stream.'],
       ['incident-center', 'Incident Center', 'Operational incidents, severity and response workflow.'],
       ['signal-forensics', 'Signal Forensics', 'Trace signal decisions and supporting evidence.'],
@@ -57,6 +58,7 @@ export default function ControlPlanePage() {
           </p>
           <div className="mt-5 flex flex-wrap gap-2">
             <Link href="/admin/command-center" className="rounded-xl border border-cyan-400/20 bg-cyan-400/10 px-3 py-2 text-xs font-semibold text-cyan-200 hover:bg-cyan-400/15">Open Command Center →</Link>
+            <Link href="/admin/operational-intelligence" className="rounded-xl border border-cyan-400/20 bg-cyan-400/10 px-3 py-2 text-xs font-semibold text-cyan-200 hover:bg-cyan-400/15">Operational Intelligence →</Link>
             <Link href="/admin/observability" className="rounded-xl border border-white/10 bg-white/5 px-3 py-2 text-xs font-semibold text-slate-300 hover:bg-white/10">Open Observability →</Link>
             <Link href="/admin/incident-center" className="rounded-xl border border-white/10 bg-white/5 px-3 py-2 text-xs font-semibold text-slate-300 hover:bg-white/10">Open Incident Center →</Link>
             <Link href="/admin/final-verification" className="rounded-xl border border-white/10 bg-white/5 px-3 py-2 text-xs font-semibold text-slate-300 hover:bg-white/10">Production Verification →</Link>
