@@ -195,7 +195,7 @@ export async function trainDatasetModels(request: TrainingRequest) {
       });
       if (!result?.success) throw new Error(result?.error || 'Native training failed.');
       const modelId = String(result.modelId);
-      const metrics = { ...(result.metrics || {}), engine: result.engine, samplesCount: result.samplesCount, validationSamples: result.validationSamples, artifactPath: result.artifactPath || null, assetAwareStrategy: strategy.key, assetAwareStrategyVersion: strategy.version, featureTopology: schema.featureWindows, featureSchemaVersion: schema.featureSchemaVersion };
+      const metrics = { modelKey: definition.key, ...(result.metrics || {}), engine: result.engine, samplesCount: result.samplesCount, validationSamples: result.validationSamples, artifactPath: result.artifactPath || null, assetAwareStrategy: strategy.key, assetAwareStrategyVersion: strategy.version, featureTopology: schema.featureWindows, featureSchemaVersion: schema.featureSchemaVersion };
       await registerDurationModel({
         modelId, modelFamily: definition.family, version: `${schema.featureSchemaVersion}-${runId.slice(0, 8)}`,
         symbol: String(dataset.asset_symbol), assetClass, durationValue, durationUnit, durationSeconds, effectiveHorizonTicks,

@@ -10,7 +10,7 @@ import sys
 import time
 
 import ml_native_runtime as runtime
-import ml_duration_training as duration_training
+import ml_duration_training_governed as duration_training
 from ml_ensemble_runtime import predict_ensemble
 from ml_duration_runtime_adapter import install as install_duration_runtime_adapter
 
