@@ -5,6 +5,7 @@ import { ensureTrainingDurationSchema } from './training-duration-schema';
 import { ensureTrainingBatchSchema } from './training-batch-schema';
 import { getMlModelKeys, type MlModelKey } from './ml-model-registry';
 import { enqueueTrainingJob, recoverAbandonedTrainingJobs } from './ml-training-queue';
+import { resolveTrainingDedup } from './ml-training-dedup';
 import { getTrainingBatch } from './ml-training-batch-orchestrator';
 
 type TrainingBatchPlan = { datasetIds: string[]; modelTypes?: MlModelKey[]; skipCompleted?: boolean; retryFailed?: boolean };
@@ -24,17 +25,6 @@ function staleBatchAfterMs(): number {
   const raw = Number(process.env.ML_TRAINING_BATCH_STALE_AFTER_MS || 5 * 60 * 1000);
   if (!Number.isFinite(raw)) return 5 * 60 * 1000;
   return Math.min(60 * 60 * 1000, Math.max(60_000, Math.trunc(raw)));
-}
-
-async function existingCompletedModels(sql: any, datasetId: string, candidates: MlModelKey[]) {
-  const rows = await sql`
-    SELECT model_family
-    FROM ml_model_registry_v2
-    WHERE dataset_id=${datasetId}::uuid
-      AND status IN ('candidate','staging','production')
-  `;
-  const existing = new Set(rows.map((row: any) => String(row.model_family || '').trim().toLowerCase()));
-  return candidates.filter((model) => existing.has(model));
 }
 
 async function db() {
@@ -122,28 +112,34 @@ export async function createTrainingBatchQueued(plan: TrainingBatchPlan) {
   const batchId = crypto.randomUUID();
   let totalJobs = 0;
   let skippedJobs = 0;
-  const plans: Array<{ datasetId: string; requestedModels: MlModelKey[]; skippedModels: MlModelKey[] }> = [];
+  let blockedFailedJobs = 0;
+  const plans: Array<{ datasetId: string; requestedModels: MlModelKey[]; skippedModels: MlModelKey[]; blockedFailedModels: MlModelKey[] }> = [];
 
   for (const datasetId of datasetIds) {
     const dataset = datasetMap.get(datasetId);
     if (dataset.status !== 'completed' || dataset.leakage_check_passed !== true) throw new Error(`DATASET_NOT_READY_FOR_TRAINING:${datasetId}`);
-    const skippedModels = plan.skipCompleted === false ? [] : await existingCompletedModels(sql, datasetId, modelTypes);
-    const requestedModels = modelTypes.filter((model) => !skippedModels.includes(model));
-    plans.push({ datasetId, requestedModels, skippedModels });
+
+    const dedup = await resolveTrainingDedup(datasetId, modelTypes, plan.retryFailed === true);
+    const skippedModels = plan.skipCompleted === false ? [] : dedup.skippedCompletedModelTypes;
+    const blockedFailedModels = dedup.blockedFailedModelTypes;
+    const requestedModels = dedup.allowedModelTypes.filter((model) => !skippedModels.includes(model));
+
+    plans.push({ datasetId, requestedModels, skippedModels: [...skippedModels, ...blockedFailedModels], blockedFailedModels });
     totalJobs += requestedModels.length;
     skippedJobs += skippedModels.length;
+    blockedFailedJobs += blockedFailedModels.length;
   }
 
   await sql`INSERT INTO ml_training_batches (batch_id,status,requested_datasets,requested_models,total_jobs,completed_jobs,failed_jobs,skipped_jobs,worker_id,metadata)
-    VALUES (${batchId}::uuid,${totalJobs ? 'queued' : 'completed'},${datasetIds.length},${modelTypes.length},${totalJobs},0,0,${skippedJobs},NULL,${JSON.stringify({ datasetIds, modelTypes, skipCompleted:plan.skipCompleted !== false, retryFailed:plan.retryFailed === true, executionBoundary:'dedicated-ml-worker' })}::jsonb)`;
+    VALUES (${batchId}::uuid,${totalJobs ? 'queued' : 'completed'},${datasetIds.length},${modelTypes.length},${totalJobs},0,0,${skippedJobs + blockedFailedJobs},NULL,${JSON.stringify({ datasetIds, modelTypes, skipCompleted:plan.skipCompleted !== false, retryFailed:plan.retryFailed === true, blockedFailedJobs, executionBoundary:'dedicated-ml-worker' })}::jsonb)`;
 
   for (const item of plans) {
     await sql`INSERT INTO ml_training_batch_items (batch_id,dataset_id,status,requested_models,skipped_models,completed_models,failed_models,metadata)
-      VALUES (${batchId}::uuid,${item.datasetId}::text,${item.requestedModels.length ? 'queued' : 'skipped'},${JSON.stringify(item.requestedModels)}::jsonb,${JSON.stringify(item.skippedModels)}::jsonb,0,0,${JSON.stringify({ retryFailed:plan.retryFailed === true })}::jsonb)`;
+      VALUES (${batchId}::uuid,${item.datasetId}::text,${item.requestedModels.length ? 'queued' : 'skipped'},${JSON.stringify(item.requestedModels)}::jsonb,${JSON.stringify(item.skippedModels)}::jsonb,0,0,${JSON.stringify({ retryFailed:plan.retryFailed === true, blockedFailedModels:item.blockedFailedModels })}::jsonb)`;
   }
 
   if (totalJobs) await enqueueBatchItems(sql, batchId);
-  return { batchId, status: totalJobs ? 'queued' : 'completed', requestedDatasets: datasetIds.length, requestedModels: modelTypes.length, totalJobs, skippedJobs, remainingJobs: totalJobs };
+  return { batchId, status: totalJobs ? 'queued' : 'completed', requestedDatasets: datasetIds.length, requestedModels: modelTypes.length, totalJobs, skippedJobs: skippedJobs + blockedFailedJobs, remainingJobs: totalJobs, blockedFailedJobs };
 }
 
 export async function resumeTrainingBatchQueued(batchId: string) {
@@ -156,7 +152,13 @@ export async function resumeTrainingBatchQueued(batchId: string) {
     const existing = await sql`SELECT job_id FROM ml_training_job_queue WHERE batch_id=${batchId}::uuid AND batch_item_id=${Number(item.id)} AND status IN ('queued','running') LIMIT 1`;
     if (existing.length) continue;
     await sql`UPDATE ml_training_batch_items SET status='queued',error=NULL,heartbeat_at=NULL,updated_at=NOW() WHERE id=${Number(item.id)}`;
-    await enqueueTrainingJob({ datasetId:String(item.dataset_id), modelTypes:normalizeModels(item.requested_models), batchId, batchItemId:Number(item.id) });
+    const dedup = await resolveTrainingDedup(String(item.dataset_id), normalizeModels(item.requested_models), false);
+    if (!dedup.allowedModelTypes.length) {
+      await sql`UPDATE ml_training_batch_items SET status='skipped',skipped_models=${JSON.stringify([...dedup.skippedCompletedModelTypes, ...dedup.blockedFailedModelTypes])}::jsonb,error=NULL,completed_at=NOW(),updated_at=NOW() WHERE id=${Number(item.id)}`;
+      continue;
+    }
+    await sql`UPDATE ml_training_batch_items SET requested_models=${JSON.stringify(dedup.allowedModelTypes)}::jsonb,skipped_models=${JSON.stringify([...dedup.skippedCompletedModelTypes, ...dedup.blockedFailedModelTypes])}::jsonb WHERE id=${Number(item.id)}`;
+    await enqueueTrainingJob({ datasetId:String(item.dataset_id), modelTypes:dedup.allowedModelTypes, batchId, batchItemId:Number(item.id) });
   }
   await sql`UPDATE ml_training_batches SET status='queued',error=NULL,heartbeat_at=NULL,updated_at=NOW() WHERE batch_id=${batchId}::uuid AND status IN ('partial','running','queued')`;
   return { ...(await getTrainingBatch(batchId)), resumed:true };
