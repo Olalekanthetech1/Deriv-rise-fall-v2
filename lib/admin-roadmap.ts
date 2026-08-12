@@ -3,6 +3,7 @@ export type RoadmapStatus = 'complete' | 'next' | 'planned';
 export type RoadmapSection = { id: string; title: string; description: string; status: RoadmapStatus };
 
 export const adminRoadmap: RoadmapSection[] = [
+  { id: 'control-plane', title: 'Operations Directory', description: 'Central index for every production administration surface and operational workflow.', status: 'complete' },
   { id: 'command-center', title: 'Command Center', description: 'System health, production state, critical alerts and operational readiness.', status: 'complete' },
   { id: 'intelligence', title: 'Trading Intelligence', description: 'Signals, confidence, strategy outcomes, features, horizons and model intelligence.', status: 'complete' },
   { id: 'models', title: 'Model Operations', description: 'Registry, validation, promotion, rollback and retraining lifecycle.', status: 'complete' },
