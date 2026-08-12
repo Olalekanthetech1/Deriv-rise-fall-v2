@@ -79,11 +79,11 @@ export async function POST(req: NextRequest) {
         RETURNING m.model_id
       ),
       audit AS (
-        INSERT INTO ops_audit_events (event_type, entity_type, entity_id, metadata)
-        SELECT 'model_cleanup', 'ml_model_registry_v2', d.model_id,
+        INSERT INTO ops_audit_events (category, severity, actor, action, resource_type, resource_id, metadata)
+        SELECT 'model_operations', 'warning', 'admin', 'admin_model_cleanup', 'ml_model_registry_v2', d.model_id,
                jsonb_build_object('operation', 'admin_model_cleanup', 'modelId', d.model_id)
         FROM deleted d
-        RETURNING entity_id
+        RETURNING resource_id
       )
       SELECT (SELECT COUNT(*) FROM deleted)::int AS deleted_count,
              (SELECT COUNT(*) FROM audit)::int AS audited_count
