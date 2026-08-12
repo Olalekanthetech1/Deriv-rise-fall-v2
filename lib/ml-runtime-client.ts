@@ -64,7 +64,17 @@ class MlRuntimeClient {
       const pythonScript = this.getRuntimeScript();
       this.child = spawn(/*turbopackIgnore: true*/ process.env.PYTHON_BIN || 'python3', [pythonScript], {
         stdio: ['pipe', 'pipe', 'inherit'],
-        env: { ...process.env, PYTHONUNBUFFERED: '1' },
+        env: {
+          ...process.env,
+          PYTHONUNBUFFERED: '1',
+          MALLOC_ARENA_MAX: process.env.MALLOC_ARENA_MAX || '2',
+          OMP_NUM_THREADS: process.env.OMP_NUM_THREADS || '1',
+          OPENBLAS_NUM_THREADS: process.env.OPENBLAS_NUM_THREADS || '1',
+          MKL_NUM_THREADS: process.env.MKL_NUM_THREADS || '1',
+          NUMEXPR_NUM_THREADS: process.env.NUMEXPR_NUM_THREADS || '1',
+          TORCH_NUM_THREADS: process.env.TORCH_NUM_THREADS || '1',
+          TORCH_N_THREADS: process.env.TORCH_N_THREADS || '1',
+        },
       });
       this.child.stdout?.on('data', (chunk: Buffer) => {
         this.buffer += chunk.toString('utf8');
@@ -238,6 +248,16 @@ class MlRuntimeClient {
         reject(err);
       }
     });
+  }
+
+  /**
+   * Recycle the native runtime after a training request so native ML memory
+   * (Torch/BLAS/allocator state) does not accumulate across queue items on
+   * small Render instances. The runtime will restart lazily for the next job.
+   */
+  public resetAfterTraining(): void {
+    if (this.pending.size > 0) return;
+    this.terminateTrainingRuntime();
   }
 
   public getLiveTrainingDiagnostic(trainingRunId: string, modelType: string) {
