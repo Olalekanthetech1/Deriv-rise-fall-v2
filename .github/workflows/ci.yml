@@ -32,7 +32,7 @@ jobs:
         run: npm run typecheck
 
       - name: Prediction / Trading integration governance invariant
-        run: node scripts/tests/prediction-trading-integration-invariants-v2.mjs
+        run: node scripts/tests/prediction-trading-integration-invariants.mjs
 
       - name: Production build
         run: npm run build
