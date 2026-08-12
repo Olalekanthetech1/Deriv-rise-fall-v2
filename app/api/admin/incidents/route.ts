@@ -1,5 +1,5 @@
 import { NextRequest, NextResponse } from 'next/server';
-import { neon } from '@neondatabase/serverless';
+import { neon, type NeonQueryFunction } from '@neondatabase/serverless';
 import { ensureObservabilitySchema, recordObservabilityEvent } from '@/lib/observability';
 import { verifySessionToken } from '@/app/api/admin/auth/route';
 
@@ -25,7 +25,7 @@ function canTransition(from: IncidentStatus, to: IncidentStatus) {
   return to === 'open';
 }
 
-async function syncRecentIncidents(sql: ReturnType<typeof neon>) {
+async function syncRecentIncidents(sql: NeonQueryFunction<false, false>) {
   const since = new Date(Date.now() - 15 * 60 * 1000).toISOString();
   const rows = await sql`
     SELECT id, category, severity, service, event_type, message, symbol, model_id, metadata, created_at
