@@ -90,7 +90,7 @@ export async function POST(req: NextRequest) {
     if (symbols.length > MAX_ASSETS) return NextResponse.json({ success: false, error: `A maximum of ${MAX_ASSETS} assets can be selected.` }, { status: 422, headers: noStore() });
     await initializeMlPipelineConfig();
     const buildAll = body?.buildAllSupportedHorizons === true;
-    const value = body?.durationValue == null ? null : Number(body.durationValue);
+    const value = body?.durationValue == null ? undefined : Number(body.durationValue);
     const unit = body?.durationUnit;
     if (!buildAll && (!Number.isSafeInteger(value) || value <= 0 || !validUnit(unit))) return NextResponse.json({ success: false, error: 'A valid duration value and unit are required.' }, { status: 400, headers: noStore() });
 
