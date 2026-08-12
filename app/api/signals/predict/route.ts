@@ -6,6 +6,7 @@ import { initDbSchema, getDb } from '@/lib/db';
 import { ensureMinTicks } from '@/lib/ticks-helper';
 import { buildConsensus, createDuration, durationToSeconds } from '@/lib/signal-manager';
 import { verifySessionToken } from '../../admin/auth/route';
+import { recordObservabilityEvent } from '@/lib/observability';
 
 export interface DurationPrediction {
   value: number;
@@ -195,6 +196,36 @@ export async function POST(req: NextRequest) {
       }
     }
 
+    await recordObservabilityEvent({
+      category: 'trading',
+      severity: ensemble.strategyGate.accepted ? 'info' : 'warn',
+      service: 'signal-prediction',
+      eventType: 'signal_prediction_completed',
+      message: `${symbol} ${ensemble.strategyGate.accepted ? ensemble.direction : 'WAIT'} · ${ensemble.confidence.toFixed(1)}% confidence · gate ${ensemble.strategyGate.accepted ? 'accepted' : 'blocked'}.`,
+      correlationId,
+      symbol,
+      modelId: 'native-production-ensemble',
+      metadata: {
+        diagnostic,
+        direction: ensemble.direction,
+        finalDecision: ensemble.strategyGate.accepted ? ensemble.direction : 'WAIT',
+        confidence: ensemble.confidence,
+        probabilityUp: ensemble.probUp,
+        probabilityDown: ensemble.probDown,
+        strategyGateAccepted: ensemble.strategyGate.accepted,
+        strategyGateThreshold: ensemble.strategyGate.confidenceGateThreshold,
+        riskTier: ensemble.strategyGate.riskTier,
+        strategyGateReasons: ensemble.strategyGate.reasons,
+        marketRegime: ensemble.marketRegime,
+        anomalyScore: ensemble.anomalyScore,
+        duration: { value: duration.value, unit: duration.unit, seconds: duration.seconds },
+        modelCount: ensemble.evaluations.length,
+        availableModelCount: ensemble.evaluations.filter((evaluation) => evaluation.status === 'AVAILABLE').length,
+        modelBreakdown: ensemble.modelBreakdown,
+        featureCount: Object.keys(ensemble.features ?? {}).length,
+      },
+    });
+
     return NextResponse.json({
       success: true,
       diagnostic,
@@ -213,7 +244,17 @@ export async function POST(req: NextRequest) {
       multiModelEnsemble: ensemble,
     }, { headers: responseHeaders });
   } catch (err: unknown) {
+    const message = err instanceof Error ? err.message : 'Signal prediction failed';
+    await recordObservabilityEvent({
+      category: 'trading',
+      severity: 'error',
+      service: 'signal-prediction',
+      eventType: 'signal_prediction_failed',
+      message: `Signal prediction failed for request ${correlationId}.`,
+      correlationId,
+      metadata: { diagnostic, errorCode: message.slice(0, 300) },
+    });
     console.error(`[Signal Prediction Error] correlationId=${correlationId}:`, err);
-    return NextResponse.json({ success: false, diagnostic, correlationId, error: err instanceof Error ? err.message : 'Signal prediction failed' }, { status: 503, headers: responseHeaders });
+    return NextResponse.json({ success: false, diagnostic, correlationId, error: message }, { status: 503, headers: responseHeaders });
   }
 }
