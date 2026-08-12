@@ -42,7 +42,7 @@ async function resolveLiveSymbols(req: NextRequest, requestedSymbol: string): Pr
       const candidate = item as Record<string, unknown>;
       return candidate.isOpen === true && typeof candidate.symbol === 'string' && candidate.symbol.trim().length > 0;
     })
-    .map((item) => item.symbol.trim());
+    .map((item: { isOpen: boolean; symbol: string }) => item.symbol.trim());
   if (!symbols.length) throw new Error('No open Deriv symbols are currently available for fleet retraining.');
   return Array.from(new Set(symbols));
 }
