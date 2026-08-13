@@ -60,3 +60,26 @@ services:
           type: web
           name: deriv-ai-trading-hub
           envVarKey: DATABASE_URL
+
+  - type: worker
+    name: deriv-ai-dataset-worker
+    runtime: docker
+    dockerfilePath: ./Dockerfile
+    dockerCommand: npm run dataset:worker
+    region: frankfurt
+    plan: starter
+    maxShutdownDelaySeconds: 300
+    envVars:
+      - key: NODE_ENV
+        value: "production"
+      - key: DATASET_WORKER_POLL_INTERVAL_MS
+        value: "2000"
+      - key: DATASET_WORKER_STALE_AFTER_MINUTES
+        value: "10"
+      - key: DATASET_WORKER_HEARTBEAT_MS
+        value: "30000"
+      - key: DATABASE_URL
+        fromService:
+          type: web
+          name: deriv-ai-trading-hub
+          envVarKey: DATABASE_URL
