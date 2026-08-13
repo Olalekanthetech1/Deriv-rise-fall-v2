@@ -4,6 +4,7 @@ import { getMlModelDefinition } from '@/lib/ml-model-registry';
 import { verifySessionToken } from '../../admin/auth/route';
 import { evaluateChampionChallengerPromotion } from '@/lib/champion-challenger-governance';
 import { hasModelArtifact } from '@/lib/ml-model-artifact-store';
+import { retireProductionModel } from '@/lib/ml-model-retirement';
 
 function isAuthValid(req: NextRequest): boolean {
   const cookieToken = req.cookies.get('admin_session_token')?.value;
@@ -85,6 +86,21 @@ export async function POST(req: NextRequest) {
     const { action, modelId, symbol, horizonSecs } = body;
     if (action === 'initialize' || action === 'seed') return NextResponse.json({ success: false, error: 'Synthetic/default model registration is disabled. Register only models backed by real trained artifacts and measured validation metrics.' }, { status: 410 });
 
+    if (action === 'retire') {
+      if (!modelId || typeof modelId !== 'string') return NextResponse.json({ success: false, error: 'Missing or invalid modelId.' }, { status: 400 });
+      try {
+        const result = await retireProductionModel(modelId, 'admin');
+        return NextResponse.json({ success: true, ...result });
+      } catch (error: any) {
+        const code = String(error?.message || 'MODEL_RETIREMENT_FAILED');
+        if (code === 'MODEL_NOT_FOUND') return NextResponse.json({ success: false, error: 'Model retirement rejected: model is not registered.' }, { status: 404 });
+        if (code.startsWith('MODEL_NOT_PRODUCTION:')) return NextResponse.json({ success: false, error: `Model retirement rejected: status ${code.split(':')[1] || 'unknown'} is not production.` }, { status: 409 });
+        if (code === 'MODEL_RETIREMENT_CONFLICT') return NextResponse.json({ success: false, error: 'Model retirement conflicted with another lifecycle change. Refresh the registry and retry.' }, { status: 409 });
+        if (code === 'DATABASE_UNAVAILABLE') return NextResponse.json({ success: false, error: 'Model registry database is unavailable.' }, { status: 503 });
+        throw error;
+      }
+    }
+
     if (action === 'promote') {
       if (!modelId || typeof modelId !== 'string' || !symbol || typeof symbol !== 'string') return NextResponse.json({ error: 'Missing or invalid modelId or symbol.' }, { status: 400 });
       const horizon = Number(horizonSecs);
@@ -126,11 +142,7 @@ export async function POST(req: NextRequest) {
     }
 
     if (action === 'delete') {
-      if (!modelId || typeof modelId !== 'string') return NextResponse.json({ error: 'Missing modelId.' }, { status: 400 });
-      const sql = getDb();
-      if (!sql) return NextResponse.json({ success: false, error: 'Database unavailable.' }, { status: 503 });
-      await sql`DELETE FROM ml_model_registry WHERE model_id = ${modelId}`;
-      return NextResponse.json({ success: true, message: `Model ${modelId} deleted from registry.` });
+      return NextResponse.json({ success: false, error: 'Direct registry deletion is disabled. Retire production models through the controlled lifecycle so lineage and audit history are preserved.' }, { status: 410 });
     }
     return NextResponse.json({ error: 'Invalid action.' }, { status: 400 });
   } catch (err: any) {

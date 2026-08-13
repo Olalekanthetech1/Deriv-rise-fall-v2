@@ -15,6 +15,7 @@
     "verify-gate6-legacy": "node scripts/tests/gate6-legacy-boundary-guard.mjs",
     "verify-signal-forensics": "node scripts/tests/signal-forensics-invariants.mjs",
     "verify-model-operations": "node scripts/tests/model-operations-invariants.mjs",
+    "verify-legacy-model-registry-migration": "node scripts/tests/legacy-model-registry-migration-invariants.mjs",
     "verify-ml-config": "node scripts/tests/ml-config-invariants.mjs",
     "verify-retraining-automation": "node scripts/tests/retraining-automation-invariants.mjs",
     "verify-asset-aware-strategy": "node scripts/tests/asset-aware-strategy-invariants.mjs",
@@ -23,10 +24,11 @@
     "verify-prediction-trading-integration": "node scripts/tests/prediction-trading-integration-invariants.mjs",
     "verify-production-model-contract": "node scripts/tests/production-model-contract-invariants.mjs",
     "backfill-production-model-artifacts": "tsx scripts/backfill-production-model-artifacts.ts",
+    "db:migrate-legacy-model-registry": "node scripts/migrate-legacy-model-registry-v2.mjs",
     "db:storage:audit": "node scripts/db-storage-maintenance.mjs",
     "db:storage:prune": "node scripts/db-storage-maintenance.mjs --prune-ticks",
     "postinstall": "node scripts/copy-smartcharts-assets.js",
-    "prebuild": "node scripts/copy-smartcharts-assets.js && npm run verify-ml-architecture && npm run verify-gate6-legacy && npm run verify-signal-forensics && npm run verify-model-operations && npm run verify-ml-config && npm run verify-retraining-automation && npm run verify-asset-aware-strategy && npm run verify-ml-promotion-metrics && npm run verify-dataset-builder-scope && npm run verify-prediction-trading-integration && npm run verify-production-model-contract"
+    "prebuild": "node scripts/copy-smartcharts-assets.js && npm run verify-ml-architecture && npm run verify-gate6-legacy && npm run verify-signal-forensics && npm run verify-model-operations && npm run verify-legacy-model-registry-migration && npm run verify-ml-config && npm run verify-retraining-automation && npm run verify-asset-aware-strategy && npm run verify-ml-promotion-metrics && npm run verify-dataset-builder-scope && npm run verify-prediction-trading-integration && npm run verify-production-model-contract"
   },
   "dependencies": {
     "@deriv-com/smartcharts-champion": "^1.9.13",
