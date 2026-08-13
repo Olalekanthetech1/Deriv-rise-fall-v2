@@ -30,19 +30,14 @@ require(orchestrator, /strategy\.version/, `${orchestratorPath} -> strategy vers
 require(orchestrator, /strategyMetadata/, `${orchestratorPath} -> strategy metadata lineage missing`);
 require(ensemble, /resolveAssetAwareSignalContext\(/, `${ensemblePath} -> asset-aware signal context missing`);
 require(ensemble, /evaluateSignalStrategyGate\(/, `${ensemblePath} -> asset-aware strategy gate missing`);
-require(ensemble, /Native Python trained model/, `${ensemblePath} -> native-runtime provenance missing`);
+require(ensemble, /Native Python trained (model|production artifact)/, `${ensemblePath} -> native-runtime provenance missing`);
+require(ensemble, /materializeModelArtifact/, `${ensemblePath} -> durable production artifact resolution missing`);
+require(ensemble, /status = .*production/, `${ensemblePath} -> production registry selection missing`);
 require(page, /strategyContexts/, `${pagePath} -> persisted strategy lineage view missing`);
 require(page, /NO SYNTHETIC STATE/, `${pagePath} -> persisted-only evidence boundary missing`);
 
-if (/xgboost-daemon|production-ensemble|onnx-engine/.test(page)) {
-  violations.push(`${pagePath} -> server ML runtime leaked into Client UI`);
-}
-if (/api\/ml\/cron-retrain|xgboostDaemon|onnx-engine/.test(strategy)) {
-  violations.push(`${strategyPath} -> retired legacy ML boundary referenced`);
-}
+if (/xgboost-daemon|production-ensemble|onnx-engine/.test(page)) violations.push(`${pagePath} -> server ML runtime leaked into Client UI`);
+if (/api\/ml\/cron-retrain|xgboostDaemon|onnx-engine/.test(strategy)) violations.push(`${strategyPath} -> retired legacy ML boundary referenced`);
 
-if (violations.length) {
-  throw new Error(`[Asset-Aware Strategy Invariants] violations detected:\n${violations.join('\n')}`);
-}
-
-console.log('[Asset-Aware Strategy Invariants] passed: strategy contract, asset/duration adaptation, training lineage, native runtime provenance, and Admin evidence boundaries are intact.');
+if (violations.length) throw new Error(`[Asset-Aware Strategy Invariants] violations detected:\n${violations.join('\n')}`);
+console.log('[Asset-Aware Strategy Invariants] passed: strategy contract, asset/duration adaptation, training lineage, native runtime provenance, durable production artifacts, and Admin evidence boundaries are intact.');
