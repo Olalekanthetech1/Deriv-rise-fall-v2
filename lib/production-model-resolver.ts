@@ -1,6 +1,6 @@
 import { getDb, initDbSchema } from './db';
 import { getMlModelDefinition } from './ml-model-registry';
-import { hasModelArtifact, materializeModelArtifact } from './ml-model-artifact-store';
+import { getModelArtifactStatus, hasModelArtifact, materializeModelArtifact } from './ml-model-artifact-store';
 
 export type ProductionModelResolution = {
   modelId: string;
@@ -95,7 +95,7 @@ export async function getProductionModelHealth(symbol?: string) {
       `;
   return Promise.all((rows as any[]).map(async (row) => {
     const modelId = String(row.model_id);
-    const artifactPresent = await hasModelArtifact(modelId);
+    const artifactStatus = await getModelArtifactStatus(modelId);
     const metrics = row.metrics && typeof row.metrics === 'object' ? row.metrics : {};
     const modelKey = String(metrics.modelKey || row.model_family || '').trim().toLowerCase();
     const definition = getMlModelDefinition(modelKey);
@@ -111,10 +111,10 @@ export async function getProductionModelHealth(symbol?: string) {
       framework: String(row.framework || ''),
       format: String(row.format || ''),
       status: String(row.status),
-      artifact: { present: artifactPresent },
+      artifact: { status: artifactStatus, present: artifactStatus === 'active' || artifactStatus === 'superseded' },
       validation: { accuracy: metrics.accuracy ?? null, f1: metrics.f1 ?? metrics.f1Score ?? null, logLoss: metrics.logLoss ?? null },
       updatedAt: row.updated_at,
-      healthy: artifactPresent && Boolean(row.training_run_id) && Boolean(row.dataset_id) && Boolean(row.feature_schema_version),
+      healthy: (artifactStatus === 'active' || artifactStatus === 'superseded') && Boolean(row.training_run_id) && Boolean(row.dataset_id) && Boolean(row.feature_schema_version),
     };
   }));
 }
