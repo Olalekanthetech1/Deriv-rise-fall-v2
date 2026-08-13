@@ -148,9 +148,20 @@ export async function POST(req: NextRequest) {
     if (runtime.maxAssets !== null && symbols.length > runtime.maxAssets) return NextResponse.json({ success: false, error: `A maximum of ${runtime.maxAssets} assets may be selected.`, limits: { maxAssets: runtime.maxAssets, concurrency: runtime.concurrency, pollIntervalMs: runtime.pollIntervalMs } }, { status: 422, headers: noStore() });
     await initializeMlPipelineConfig();
     const buildAll = body?.buildAllSupportedHorizons === true;
-    const value = Number(body?.durationValue);
-    const unit = body?.durationUnit;
-    if (!buildAll && (!Number.isSafeInteger(value) || value <= 0 || !validUnit(unit))) return NextResponse.json({ success: false, error: 'A valid duration value and unit are required.' }, { status: 400, headers: noStore() });
+    const rawDurations = Array.isArray(body?.durations) ? body.durations : [];
+    const requestedDurations = rawDurations
+      .map((entry: unknown) => {
+        if (!entry || typeof entry !== 'object') return null;
+        const value = Number((entry as { value?: unknown }).value);
+        const unit = (entry as { unit?: unknown }).unit;
+        return Number.isSafeInteger(value) && value > 0 && validUnit(unit) ? { value, unit } : null;
+      })
+      .filter((entry): entry is { value: number; unit: DerivDurationUnit } => Boolean(entry))
+      .filter((entry, index, all) => all.findIndex((candidate) => candidate.value === entry.value && candidate.unit === entry.unit) === index);
+    const legacyValue = Number(body?.durationValue);
+    const legacyUnit = body?.durationUnit;
+    if (!buildAll && !requestedDurations.length && Number.isSafeInteger(legacyValue) && legacyValue > 0 && validUnit(legacyUnit)) requestedDurations.push({ value: legacyValue, unit: legacyUnit });
+    if (!buildAll && !requestedDurations.length) return NextResponse.json({ success: false, error: 'Select at least one valid prediction horizon.' , limits: { maxAssets: runtime.maxAssets, concurrency: runtime.concurrency, pollIntervalMs: runtime.pollIntervalMs } }, { status: 400, headers: noStore() });
 
     const jobs: any[] = [];
     const results: any[] = [];
@@ -158,19 +169,23 @@ export async function POST(req: NextRequest) {
       try {
         const resolved = await getCachedOrDiscoverDuration(symbol);
         const durations = buildAll
-          ? ladder(resolved.discovery.ranges.filter((range) => !unit || range.unit === unit))
-          : (() => { const matches = matching(resolved.discovery.ranges, value, unit as DerivDurationUnit); return matches.length ? [{ value, unit: unit as DerivDurationUnit, rangeId: matches[0].id }] : []; })();
+          ? ladder(resolved.discovery.ranges.filter((range) => !legacyUnit || range.unit === legacyUnit))
+          : requestedDurations.flatMap((requested) => {
+              const matches = matching(resolved.discovery.ranges, requested.value, requested.unit);
+              return matches.length ? [{ value: requested.value, unit: requested.unit, rangeId: matches[0].id }] : [];
+            }).filter((duration, index, all) => all.findIndex((candidate) => candidate.value === duration.value && candidate.unit === duration.unit) === index);
         if (!durations.length) { results.push({ symbol, accepted: false, status: 'skipped', reason: 'HORIZON_NOT_SUPPORTED' }); continue; }
         const job = await createAutoDatasetJob(symbol, durations);
         jobs.push(job);
-        results.push({ symbol, accepted: true, status: job.status, jobId: job.id, requestedCount: job.requestedCount });
+        results.push({ symbol, accepted: true, status: job.status, jobId: job.id, requestedCount: job.requestedCount, selectedCount: durations.length });
       } catch (error) {
         results.push({ symbol, accepted: false, status: 'failed', error: error instanceof Error ? error.message : String(error) });
       }
     }
     if (!jobs.length) return NextResponse.json({ success: false, error: 'None of the selected assets had a supported build scope.', results, limits: { maxAssets: runtime.maxAssets, concurrency: runtime.concurrency, pollIntervalMs: runtime.pollIntervalMs } }, { status: 422, headers: noStore() });
     scheduleWorkers(jobs.map((job) => job.id), runtime.concurrency);
-    return NextResponse.json({ success: true, mode: 'MULTI_ASSET_DATASET_BUILD', selectedSymbols: symbols, autoJobIds: jobs.map((job) => job.id), jobs, results, limits: { maxAssets: runtime.maxAssets, concurrency: runtime.concurrency, pollIntervalMs: runtime.pollIntervalMs }, message: buildAll ? `Dataset builds started for ${jobs.length} assets using their own supported horizon ladders.` : `Dataset build started for ${jobs.length} assets at the selected horizon.` }, { status: 202, headers: noStore() });
+    const selectedCount = jobs.reduce((sum, job) => sum + Number(job.requestedCount ?? 0), 0);
+    return NextResponse.json({ success: true, mode: 'MULTI_ASSET_DATASET_BUILD', selectedSymbols: symbols, autoJobIds: jobs.map((job) => job.id), jobs, results, limits: { maxAssets: runtime.maxAssets, concurrency: runtime.concurrency, pollIntervalMs: runtime.pollIntervalMs }, message: buildAll ? `Dataset builds started for ${jobs.length} assets using their own supported horizon ladders.` : `Dataset builds started for ${jobs.length} assets across ${selectedCount} selected horizon jobs.` }, { status: 202, headers: noStore() });
   } catch (error) { return NextResponse.json({ success: false, error: error instanceof Error ? error.message : 'Unable to start dataset build.' }, { status: 500, headers: noStore() }); }
 }
 
