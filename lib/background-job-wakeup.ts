@@ -46,6 +46,11 @@ export async function ensureBackgroundJobWakeupTriggers(): Promise<void> {
     const triggerName = channel === 'dataset_jobs'
       ? 'trg_ops_ml_dataset_jobs_wakeup'
       : 'trg_ml_training_job_queue_wakeup';
+    // PostgreSQL trigger-function arguments are part of DDL grammar and cannot
+    // be sent as bind parameters. Both values come from the closed WakeupChannel
+    // union, so emitting the quoted literal is safe and avoids the "$1" syntax
+    // error produced by parameterized EXECUTE FUNCTION arguments.
+    const channelLiteral = sql.unsafe(`'${channel}'`);
 
     await sql`DROP TRIGGER IF EXISTS ${sql.unsafe(triggerName)} ON ${sql.unsafe(config.table)}`;
 
@@ -55,14 +60,14 @@ export async function ensureBackgroundJobWakeupTriggers(): Promise<void> {
         AFTER INSERT OR UPDATE OF status ON ${sql.unsafe(config.table)}
         FOR EACH ROW
         WHEN (${sql.unsafe(config.queuedPredicate)})
-        EXECUTE FUNCTION ops_notify_background_job(${channel})
+        EXECUTE FUNCTION ops_notify_background_job(${channelLiteral})
       `;
     } else {
       await sql`
         CREATE TRIGGER ${sql.unsafe(triggerName)}
         AFTER INSERT ON ${sql.unsafe(config.table)}
         FOR EACH ROW
-        EXECUTE FUNCTION ops_notify_background_job(${channel})
+        EXECUTE FUNCTION ops_notify_background_job(${channelLiteral})
       `;
     }
   }
