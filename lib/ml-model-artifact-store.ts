@@ -5,6 +5,7 @@ import path from 'node:path';
 import { getDb, initDbSchema } from './db';
 
 const MAX_ARTIFACT_BYTES = 100 * 1024 * 1024;
+type ArtifactStatus = 'active' | 'superseded' | 'retired' | 'corrupted';
 
 function safeModelId(value: string): string {
   const normalized = String(value || '').trim();
@@ -23,19 +24,24 @@ export async function ensureModelArtifactStore(): Promise<void> {
       sha256 TEXT NOT NULL,
       byte_size INTEGER NOT NULL,
       content_type TEXT NOT NULL DEFAULT 'application/octet-stream',
+      artifact_status TEXT NOT NULL DEFAULT 'active',
       created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
       updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
     )
   `;
+  await sql`ALTER TABLE ml_model_artifacts ADD COLUMN IF NOT EXISTS artifact_status TEXT NOT NULL DEFAULT 'active'`;
+}
+
+export async function getModelArtifactStatus(modelId: string): Promise<ArtifactStatus | null> {
+  const safeId = safeModelId(modelId);
+  await ensureModelArtifactStore();
+  const rows = await getDb()!`SELECT artifact_status FROM ml_model_artifacts WHERE model_id=${safeId}::text LIMIT 1`;
+  return rows.length ? String(rows[0].artifact_status || 'active') as ArtifactStatus : null;
 }
 
 export async function hasModelArtifact(modelId: string): Promise<boolean> {
-  const safeId = safeModelId(modelId);
-  await ensureModelArtifactStore();
-  const rows = await getDb()!`
-    SELECT 1 AS present FROM ml_model_artifacts WHERE model_id = ${safeId}::text LIMIT 1
-  `;
-  return rows.length > 0;
+  const status = await getModelArtifactStatus(modelId);
+  return status === 'active' || status === 'superseded';
 }
 
 export async function persistModelArtifact(modelId: string, artifactPath: string): Promise<{ sha256: string; byteSize: number }> {
@@ -46,31 +52,37 @@ export async function persistModelArtifact(modelId: string, artifactPath: string
   const sha256 = crypto.createHash('sha256').update(bytes).digest('hex');
   await ensureModelArtifactStore();
   await getDb()!`
-    INSERT INTO ml_model_artifacts (model_id, artifact_bytes, sha256, byte_size, updated_at)
-    VALUES (${safeId}::text, ${bytes}::bytea, ${sha256}::text, ${bytes.length}::integer, NOW())
+    INSERT INTO ml_model_artifacts (model_id, artifact_bytes, sha256, byte_size, artifact_status, updated_at)
+    VALUES (${safeId}::text, ${bytes}::bytea, ${sha256}::text, ${bytes.length}::integer, 'active'::text, NOW())
     ON CONFLICT (model_id) DO UPDATE SET
       artifact_bytes = EXCLUDED.artifact_bytes,
       sha256 = EXCLUDED.sha256,
       byte_size = EXCLUDED.byte_size,
+      artifact_status = 'active',
       updated_at = NOW()
   `;
   return { sha256, byteSize: bytes.length };
 }
 
+export async function setModelArtifactStatus(modelId: string, status: ArtifactStatus): Promise<void> {
+  const safeId = safeModelId(modelId);
+  await ensureModelArtifactStore();
+  const result = await getDb()!`UPDATE ml_model_artifacts SET artifact_status=${status}::text,updated_at=NOW() WHERE model_id=${safeId}::text`;
+  if (!result.length && status !== 'retired') throw new Error('PRODUCTION_MODEL_ARTIFACT_MISSING');
+}
+
 export async function materializeModelArtifact(modelId: string): Promise<{ path: string; sha256: string; byteSize: number }> {
   const safeId = safeModelId(modelId);
   await ensureModelArtifactStore();
-  const rows = await getDb()!`
-    SELECT artifact_bytes, sha256, byte_size
-    FROM ml_model_artifacts
-    WHERE model_id = ${safeId}::text
-    LIMIT 1
-  `;
-  const row = rows[0] as { artifact_bytes?: Buffer | Uint8Array; sha256?: string; byte_size?: number } | undefined;
-  if (!row?.artifact_bytes) throw new Error('PRODUCTION_MODEL_ARTIFACT_MISSING');
+  const rows = await getDb()!`SELECT artifact_bytes,sha256,byte_size,artifact_status FROM ml_model_artifacts WHERE model_id=${safeId}::text LIMIT 1`;
+  const row = rows[0] as { artifact_bytes?: Buffer | Uint8Array; sha256?: string; byte_size?: number; artifact_status?: string } | undefined;
+  if (!row?.artifact_bytes || !['active', 'superseded'].includes(String(row.artifact_status || ''))) throw new Error('PRODUCTION_MODEL_ARTIFACT_MISSING');
   const bytes = Buffer.from(row.artifact_bytes);
   const actualSha = crypto.createHash('sha256').update(bytes).digest('hex');
-  if (actualSha !== String(row.sha256 || '')) throw new Error('PRODUCTION_MODEL_ARTIFACT_CHECKSUM_MISMATCH');
+  if (actualSha !== String(row.sha256 || '')) {
+    await setModelArtifactStatus(safeId, 'corrupted').catch(() => undefined);
+    throw new Error('PRODUCTION_MODEL_ARTIFACT_CHECKSUM_MISMATCH');
+  }
   const tempDir = await fs.mkdtemp(path.join(os.tmpdir(), 'uniace-model-'));
   const filePath = path.join(tempDir, `${safeId}.pkl`);
   await fs.writeFile(filePath, bytes, { mode: 0o600 });
@@ -78,7 +90,5 @@ export async function materializeModelArtifact(modelId: string): Promise<{ path:
 }
 
 export async function purgeModelArtifact(modelId: string): Promise<void> {
-  const safeId = safeModelId(modelId);
-  await ensureModelArtifactStore();
-  await getDb()!`DELETE FROM ml_model_artifacts WHERE model_id = ${safeId}::text`;
+  await setModelArtifactStatus(modelId, 'retired');
 }
