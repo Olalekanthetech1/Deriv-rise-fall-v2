@@ -18,10 +18,11 @@
     "verify-retraining-automation": "node scripts/tests/retraining-automation-invariants.mjs",
     "verify-asset-aware-strategy": "node scripts/tests/asset-aware-strategy-invariants.mjs",
     "verify-ml-promotion-metrics": "node scripts/tests/ml-promotion-metrics-invariants.mjs",
+    "verify-dataset-builder-scope": "node scripts/tests/dataset-builder-scope-contract-invariants.mjs",
     "db:storage:audit": "node scripts/db-storage-maintenance.mjs",
     "db:storage:prune": "node scripts/db-storage-maintenance.mjs --prune-ticks",
     "postinstall": "node scripts/copy-smartcharts-assets.js",
-    "prebuild": "node scripts/copy-smartcharts-assets.js && npm run verify-ml-architecture && npm run verify-gate6-legacy && npm run verify-signal-forensics && npm run verify-model-operations && npm run verify-ml-config && npm run verify-retraining-automation && npm run verify-asset-aware-strategy && npm run verify-ml-promotion-metrics"
+    "prebuild": "node scripts/copy-smartcharts-assets.js && npm run verify-ml-architecture && npm run verify-gate6-legacy && npm run verify-signal-forensics && npm run verify-model-operations && npm run verify-ml-config && npm run verify-retraining-automation && npm run verify-asset-aware-strategy && npm run verify-ml-promotion-metrics && npm run verify-dataset-builder-scope"
   },
   "dependencies": {
     "@deriv-com/smartcharts-champion": "^1.9.13",

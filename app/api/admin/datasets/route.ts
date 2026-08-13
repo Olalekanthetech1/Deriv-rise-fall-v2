@@ -4,7 +4,8 @@ import { buildDurationTrainingDataset, listDurationTrainingDatasets } from '@/li
 import { expandTrainingDurations, type DerivDurationRange, type DerivDurationUnit } from '@/lib/deriv-duration-registry';
 import { getCachedOrDiscoverDuration } from '@/lib/deriv-duration-cache';
 import { initializeMlPipelineConfig } from '@/lib/ml-pipeline-config';
-import { archiveAutoDatasetJob, claimNextAutoDatasetJobItem, completeAutoDatasetJobItem, createAutoDatasetJob, failAutoDatasetJobItem, getAutoDatasetJob, getAutoDatasetJobItemStatus, getLatestAutoDatasetJob, refreshAutoDatasetJobStatus, discardAutoDatasetBuild, skipAutoDatasetJobItem } from '@/lib/auto-dataset-job-store';
+import { archiveAutoDatasetJob, claimNextAutoDatasetJobItem, completeAutoDatasetJobItem, failAutoDatasetJobItem, getAutoDatasetJob, getAutoDatasetJobItemStatus, getLatestAutoDatasetJob, refreshAutoDatasetJobStatus, discardAutoDatasetBuild, skipAutoDatasetJobItem } from '@/lib/auto-dataset-job-store';
+import { createAutoDatasetJobAtomic } from '@/lib/auto-dataset-job-store-atomic';
 import { formatReadableDatasetName } from '@/lib/ml-display-formatters';
 
 function isAuthenticated(req: NextRequest): boolean {
@@ -76,7 +77,7 @@ async function runAutoDatasetWorker(jobId: string): Promise<void> {
     }
     const memoryBefore = process.memoryUsage().rss;
     try {
-      const result = await buildDurationTrainingDataset({ symbol: job.symbol, durationValue: item.value, durationUnit: item.unit, durationRangeId: item.rangeId });
+      const result = await buildDurationTrainingDataset({ symbol: job.symbol, durationValue: item.value, durationUnit: item.unit, durationRangeId: item.rangeId ?? undefined });
       const itemStatus = await getAutoDatasetJobItemStatus(jobId, item.id);
       if (itemStatus === 'cancelled') {
         await discardAutoDatasetBuild(result.datasetId);
@@ -178,11 +179,17 @@ export async function POST(req: NextRequest) {
         const scope = requestedUnit ? ` for ${requestedUnit}` : '';
         return NextResponse.json({ success: false, error: `Deriv returned no supported training horizons${scope} for this asset.` }, { status: 422, headers: noStore() });
       }
-      const job = await createAutoDatasetJob(symbol, durations);
-      resumeAutoDatasetJob(job.id);
-      const result = { status: job.status, jobId: job.id, requestedCount: job.requestedCount, completedCount: job.completedCount, skippedCount: job.skippedCount, failedCount: job.failedCount };
-      const scope = requestedUnit ? ` for ${requestedUnit}` : '';
-      return NextResponse.json({ success: true, accepted: true, jobId: job.id, requestedCount: job.requestedCount, completedCount: job.completedCount, skippedCount: job.skippedCount, failedCount: job.failedCount, dataSource: 'deriv-real-ticks', durationSource: resolved.source, durationRefreshing: resolved.refreshing, result, job, message: `AUTO dataset build started for all ${job.requestedCount} dynamically derived horizon samples${scope}.` }, { status: 202, headers: noStore() });
+      try {
+        const job = await createAutoDatasetJobAtomic(symbol, durations);
+        resumeAutoDatasetJob(job.id);
+        const result = { status: job.status, jobId: job.id, requestedCount: job.requestedCount, completedCount: job.completedCount, skippedCount: job.skippedCount, failedCount: job.failedCount };
+        const scope = requestedUnit ? ` for ${requestedUnit}` : '';
+        return NextResponse.json({ success: true, accepted: true, jobId: job.id, requestedCount: job.requestedCount, completedCount: job.completedCount, skippedCount: job.skippedCount, failedCount: job.failedCount, dataSource: 'deriv-real-ticks', durationSource: resolved.source, durationRefreshing: resolved.refreshing, result, job, message: `AUTO dataset build started for all ${job.requestedCount} dynamically derived horizon samples${scope}.` }, { status: 202, headers: noStore() });
+      } catch (error) {
+        const message = error instanceof Error ? error.message : String(error);
+        const status = message.startsWith('AUTO_DATASET_SCOPE_CONFLICT:') ? 409 : 500;
+        return NextResponse.json({ success: false, error: message }, { status, headers: noStore() });
+      }
     }
     const legacyHorizon = body?.horizonTicks;
     const durationValue = legacyHorizon != null ? Number(legacyHorizon) : Number(body?.durationValue);

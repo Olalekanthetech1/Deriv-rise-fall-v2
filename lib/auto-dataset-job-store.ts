@@ -18,7 +18,7 @@ export type AutoDatasetJob = {
   finishedAt?: string;
   archivedAt?: string;
 };
-export type AutoDatasetJobItem = { id: number; itemIndex: number; value: number; unit: DerivDurationUnit; rangeId: string; attempts: number };
+export type AutoDatasetJobItem = { id: number; itemIndex: number; value: number; unit: DerivDurationUnit; rangeId: string | null; attempts: number };
 export type AutoDatasetJobItemStatus = 'pending' | 'running' | 'completed' | 'failed' | 'skipped' | 'cancelled';
 
 let schemaReady: Promise<void> | null = null;
@@ -34,7 +34,9 @@ async function ensureSchema(): Promise<void> {
     await sql`CREATE INDEX IF NOT EXISTS idx_ops_ml_dataset_jobs_symbol_started ON ops_ml_dataset_build_jobs (symbol, started_at DESC)`;
     await sql`CREATE INDEX IF NOT EXISTS idx_ops_ml_dataset_jobs_active_started ON ops_ml_dataset_build_jobs (started_at DESC) WHERE archived_at IS NULL`;
     await sql`CREATE UNIQUE INDEX IF NOT EXISTS uq_ops_ml_dataset_jobs_running_symbol ON ops_ml_dataset_build_jobs (symbol) WHERE status = 'running'`;
-    await sql`CREATE TABLE IF NOT EXISTS ops_ml_dataset_build_job_items (id BIGSERIAL PRIMARY KEY, job_id UUID NOT NULL REFERENCES ops_ml_dataset_build_jobs(id) ON DELETE CASCADE, item_index INTEGER NOT NULL, duration_value INTEGER NOT NULL, duration_unit VARCHAR(1) NOT NULL, duration_range_id VARCHAR(160) NOT NULL, status VARCHAR(24) NOT NULL DEFAULT 'pending', attempts INTEGER NOT NULL DEFAULT 0, error_message TEXT, claimed_at TIMESTAMPTZ, completed_at TIMESTAMPTZ, UNIQUE (job_id, item_index))`;
+    await sql`CREATE TABLE IF NOT EXISTS ops_ml_dataset_build_job_items (id BIGSERIAL PRIMARY KEY, job_id UUID NOT NULL REFERENCES ops_ml_dataset_build_jobs(id) ON DELETE CASCADE, item_index INTEGER NOT NULL, duration_value INTEGER NOT NULL, duration_unit VARCHAR(1) NOT NULL, duration_range_id VARCHAR(160), status VARCHAR(24) NOT NULL DEFAULT 'pending', attempts INTEGER NOT NULL DEFAULT 0, error_message TEXT, claimed_at TIMESTAMPTZ, completed_at TIMESTAMPTZ, UNIQUE (job_id, item_index))`;
+    await sql`ALTER TABLE ops_ml_dataset_build_job_items ALTER COLUMN duration_range_id DROP NOT NULL`;
+    await sql`UPDATE ops_ml_dataset_build_job_items SET duration_range_id = NULL WHERE duration_range_id LIKE '%:REQUESTED:%'`;
     await sql`CREATE INDEX IF NOT EXISTS idx_ops_ml_dataset_build_job_items_claim ON ops_ml_dataset_build_job_items (job_id, status, claimed_at, item_index)`;
   })();
   try { await schemaReady; } catch (error) { schemaReady = null; throw error; }
@@ -153,13 +155,19 @@ export async function getLatestAutoDatasetJob(): Promise<AutoDatasetJob | null> 
   return rows.length ? mapJob(rows[0]) : null;
 }
 
-async function runningJobMatches(sql: any, jobId: string, durations: Array<{ value: number; unit: DerivDurationUnit; rangeId: string }>): Promise<boolean> {
+async function runningJobMatches(sql: any, jobId: string, durations: Array<{ value: number; unit: DerivDurationUnit; rangeId: string | null }>): Promise<boolean> {
   const rows = await sql`SELECT item_index, duration_value, duration_unit, duration_range_id FROM ops_ml_dataset_build_job_items WHERE job_id = ${jobId} ORDER BY item_index`;
   if (rows.length !== durations.length) return false;
-  return rows.every((row: any, index: number) => Number(row.item_index) === index && Number(row.duration_value) === durations[index].value && String(row.duration_unit) === durations[index].unit && String(row.duration_range_id) === durations[index].rangeId);
+  return rows.every((row: any, index: number) => {
+    const existingRangeId = row.duration_range_id == null ? null : String(row.duration_range_id);
+    return Number(row.item_index) === index
+      && Number(row.duration_value) === durations[index].value
+      && String(row.duration_unit) === durations[index].unit
+      && existingRangeId === durations[index].rangeId;
+  });
 }
 
-export async function createAutoDatasetJob(symbol: string, durations: Array<{ value: number; unit: DerivDurationUnit; rangeId: string }>): Promise<AutoDatasetJob> {
+export async function createAutoDatasetJob(symbol: string, durations: Array<{ value: number; unit: DerivDurationUnit; rangeId: string | null }>): Promise<AutoDatasetJob> {
   await ensureSchema(); const sql = getDbOrThrow();
   const running = await sql`SELECT * FROM ops_ml_dataset_build_jobs WHERE symbol = ${symbol} AND status = 'running' ORDER BY started_at DESC LIMIT 1`;
   if (running.length) {
@@ -199,7 +207,14 @@ export async function claimNextAutoDatasetJobItem(jobId: string, staleAfterMinut
     RETURNING item.id, item.item_index, item.duration_value, item.duration_unit, item.duration_range_id, item.attempts
   `;
   if (!rows.length) return null;
-  return { id: Number(rows[0].id), itemIndex: Number(rows[0].item_index), value: Number(rows[0].duration_value), unit: rows[0].duration_unit as DerivDurationUnit, rangeId: String(rows[0].duration_range_id), attempts: Number(rows[0].attempts) };
+  return {
+    id: Number(rows[0].id),
+    itemIndex: Number(rows[0].item_index),
+    value: Number(rows[0].duration_value),
+    unit: rows[0].duration_unit as DerivDurationUnit,
+    rangeId: rows[0].duration_range_id == null ? null : String(rows[0].duration_range_id),
+    attempts: Number(rows[0].attempts),
+  };
 }
 
 /** Cancel pending/running AUTO work for a dataset identity before deleting it. */
