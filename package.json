@@ -81,11 +81,12 @@
     "zod": "^3.25.76"
   },
   "devDependencies": {
-    "@types/node": "^22.15.21",
+    "@types/node": "^22.15.1",
+    "@types/opossum": "^8.1.9",
     "@types/react": "^19.1.2",
     "@types/react-dom": "^19.1.2",
     "autoprefixer": "^10.4.21",
-    "postcss": "^8.5.3",
+    "postcss": "8.5.23",
     "tailwindcss": "^4.1.7",
     "typescript": "^5.8.3"
   },
