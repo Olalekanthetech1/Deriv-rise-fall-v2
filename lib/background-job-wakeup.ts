@@ -3,16 +3,18 @@ import ws from 'ws';
 
 neonConfig.webSocketConstructor = ws;
 
-type WakeupChannel = 'dataset_jobs' | 'ml_training_jobs';
+type WakeupChannel = 'dataset_jobs' | 'ml_training_jobs' | 'artifact_maintenance_jobs';
 
-const CHANNEL_CONFIG: Record<WakeupChannel, { table: string; idExpression: string; queuedPredicate?: string }> = {
+const CHANNEL_CONFIG: Record<WakeupChannel, { table: string; queuedPredicate?: string }> = {
   dataset_jobs: {
     table: 'ops_ml_dataset_build_jobs',
-    idExpression: 'NEW.id',
   },
   ml_training_jobs: {
     table: 'ml_training_job_queue',
-    idExpression: 'NEW.job_id',
+    queuedPredicate: "NEW.status = 'queued'",
+  },
+  artifact_maintenance_jobs: {
+    table: 'ml_artifact_maintenance_jobs',
     queuedPredicate: "NEW.status = 'queued'",
   },
 };
@@ -23,18 +25,6 @@ function connectionString(): string {
   return value;
 }
 
-/**
- * Installs idempotent PostgreSQL triggers that turn durable queue writes into
- * best-effort wake-up notifications. The notification is never the source of
- * truth; workers always reconcile the durable queue after reconnects.
- *
- * PostgreSQL DDL does not accept bind parameters for identifiers or trigger
- * function arguments. The previous tagged-template construction allowed
- * Neon to encode those interpolations as $1-style parameters, which PostgreSQL
- * rejects while parsing CREATE TRIGGER. All interpolated values here come only
- * from the closed CHANNEL_CONFIG enum, so the complete DDL is intentionally
- * sent as raw SQL rather than parameterized SQL.
- */
 export async function ensureBackgroundJobWakeupTriggers(): Promise<void> {
   const sql = neon(connectionString());
   await sql`
@@ -50,37 +40,19 @@ export async function ensureBackgroundJobWakeupTriggers(): Promise<void> {
   `;
 
   for (const [channel, config] of Object.entries(CHANNEL_CONFIG) as Array<[WakeupChannel, typeof CHANNEL_CONFIG[WakeupChannel]]>) {
-    const triggerName = channel === 'dataset_jobs'
-      ? 'trg_ops_ml_dataset_jobs_wakeup'
-      : 'trg_ml_training_job_queue_wakeup';
-
+    const triggerName = `trg_${channel}`;
     await sql.unsafe(`DROP TRIGGER IF EXISTS ${triggerName} ON ${config.table}`);
-
-    if (config.queuedPredicate) {
-      await sql.unsafe(`
-        CREATE TRIGGER ${triggerName}
-        AFTER INSERT OR UPDATE OF status ON ${config.table}
-        FOR EACH ROW
-        WHEN (${config.queuedPredicate})
-        EXECUTE FUNCTION ops_notify_background_job('${channel}')
-      `);
-    } else {
-      await sql.unsafe(`
-        CREATE TRIGGER ${triggerName}
-        AFTER INSERT ON ${config.table}
-        FOR EACH ROW
-        EXECUTE FUNCTION ops_notify_background_job('${channel}')
-      `);
-    }
+    const insertEvent = `
+      CREATE TRIGGER ${triggerName}
+      AFTER INSERT ON ${config.table}
+      FOR EACH ROW
+      ${config.queuedPredicate ? `WHEN (${config.queuedPredicate})` : ''}
+      EXECUTE FUNCTION ops_notify_background_job('${channel}')
+    `;
+    await sql.unsafe(insertEvent);
   }
 }
 
-/**
- * Maintains a persistent PostgreSQL LISTEN connection for a background worker.
- * Notifications only wake the worker; the worker must still claim work from
- * the durable database queue. If the connection drops, it reconnects and the
- * caller's reconciliation loop remains the correctness fallback.
- */
 export async function startBackgroundJobWakeupListener(
   channel: WakeupChannel,
   onWake: () => void,
