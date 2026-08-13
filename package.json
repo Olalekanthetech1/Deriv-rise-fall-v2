@@ -15,6 +15,7 @@
     "verify-gate6-legacy": "node scripts/tests/gate6-legacy-boundary-guard.mjs",
     "verify-signal-forensics": "node scripts/tests/signal-forensics-invariants.mjs",
     "verify-model-operations": "node scripts/tests/model-operations-invariants.mjs",
+    "verify-legacy-model-registry-migration": "node scripts/tests/legacy-model-registry-migration-invariants.mjs",
     "verify-ml-config": "node scripts/tests/ml-config-invariants.mjs",
     "verify-retraining-automation": "node scripts/tests/retraining-automation-invariants.mjs",
     "verify-asset-aware-strategy": "node scripts/tests/asset-aware-strategy-invariants.mjs",
@@ -27,15 +28,14 @@
     "db:storage:audit": "node scripts/db-storage-maintenance.mjs",
     "db:storage:prune": "node scripts/db-storage-maintenance.mjs --prune-ticks",
     "postinstall": "node scripts/copy-smartcharts-assets.js",
-    "prebuild": "node scripts/copy-smartcharts-assets.js && npm run verify-ml-architecture && npm run verify-gate6-legacy && npm run verify-signal-forensics && npm run verify-model-operations && npm run verify-ml-config && npm run verify-retraining-automation && npm run verify-asset-aware-strategy && npm run verify-ml-promotion-metrics && npm run verify-dataset-builder-scope && npm run verify-prediction-trading-integration && npm run verify-production-model-contract"
+    "prebuild": "node scripts/copy-smartcharts-assets.js && npm run verify-ml-architecture && npm run verify-gate6-legacy && npm run verify-signal-forensics && npm run verify-model-operations && npm run verify-legacy-model-registry-migration && npm run verify-ml-config && npm run verify-retraining-automation && npm run verify-asset-aware-strategy && npm run verify-ml-promotion-metrics && npm run verify-dataset-builder-scope && npm run verify-prediction-trading-integration && npm run verify-production-model-contract"
   },
   "dependencies": {
     "@deriv-com/smartcharts-champion": "^1.9.13",
     "@deriv/core": "0.1.0",
     "@neondatabase/serverless": "^1.1.0",
     "@radix-ui/react-accordion": "^1.1.2",
-    "@radix-ui/react-alert-dialog": "^1.0.0",
-    "@radix-ui/react-aspect-ratio": "^1.0.4",
+    "@radix-ui/react-alert-dialog": "^1.0.4",
     "@radix-ui/react-avatar": "^1.1.0",
     "@radix-ui/react-checkbox": "^1.0.0",
     "@radix-ui/react-collapsible": "^1.1.2",
