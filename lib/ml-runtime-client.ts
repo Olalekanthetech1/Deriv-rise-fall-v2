@@ -10,7 +10,7 @@ interface PendingRequest {
   modelType?: string;
 }
 
-type MlRuntimeAction = 'predict' | 'predict_ensemble' | 'train' | 'train_partitioned' | 'list_models' | 'ping' | 'backtest';
+type MlRuntimeAction = 'predict' | 'predict_ensemble' | 'train' | 'train_partitioned' | 'train_horizon_cohort' | 'list_models' | 'ping' | 'backtest';
 const CANONICAL_RUNTIME_ENTRYPOINT = 'ml_runtime_entry.py';
 const DEFAULT_TRAINING_TIMEOUT_MS = 15 * 60 * 1000;
 
@@ -215,6 +215,7 @@ class MlRuntimeClient {
     'predict_ensemble',
     'train',
     'train_partitioned',
+    'train_horizon_cohort',
     'list_models',
     'ping',
     'backtest',
@@ -250,7 +251,7 @@ class MlRuntimeClient {
     const modelType = typeof payload.modelType === 'string' ? payload.modelType : '';
 
     return new Promise((resolve, reject) => {
-      const defaultTimeoutMs = action === 'train' || action === 'train_partitioned'
+      const defaultTimeoutMs = action === 'train' || action === 'train_partitioned' || action === 'train_horizon_cohort'
         ? trainingTimeoutMs()
         : action === 'backtest'
           ? 60000
@@ -265,7 +266,7 @@ class MlRuntimeClient {
         if (!this.pending.has(id)) return;
         this.pending.delete(id);
         if (trainingRunId && modelType) this.liveTrainingDiagnostics.delete(`${trainingRunId}:${modelType}`);
-        if (action === 'train' || action === 'train_partitioned') {
+        if (action === 'train' || action === 'train_partitioned' || action === 'train_horizon_cohort') {
           this.terminateTrainingRuntime();
           reject(new Error(`ML_TRAINING_TIMEOUT: ${action} exceeded ${timeoutMs}ms; native runtime was terminated and will restart cleanly.`));
         } else {
