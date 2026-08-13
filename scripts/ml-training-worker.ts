@@ -1,8 +1,10 @@
 import crypto from 'node:crypto';
 import { recordWorkerHeartbeat, claimNextTrainingJob, finishTrainingJob, heartbeatTrainingJob, recoverAbandonedTrainingJobs, type TrainingQueueJob } from '@/lib/ml-training-queue';
+import { claimArtifactBackfill, finishArtifactBackfill, heartbeatArtifactBackfill } from '@/lib/ml-artifact-maintenance';
 import { mlRuntimeClient } from '@/lib/ml-runtime-client';
 import { trainDatasetModels } from '@/lib/ml-training-orchestrator';
 import { ensureBackgroundJobWakeupTriggers, startBackgroundJobWakeupListener } from '@/lib/background-job-wakeup';
+import { executeArtifactBackfill } from '@/lib/ml-artifact-maintenance';
 
 type ModelType = Parameters<typeof trainDatasetModels>[0]['modelTypes'];
 
@@ -19,7 +21,6 @@ let stopWakeupListener: (() => Promise<void>) | null = null;
 let workerStatusTimer: ReturnType<typeof setInterval> | null = null;
 let wakeupResolver: (() => void) | null = null;
 
-function sleep(ms: number) { return new Promise((resolve) => setTimeout(resolve, ms)); }
 function waitForWakeup(timeoutMs: number) {
   return new Promise<void>((resolve) => {
     const timer = setTimeout(() => {
@@ -36,7 +37,6 @@ function waitForWakeup(timeoutMs: number) {
 }
 function wakeWorker() { wakeupResolver?.(); }
 
-// Keep native BLAS/OpenMP runtimes conservative on small Render instances.
 process.env.OMP_NUM_THREADS = process.env.OMP_NUM_THREADS || '1';
 process.env.OPENBLAS_NUM_THREADS = process.env.OPENBLAS_NUM_THREADS || '1';
 process.env.MKL_NUM_THREADS = process.env.MKL_NUM_THREADS || '1';
@@ -97,19 +97,48 @@ async function processJob(job: TrainingQueueJob) {
   }
 }
 
+async function processArtifactMaintenance(): Promise<boolean> {
+  const job = await claimArtifactBackfill(workerId);
+  if (!job) return false;
+  console.log(`[ML Worker] claimed artifact maintenance ${job.jobId} attempt=${job.attempts}`);
+  let heartbeatTimer: ReturnType<typeof setInterval> | null = null;
+  try {
+    heartbeatTimer = setInterval(() => {
+      void heartbeatArtifactBackfill(job.jobId, workerId).catch((error) => console.error('[ML Worker] artifact maintenance heartbeat failed:', error));
+    }, heartbeatMs);
+    const summary = await executeArtifactBackfill();
+    await finishArtifactBackfill(job.jobId, workerId, 'completed', summary);
+    console.log(`[ML Worker] completed artifact maintenance ${job.jobId} summary=${JSON.stringify(summary)}`);
+  } catch (error) {
+    const message = error instanceof Error ? error.message : String(error);
+    try { await finishArtifactBackfill(job.jobId, workerId, 'failed', { error: message }, message); } catch (finishError) { console.error('[ML Worker] could not persist artifact maintenance failure:', finishError); }
+    console.error(`[ML Worker] artifact maintenance failed ${job.jobId}: ${message}`);
+  } finally {
+    if (heartbeatTimer) clearInterval(heartbeatTimer);
+  }
+  return true;
+}
+
 async function processAvailableJob(): Promise<boolean> {
   const recovered = await recoverAbandonedTrainingJobs();
   if (recovered > 0) console.warn(`[ML Worker] recovered ${recovered} abandoned job(s) after worker lease expiry.`);
   const job = await claimNextTrainingJob(workerId);
-  if (!job) return false;
-  await processJob(job);
-  return true;
+  if (job) {
+    await processJob(job);
+    return true;
+  }
+  return processArtifactMaintenance();
 }
 
 async function main() {
   console.log(`[ML Worker] started id=${workerId} reconciliation=${reconciliationMs}ms heartbeat=${heartbeatMs}ms`);
   await ensureBackgroundJobWakeupTriggers();
   stopWakeupListener = await startBackgroundJobWakeupListener('ml_training_jobs', wakeWorker);
+  const stopArtifactWakeupListener = await startBackgroundJobWakeupListener('artifact_maintenance_jobs', wakeWorker);
+  const originalStopWakeupListener = stopWakeupListener;
+  stopWakeupListener = async () => {
+    try { await originalStopWakeupListener?.(); } finally { await stopArtifactWakeupListener(); }
+  };
   await recordWorkerHeartbeat(workerId, 'online');
   workerStatusTimer = setInterval(() => {
     void recordWorkerHeartbeat(workerId, stopping ? 'stopping' : 'online').catch((error) => {
@@ -123,7 +152,7 @@ async function main() {
       if (!progressed && !stopping) await waitForWakeup(reconciliationMs);
     } catch (error) {
       console.error('[ML Worker] loop error:', error);
-      await sleep(Math.min(30000, reconciliationMs));
+      await new Promise((resolve) => setTimeout(resolve, Math.min(30000, reconciliationMs)));
     }
   }
 }
