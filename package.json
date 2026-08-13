@@ -8,6 +8,7 @@
     "build": "next build",
     "start": "next start -p 3000 -H 0.0.0.0",
     "ml:worker": "tsx scripts/ml-training-worker.ts",
+    "dataset:worker": "tsx scripts/dataset-build-worker.ts",
     "typecheck": "tsc --noEmit",
     "copy-smartcharts-assets": "node scripts/copy-smartcharts-assets.js",
     "verify-ml-architecture": "node scripts/verify-ml-architecture.mjs",
