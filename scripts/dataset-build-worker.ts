@@ -2,17 +2,34 @@ import crypto from 'node:crypto';
 import { getDbOrThrow } from '@/lib/db';
 import { migrateHistoricalFeasibilityFailures, getAutoDatasetJob, claimNextAutoDatasetJobItem, getAutoDatasetJobItemStatus, completeAutoDatasetJobItem, failAutoDatasetJobItem, skipAutoDatasetJobItem, discardAutoDatasetBuild, refreshAutoDatasetJobStatus } from '@/lib/auto-dataset-job-store';
 import { listDurationTrainingDatasets, buildDurationTrainingDataset } from '@/lib/training-dataset-builder-duration-v2';
-import type { DerivDurationUnit } from '@/lib/deriv-duration-registry';
+import { ensureBackgroundJobWakeupTriggers, startBackgroundJobWakeupListener } from '@/lib/background-job-wakeup';
 
 const workerId = `dataset-worker:${process.env.RENDER_INSTANCE_ID?.trim() || 'local'}:${process.pid}:${crypto.randomUUID().slice(0, 8)}`;
-const pollMs = Math.max(1000, Math.min(60000, Number(process.env.DATASET_WORKER_POLL_INTERVAL_MS || 2000)));
+const reconciliationMs = Math.max(10000, Math.min(300000, Number(process.env.DATASET_WORKER_RECONCILIATION_INTERVAL_MS || 60000)));
 const staleAfterMinutes = Math.max(2, Math.min(30, Number(process.env.DATASET_WORKER_STALE_AFTER_MINUTES || 10)));
 const heartbeatMs = Math.max(5000, Math.min(120000, Number(process.env.DATASET_WORKER_HEARTBEAT_MS || 30000)));
 let stopping = false;
 let activeItem: { jobId: string; itemId: number } | null = null;
 let heartbeatTimer: ReturnType<typeof setInterval> | null = null;
+let wakeupResolver: (() => void) | null = null;
+let stopWakeupListener: (() => Promise<void>) | null = null;
 
 function sleep(ms: number) { return new Promise((resolve) => setTimeout(resolve, ms)); }
+function waitForWakeup(timeoutMs: number) {
+  return new Promise<void>((resolve) => {
+    const timer = setTimeout(() => {
+      if (wakeupResolver === resolveWake) wakeupResolver = null;
+      resolve();
+    }, timeoutMs);
+    const resolveWake = () => {
+      clearTimeout(timer);
+      if (wakeupResolver === resolveWake) wakeupResolver = null;
+      resolve();
+    };
+    wakeupResolver = resolveWake;
+  });
+}
+function wakeWorker() { wakeupResolver?.(); }
 function feasibility(message: string) {
   return /^(No persisted real ticks can satisfy|No non-flat directional samples could be constructed|Temporal split validation failed|Insufficient real Deriv ticks|The duration-aware feature window requires)/i.test(message.trim());
 }
@@ -90,27 +107,34 @@ async function processJob(jobId: string): Promise<boolean> {
   }
 }
 
+async function processAvailableJobs(): Promise<void> {
+  const jobs = await runningJobIds();
+  for (const jobId of jobs) {
+    if (stopping) break;
+    while (!stopping && await processJob(jobId)) {
+      // Drain all currently claimable items for this job before waiting.
+    }
+  }
+}
+
 async function main() {
-  console.log(`[Dataset Worker] started id=${workerId} poll=${pollMs}ms stale=${staleAfterMinutes}m heartbeat=${heartbeatMs}ms`);
+  console.log(`[Dataset Worker] started id=${workerId} reconciliation=${reconciliationMs}ms stale=${staleAfterMinutes}m heartbeat=${heartbeatMs}ms`);
   try {
     const migrated = await migrateHistoricalFeasibilityFailures();
     if (migrated > 0) console.log(`[Dataset Worker] migrated ${migrated} historical feasibility job(s).`);
+    await ensureBackgroundJobWakeupTriggers();
+    stopWakeupListener = await startBackgroundJobWakeupListener('dataset_jobs', wakeWorker);
   } catch (error) {
-    console.error('[Dataset Worker] historical migration failed:', error);
-    await sleep(Math.min(30000, pollMs * 2));
+    console.error('[Dataset Worker] startup wakeup initialization failed; reconciliation remains active:', error);
   }
+
   while (!stopping) {
     try {
-      const jobs = await runningJobIds();
-      let progressed = false;
-      for (const jobId of jobs) {
-        if (stopping) break;
-        if (await processJob(jobId)) progressed = true;
-      }
-      if (!progressed) await sleep(pollMs);
+      await processAvailableJobs();
+      if (!stopping) await waitForWakeup(reconciliationMs);
     } catch (error) {
       console.error('[Dataset Worker] loop error:', error);
-      await sleep(Math.min(30000, pollMs * 2));
+      await sleep(Math.min(30000, reconciliationMs));
     }
   }
 }
@@ -118,6 +142,10 @@ async function main() {
 async function shutdown(signal: string) {
   if (stopping) return;
   stopping = true;
+  wakeWorker();
+  if (stopWakeupListener) {
+    try { await stopWakeupListener(); } catch (error) { console.error('[Dataset Worker] listener shutdown failed:', error); }
+  }
   console.warn(`[Dataset Worker] received ${signal}; activeItem=${activeItem ? `${activeItem.jobId}/${activeItem.itemId}` : 'none'}.`);
 }
 process.on('SIGTERM', () => { void shutdown('SIGTERM'); });
