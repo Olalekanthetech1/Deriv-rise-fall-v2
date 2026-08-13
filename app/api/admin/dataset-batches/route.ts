@@ -9,6 +9,7 @@ import { archiveAutoDatasetJob, claimNextAutoDatasetJobItem, completeAutoDataset
 import { formatReadableDatasetName } from '@/lib/ml-display-formatters';
 
 const activeWorkers = new Set<string>();
+const scheduledJobs = new Set<string>();
 
 function auth(req: NextRequest) {
   const cookie = req.cookies.get('admin_session_token')?.value;
@@ -33,28 +34,77 @@ function pretty(datasets: any[]) {
   return datasets.map((dataset) => ({ ...dataset, name: formatReadableDatasetName({ name: dataset.name, assetSymbol: dataset.asset_symbol, assetDisplayName: dataset.metadata?.assetDisplayName, durationValue: dataset.duration_value, durationUnit: dataset.duration_unit }), raw_name: dataset.name }));
 }
 function feasibility(message: string) { return /^(No persisted real ticks can satisfy|No non-flat directional samples could be constructed|Temporal split validation failed|Insufficient real Deriv ticks|The duration-aware feature window requires)/i.test(message.trim()); }
+function datasetIdentity(value: number, unit: DerivDurationUnit): string { return `${unit}:${value}`; }
+function hasReusableDataset(datasets: any[], value: number, unit: DerivDurationUnit): boolean {
+  return datasets.some((dataset) => dataset?.status === 'completed' && dataset?.leakage_check_passed === true && Number(dataset?.sample_count ?? 0) > 0 && Number(dataset?.duration_value) === value && String(dataset?.duration_unit ?? '').trim() === unit);
+}
 
-async function worker(jobId: string, concurrency: number) {
-  if (activeWorkers.has(jobId) || activeWorkers.size >= concurrency) return;
+async function worker(jobId: string, concurrency: number): Promise<void> {
+  if (activeWorkers.has(jobId)) return;
   activeWorkers.add(jobId);
   try {
-    const job = await getAutoDatasetJob(jobId);
-    if (!job || job.status !== 'running') return;
     await initializeMlPipelineConfig();
-    const item = await claimNextAutoDatasetJobItem(jobId);
-    if (!item) { await refreshAutoDatasetJobStatus(jobId); return; }
-    try {
-      const result = await buildDurationTrainingDataset({ symbol: job.symbol, durationValue: item.value, durationUnit: item.unit, durationRangeId: item.rangeId });
-      const itemStatus = await getAutoDatasetJobItemStatus(jobId, item.id);
-      if (itemStatus === 'cancelled') { await discardAutoDatasetBuild(result.datasetId); await refreshAutoDatasetJobStatus(jobId); return; }
-      await completeAutoDatasetJobItem(jobId, item.id);
-    } catch (error) {
-      const message = error instanceof Error ? error.message : String(error);
-      if (feasibility(message)) await skipAutoDatasetJobItem(jobId, item.id, message); else await failAutoDatasetJobItem(jobId, item.id, message);
+    const existingDatasets = await listDurationTrainingDatasets((await getAutoDatasetJob(jobId))?.symbol ?? '');
+    const existingIds = new Set<string>(existingDatasets
+      .filter((dataset: any) => dataset?.status === 'completed' && dataset?.leakage_check_passed === true && Number(dataset?.sample_count ?? 0) > 0)
+      .map((dataset: any) => datasetIdentity(Number(dataset.duration_value), String(dataset.duration_unit ?? '') as DerivDurationUnit)));
+
+    while (true) {
+      const job = await getAutoDatasetJob(jobId);
+      if (!job || job.status !== 'running') return;
+      const item = await claimNextAutoDatasetJobItem(jobId);
+      if (!item) {
+        await refreshAutoDatasetJobStatus(jobId);
+        return;
+      }
+
+      const identity = datasetIdentity(item.value, item.unit);
+      if (existingIds.has(identity) || hasReusableDataset(existingDatasets, item.value, item.unit)) {
+        await skipAutoDatasetJobItem(jobId, item.id, `ALREADY_EXISTS: a completed leakage-safe dataset already exists for ${job.symbol} at ${item.value}${item.unit}.`);
+        existingIds.add(identity);
+        continue;
+      }
+
+      try {
+        const result = await buildDurationTrainingDataset({ symbol: job.symbol, durationValue: item.value, durationUnit: item.unit, durationRangeId: item.rangeId });
+        const itemStatus = await getAutoDatasetJobItemStatus(jobId, item.id);
+        if (itemStatus === 'cancelled') {
+          await discardAutoDatasetBuild(result.datasetId);
+          await refreshAutoDatasetJobStatus(jobId);
+          continue;
+        }
+        existingIds.add(identity);
+        existingDatasets.push({ status: 'completed', leakage_check_passed: result.leakageCheckPassed, sample_count: result.sampleCount, duration_value: result.durationValue, duration_unit: result.durationUnit });
+        await completeAutoDatasetJobItem(jobId, item.id);
+      } catch (error) {
+        const message = error instanceof Error ? error.message : String(error);
+        if (feasibility(message)) await skipAutoDatasetJobItem(jobId, item.id, message);
+        else await failAutoDatasetJobItem(jobId, item.id, message);
+      }
     }
-  } finally { activeWorkers.delete(jobId); }
+  } catch (error) {
+    console.error('[dataset batch worker error]', JSON.stringify({ jobId, error: error instanceof Error ? error.message : String(error) }));
+  } finally {
+    activeWorkers.delete(jobId);
+    const runtime = getDatasetBuildRuntimeConfig();
+    pumpWorkers(runtime.concurrency);
+  }
 }
-function resume(jobIds: string[], concurrency: number) { for (const id of [...new Set(jobIds)]) { if (activeWorkers.size >= concurrency) break; void worker(id, concurrency); } }
+
+function pumpWorkers(concurrency: number): void {
+  if (!Number.isSafeInteger(concurrency) || concurrency <= 0) return;
+  while (activeWorkers.size < concurrency && scheduledJobs.size) {
+    const next = scheduledJobs.values().next().value as string | undefined;
+    if (!next) return;
+    scheduledJobs.delete(next);
+    void worker(next, concurrency);
+  }
+}
+
+function scheduleWorkers(jobIds: string[], concurrency: number): void {
+  for (const id of [...new Set(jobIds)]) scheduledJobs.add(id);
+  pumpWorkers(concurrency);
+}
 
 async function state(symbol: string) {
   const [datasets, resolved] = await Promise.all([listDurationTrainingDatasets(symbol), getCachedOrDiscoverDuration(symbol)]);
@@ -75,7 +125,7 @@ export async function GET(req: NextRequest) {
       if (runtime.maxAssets !== null && jobIds.length > runtime.maxAssets) return NextResponse.json({ success: false, error: `A maximum of ${runtime.maxAssets} job IDs may be polled at once.` }, { status: 422, headers: noStore() });
       const running: string[] = [];
       for (const id of jobIds) { const job = await getAutoDatasetJob(id); if (job?.status === 'running') running.push(id); }
-      resume(running, runtime.concurrency);
+      scheduleWorkers(running, runtime.concurrency);
       const jobs = [] as any[];
       for (const id of jobIds) { const job = await getAutoDatasetJob(id); if (job) jobs.push((await refreshAutoDatasetJobStatus(id)) ?? job); }
       return NextResponse.json({ success: true, jobs, limits: { maxAssets: runtime.maxAssets, concurrency: runtime.concurrency, pollIntervalMs: runtime.pollIntervalMs } }, { headers: noStore() });
@@ -119,7 +169,7 @@ export async function POST(req: NextRequest) {
       }
     }
     if (!jobs.length) return NextResponse.json({ success: false, error: 'None of the selected assets had a supported build scope.', results, limits: { maxAssets: runtime.maxAssets, concurrency: runtime.concurrency, pollIntervalMs: runtime.pollIntervalMs } }, { status: 422, headers: noStore() });
-    resume(jobs.map((job) => job.id), runtime.concurrency);
+    scheduleWorkers(jobs.map((job) => job.id), runtime.concurrency);
     return NextResponse.json({ success: true, mode: 'MULTI_ASSET_DATASET_BUILD', selectedSymbols: symbols, autoJobIds: jobs.map((job) => job.id), jobs, results, limits: { maxAssets: runtime.maxAssets, concurrency: runtime.concurrency, pollIntervalMs: runtime.pollIntervalMs }, message: buildAll ? `Dataset builds started for ${jobs.length} assets using their own supported horizon ladders.` : `Dataset build started for ${jobs.length} assets at the selected horizon.` }, { status: 202, headers: noStore() });
   } catch (error) { return NextResponse.json({ success: false, error: error instanceof Error ? error.message : 'Unable to start dataset build.' }, { status: 500, headers: noStore() }); }
 }
