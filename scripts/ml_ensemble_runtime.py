@@ -1,9 +1,4 @@
-"""Bounded parallel execution for the native ML production ensemble.
-
-The Node production resolver selects a durable artifact from the production
-registry and materializes it for this request. Python never guesses legacy
-filenames and never selects models independently of production governance.
-"""
+"""Bounded parallel execution for the native ML production ensemble."""
 from __future__ import annotations
 
 import hashlib
@@ -40,30 +35,10 @@ def _predict_governed_one(request: dict[str, Any], model_type: str, production_m
     try:
         record = _load_governed_artifact(production_model)
     except Exception as exc:
-        return {
-            "success": False,
-            "id": request.get("id"),
-            "modelType": model_type,
-            "error": str(exc),
-            "modelId": production_model.get("modelId"),
-            "trainingRunId": production_model.get("trainingRunId"),
-            "durationValue": production_model.get("durationValue"),
-            "durationUnit": production_model.get("durationUnit"),
-        }
+        return {"success": False, "id": request.get("id"), "modelType": model_type, "error": str(exc), "modelId": production_model.get("modelId"), "trainingRunId": production_model.get("trainingRunId"), "durationValue": production_model.get("durationValue"), "durationUnit": production_model.get("durationUnit")}
 
     schema = runtime.require_schema()
-    metadata = {
-        "validation": record.get("validation", {}),
-        "schemaVersion": schema["featureSchemaVersion"],
-        "schemaFingerprint": schema["schemaFingerprint"],
-        "featureCount": schema["featureCount"],
-        "trainedAt": record.get("trainedAt"),
-        "modelId": production_model.get("modelId"),
-        "trainingRunId": production_model.get("trainingRunId"),
-        "durationValue": production_model.get("durationValue"),
-        "durationUnit": production_model.get("durationUnit"),
-        "governanceStatus": "production",
-    }
+    metadata = {"validation": record.get("validation", {}), "schemaVersion": schema["featureSchemaVersion"], "schemaFingerprint": schema["schemaFingerprint"], "featureCount": schema["featureCount"], "trainedAt": record.get("trainedAt"), "modelId": production_model.get("modelId"), "trainingRunId": production_model.get("trainingRunId"), "durationValue": production_model.get("durationValue"), "durationUnit": production_model.get("durationUnit"), "artifactSha256": production_model.get("artifactSha256"), "governanceStatus": "production"}
 
     if str(record.get("modelType") or "") != model_type:
         return {"success": False, "id": request.get("id"), "modelType": model_type, "error": "PRODUCTION_MODEL_TYPE_MISMATCH", **metadata}
@@ -77,7 +52,7 @@ def _predict_governed_one(request: dict[str, Any], model_type: str, production_m
             return {"success": False, "id": request.get("id"), "modelType": model_type, "error": "PREDICTIVE_ARTIFACT_MODEL_MISSING", **metadata}
         probabilities = model.predict_proba(vector)[0]
         down, up = float(probabilities[0]), float(probabilities[1])
-        return {**runtime.prediction_result(request, model_type, up, down), **metadata}
+        return {**runtime.prediction_result(request, model_type, up, down), **metadata, "engine": "Native Python trained production artifact"}
 
     if model_type in {"tcn", "lstm", "transformer"}:
         if predict_deep is None:
@@ -90,7 +65,7 @@ def _predict_governed_one(request: dict[str, Any], model_type: str, production_m
         if not isinstance(state_dict, dict):
             return {"success": False, "id": request.get("id"), "modelType": model_type, "error": "SEQUENCE_ARTIFACT_STATE_DICT_MISSING", **metadata}
         probabilities = predict_deep(model_type, state_dict, sequence_array)[0]
-        return {**runtime.prediction_result(request, model_type, float(probabilities[1]), float(probabilities[0])), **metadata}
+        return {**runtime.prediction_result(request, model_type, float(probabilities[1]), float(probabilities[0])), **metadata, "engine": "Native Python trained production artifact"}
 
     if model_type == "hmm":
         model = record.get("model")
@@ -98,14 +73,14 @@ def _predict_governed_one(request: dict[str, Any], model_type: str, production_m
             return {"success": False, "id": request.get("id"), "modelType": model_type, "error": "REGIME_ARTIFACT_MODEL_MISSING", **metadata}
         probabilities = model.predict_proba(vector)[0]
         state = int(model.predict(vector)[0])
-        return {"success": True, "id": request.get("id"), "modelType": model_type, "primaryRegime": f"REGIME_{state + 1}", "regimeState": state + 1, "regimeProbabilities": [round(float(value) * 100.0, 2) for value in probabilities], "engine": "Trained native GaussianHMM", **metadata}
+        return {"success": True, "id": request.get("id"), "modelType": model_type, "primaryRegime": f"REGIME_{state + 1}", "regimeState": state + 1, "regimeProbabilities": [round(float(value) * 100.0, 2) for value in probabilities], "engine": "Native Python trained production artifact", **metadata}
 
     if model_type == "isolation_forest":
         model = record.get("model")
         if model is None:
             return {"success": False, "id": request.get("id"), "modelType": model_type, "error": "ANOMALY_ARTIFACT_MODEL_MISSING", **metadata}
         raw = float(model.score_samples(vector)[0])
-        return {"success": True, "id": request.get("id"), "modelType": model_type, "isAnomaly": int(model.predict(vector)[0]) == -1, "anomalyScore": round(max(0.0, min(1.0, 0.5 - raw)), 4), "engine": "Trained native IsolationForest", **metadata}
+        return {"success": True, "id": request.get("id"), "modelType": model_type, "isAnomaly": int(model.predict(vector)[0]) == -1, "anomalyScore": round(max(0.0, min(1.0, 0.5 - raw)), 4), "engine": "Native Python trained production artifact", **metadata}
 
     return {"success": False, "id": request.get("id"), "modelType": model_type, "error": f"UNSUPPORTED_MODEL:{model_type}", **metadata}
 
@@ -122,8 +97,7 @@ def _predict_one(request: dict[str, Any], model_type: str) -> tuple[str, dict[st
 
 def predict_ensemble(request: dict[str, Any]) -> dict[str, Any]:
     requested = request.get("modelTypes")
-    model_types = requested if isinstance(requested, list) and requested else []
-    model_types = [str(model_type) for model_type in model_types]
+    model_types = [str(model_type) for model_type in requested] if isinstance(requested, list) else []
     if not model_types:
         return {"success": False, "id": request.get("id"), "models": {}, "error": "NO_PRODUCTION_MODELS_REQUESTED"}
 
@@ -136,10 +110,4 @@ def predict_ensemble(request: dict[str, Any]) -> dict[str, Any]:
             model_type, result = future.result()
             models[model_type] = result
 
-    ordered_models = {model_type: models[model_type] for model_type in model_types}
-    return {
-        "success": True,
-        "id": request.get("id"),
-        "models": ordered_models,
-        "execution": {"mode": "bounded_parallel", "workerCount": max_workers, "requestedModelCount": len(model_types), "governedProductionArtifacts": True},
-    }
+    return {"success": True, "id": request.get("id"), "models": {model_type: models[model_type] for model_type in model_types}, "execution": {"mode": "bounded_parallel", "workerCount": max_workers, "requestedModelCount": len(model_types), "governedProductionArtifacts": True}}
