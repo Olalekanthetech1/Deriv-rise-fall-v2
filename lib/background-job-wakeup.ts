@@ -5,18 +5,11 @@ neonConfig.webSocketConstructor = ws;
 
 type WakeupChannel = 'dataset_jobs' | 'ml_training_jobs' | 'artifact_maintenance_jobs';
 
-const CHANNEL_CONFIG: Record<WakeupChannel, { table: string; queuedPredicate?: string }> = {
-  dataset_jobs: {
-    table: 'ops_ml_dataset_build_jobs',
-  },
-  ml_training_jobs: {
-    table: 'ml_training_job_queue',
-    queuedPredicate: "NEW.status = 'queued'",
-  },
-  artifact_maintenance_jobs: {
-    table: 'ml_artifact_maintenance_jobs',
-    queuedPredicate: "NEW.status = 'queued'",
-  },
+type ChannelConfig = { table: string; queuedPredicate?: string; updateStatus?: boolean };
+const CHANNEL_CONFIG: Record<WakeupChannel, ChannelConfig> = {
+  dataset_jobs: { table: 'ops_ml_dataset_build_jobs', updateStatus: false },
+  ml_training_jobs: { table: 'ml_training_job_queue', queuedPredicate: "NEW.status = 'queued'", updateStatus: true },
+  artifact_maintenance_jobs: { table: 'ml_artifact_maintenance_jobs', queuedPredicate: "NEW.status = 'queued'", updateStatus: true },
 };
 
 function connectionString(): string {
@@ -39,17 +32,17 @@ export async function ensureBackgroundJobWakeupTriggers(): Promise<void> {
     $$
   `;
 
-  for (const [channel, config] of Object.entries(CHANNEL_CONFIG) as Array<[WakeupChannel, typeof CHANNEL_CONFIG[WakeupChannel]]>) {
+  for (const [channel, config] of Object.entries(CHANNEL_CONFIG) as Array<[WakeupChannel, ChannelConfig]>) {
     const triggerName = `trg_${channel}`;
     await sql.unsafe(`DROP TRIGGER IF EXISTS ${triggerName} ON ${config.table}`);
-    const insertEvent = `
+    const timing = config.updateStatus ? 'AFTER INSERT OR UPDATE OF status' : 'AFTER INSERT';
+    await sql.unsafe(`
       CREATE TRIGGER ${triggerName}
-      AFTER INSERT ON ${config.table}
+      ${timing} ON ${config.table}
       FOR EACH ROW
       ${config.queuedPredicate ? `WHEN (${config.queuedPredicate})` : ''}
       EXECUTE FUNCTION ops_notify_background_job('${channel}')
-    `;
-    await sql.unsafe(insertEvent);
+    `);
   }
 }
 
