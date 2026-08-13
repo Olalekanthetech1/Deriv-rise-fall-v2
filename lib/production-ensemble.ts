@@ -3,8 +3,7 @@ import { buildFeatureSequence } from './ml-feature-dataset';
 import { getMlModelDefinition, getPredictiveModelDefinitions, type MlModelKey } from './ml-model-registry';
 import { mlRuntimeClient } from './ml-runtime-client';
 import { evaluateSignalStrategyGate, resolveAssetAwareSignalContext, type AssetAwareSignalContext, type SignalStrategyGate } from './asset-context';
-import { getDb } from './db';
-import { materializeModelArtifact } from './ml-model-artifact-store';
+import { resolveProductionModels, resolveAndMaterializeProductionModel } from './production-model-resolver';
 
 export type Signal = 'RISE' | 'FALL';
 export type ModelStatus = 'AVAILABLE' | 'UNAVAILABLE';
@@ -52,46 +51,6 @@ function validationWeight(result: any): number | null {
   return Number.isFinite(weight) && weight > 0 ? weight : null;
 }
 
-async function resolveProductionModels(symbol: string, durationValue: number, durationUnit: string) {
-  const sql = getDb();
-  if (!sql) throw new Error('PRODUCTION_MODEL_REGISTRY_UNAVAILABLE');
-  const rows = await sql`
-    SELECT model_id, model_family, asset_symbol, duration_value, duration_unit,
-           duration_seconds, horizon_ticks, feature_schema_version, framework,
-           training_run_id, metrics, format
-    FROM ml_model_registry_v2
-    WHERE asset_symbol = ${symbol}::varchar
-      AND duration_value = ${durationValue}::integer
-      AND duration_unit = ${durationUnit}::varchar
-      AND status = 'production'
-    ORDER BY updated_at DESC
-  `;
-
-  const productionModels: Record<string, any> = {};
-  for (const row of rows as any[]) {
-    const metrics = row.metrics && typeof row.metrics === 'object' ? row.metrics : {};
-    const persistedKey = String(metrics.modelKey || '').trim().toLowerCase();
-    const familyKey = String(row.model_family || '').trim().toLowerCase();
-    const modelKey = persistedKey || familyKey;
-    const definition = getMlModelDefinition(modelKey);
-    if (!definition || definition.family === 'regime' || definition.family === 'anomaly') continue;
-    if (productionModels[modelKey]) continue;
-    const artifact = await materializeModelArtifact(String(row.model_id));
-    productionModels[modelKey] = {
-      modelId: String(row.model_id), modelKey,
-      trainingRunId: row.training_run_id ? String(row.training_run_id) : null,
-      durationValue: Number(row.duration_value), durationUnit: String(row.duration_unit),
-      durationSeconds: row.duration_seconds == null ? null : Number(row.duration_seconds),
-      horizonTicks: row.horizon_ticks == null ? null : Number(row.horizon_ticks),
-      featureSchemaVersion: String(row.feature_schema_version || ''), framework: String(row.framework || ''),
-      format: String(row.format || ''), validation: metrics,
-      artifactPath: artifact.path, artifactSha256: artifact.sha256, artifactByteSize: artifact.byteSize,
-    };
-  }
-  if (!Object.keys(productionModels).length) throw new Error('NO_PRODUCTION_MODEL_REGISTERED');
-  return productionModels;
-}
-
 export async function evaluateProductionEnsemble(
   ticks: TickPoint[],
   options: { symbol?: string; durationSecs?: number; assetCategory?: number; durationValue?: number; durationUnit?: 't' | 's' | 'm' | 'h' | 'd'; assetClass?: string; marketType?: string; requiredContextTicks?: number } = {},
@@ -113,18 +72,28 @@ export async function evaluateProductionEnsemble(
     assetClass: options.assetClass, marketType: options.marketType, tickCount: ticks.length,
     requiredContextTicks: options.requiredContextTicks ?? Math.max(25, featureSequence.length || 25),
   });
+
   const predictiveModels = getPredictiveModelDefinitions();
   const productionModels = await resolveProductionModels(symbol, durationValue, durationUnit);
   const productionModelKeys = Object.keys(productionModels).filter((key) => predictiveModels.some((definition) => definition.key === key));
   if (!productionModelKeys.length) throw new Error('NO_PRODUCTION_PREDICTIVE_MODEL_REGISTERED');
+
+  const materialized = await Promise.all(productionModelKeys.map(async (key) => {
+    const model = productionModels[key];
+    const artifact = await resolveAndMaterializeProductionModel(model);
+    return [key, { ...model, artifactPath: artifact.path, artifactSha256: artifact.sha256, artifactByteSize: artifact.byteSize }] as const;
+  }));
+  const governedProductionModels = Object.fromEntries(materialized);
+
   const remote = await mlRuntimeClient.sendCommand('predict_ensemble', {
     symbol, durationSecs: Number(durationSecs), durationValue, durationUnit, assetCategory,
-    featureVector, featureSequence, modelTypes: productionModelKeys, productionModels,
+    featureVector, featureSequence, modelTypes: productionModelKeys, productionModels: governedProductionModels,
   });
   if (!remote?.success || !remote.models) throw new Error('NATIVE_ML_ENSEMBLE_UNAVAILABLE');
+
   const evaluations = predictiveModels.map((definition) => {
     const result = remote.models[definition.key];
-    const selectedForProduction = Boolean(productionModels[definition.key]);
+    const selectedForProduction = Boolean(governedProductionModels[definition.key]);
     const up = result?.success ? finiteProbability(result.probabilityUp) : null;
     const down = result?.success ? finiteProbability(result.probabilityDown) : null;
     const valid = selectedForProduction && up !== null && down !== null && Math.abs((up + down) - 100) < 0.25;
@@ -134,10 +103,11 @@ export async function evaluateProductionEnsemble(
       status: valid ? ('AVAILABLE' as const) : ('UNAVAILABLE' as const), probabilityUp: valid ? up : null, probabilityDown: valid ? down : null,
       signal: valid ? (up! >= down! ? ('RISE' as const) : ('FALL' as const)) : null, confidence: valid ? Math.max(up!, down!) : null,
       dynamicWeight, runtimeMode: valid ? 'Native Python trained production artifact' : 'Unavailable — no promoted production artifact',
-      details: valid ? `${String(result.engine || 'Native trained model')} · ${assetContext.assetLabel} · ${assetContext.duration.label} · production ${String(productionModels[definition.key]?.modelId || '')}` : String(result?.error || (!selectedForProduction ? 'MODEL_NOT_PROMOTED' : 'MODEL_UNAVAILABLE')),
-      validation: result?.validation || productionModels[definition.key]?.validation || null,
+      details: valid ? `${String(result.engine || 'Native Python trained model')} · ${assetContext.assetLabel} · ${assetContext.duration.label} · production ${String(governedProductionModels[definition.key]?.modelId || '')}` : String(result?.error || (!selectedForProduction ? 'MODEL_NOT_PROMOTED' : 'MODEL_UNAVAILABLE')),
+      validation: result?.validation || governedProductionModels[definition.key]?.validation || null,
     };
   });
+
   const available = evaluations.filter((evaluation): evaluation is AvailableEvaluation => evaluation.status === 'AVAILABLE' && evaluation.probabilityUp !== null && evaluation.probabilityDown !== null && evaluation.dynamicWeight !== null && evaluation.signal !== null).map((evaluation) => ({ ...evaluation, probabilityUp: evaluation.probabilityUp as number, probabilityDown: evaluation.probabilityDown as number, dynamicWeight: evaluation.dynamicWeight as number, signal: evaluation.signal as Signal }));
   if (available.length === 0) throw new Error('NO_VALIDATED_TRAINED_MODELS_AVAILABLE');
   const totalWeight = available.reduce((sum, evaluation) => sum + evaluation.dynamicWeight, 0);
