@@ -142,11 +142,7 @@ export async function POST(req: NextRequest) {
     }
 
     if (action === 'delete') {
-      if (!modelId || typeof modelId !== 'string') return NextResponse.json({ error: 'Missing modelId.' }, { status: 400 });
-      const sql = getDb();
-      if (!sql) return NextResponse.json({ success: false, error: 'Database unavailable.' }, { status: 503 });
-      await sql`DELETE FROM ml_model_registry WHERE model_id = ${modelId}`;
-      return NextResponse.json({ success: true, message: `Model ${modelId} deleted from registry.` });
+      return NextResponse.json({ success: false, error: 'Direct registry deletion is disabled. Retire production models through the controlled lifecycle so lineage and audit history are preserved.' }, { status: 410 });
     }
     return NextResponse.json({ error: 'Invalid action.' }, { status: 400 });
   } catch (err: any) {
