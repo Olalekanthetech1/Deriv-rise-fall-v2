@@ -13,6 +13,10 @@ services:
         value: "production"
       - key: ML_TRAINING_CONCURRENCY
         value: "1"
+      - key: DATASET_BUILD_POLL_INTERVAL_MS
+        value: "2000"
+      - key: DATASET_BUILD_MAX_ASSETS
+        sync: false
       - key: NEXT_PUBLIC_DERIV_APP_ID
         sync: false
       - key: DATABASE_URL
