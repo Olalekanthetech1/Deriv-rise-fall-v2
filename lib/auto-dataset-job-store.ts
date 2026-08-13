@@ -56,14 +56,98 @@ function mapJob(row: any): AutoDatasetJob {
     ...(row.archived_at ? { archivedAt: new Date(row.archived_at).toISOString() } : {}),
   };
 }
+
+let historicalFeasibilityMigration: Promise<number> | null = null;
+
+/**
+ * Reclassify feasibility outcomes persisted before the builder introduced the
+ * explicit skipped state. This is intentionally narrow: genuine infrastructure,
+ * database, runtime, and model failures remain failed.
+ */
+export async function migrateHistoricalFeasibilityFailures(): Promise<number> {
+  if (historicalFeasibilityMigration) return historicalFeasibilityMigration;
+  historicalFeasibilityMigration = (async () => {
+    await ensureSchema();
+    const sql = getDbOrThrow();
+    const rows = await sql`
+      WITH changed AS (
+        UPDATE ops_ml_dataset_build_job_items
+        SET status = 'skipped',
+            completed_at = COALESCE(completed_at, NOW())
+        WHERE status = 'failed'
+          AND (
+            error_message ILIKE 'No persisted real ticks can satisfy%'
+            OR error_message ILIKE 'No non-flat directional samples could be constructed%'
+            OR error_message ILIKE 'Temporal split validation failed%'
+            OR error_message ILIKE 'Insufficient real Deriv ticks%'
+            OR error_message ILIKE 'The duration-aware feature window requires%'
+          )
+        RETURNING job_id
+      ), affected AS (
+        SELECT DISTINCT job_id FROM changed
+      ), counts AS (
+        SELECT
+          job.id,
+          COUNT(item.id)::integer AS total_count,
+          COUNT(item.id) FILTER (WHERE item.status = 'completed')::integer AS completed_count,
+          COUNT(item.id) FILTER (WHERE item.status = 'failed')::integer AS failed_count,
+          COUNT(item.id) FILTER (WHERE item.status = 'skipped')::integer AS skipped_count,
+          COUNT(item.id) FILTER (WHERE item.status = 'cancelled')::integer AS cancelled_count
+        FROM ops_ml_dataset_build_jobs AS job
+        JOIN affected ON affected.job_id = job.id
+        LEFT JOIN ops_ml_dataset_build_job_items AS item ON item.job_id = job.id
+        GROUP BY job.id
+      )
+      UPDATE ops_ml_dataset_build_jobs AS job
+      SET completed_count = counts.completed_count,
+          failed_count = counts.failed_count,
+          skipped_count = counts.skipped_count,
+          cancelled_count = counts.cancelled_count,
+          failures = COALESCE((
+            SELECT jsonb_agg(jsonb_build_object('value', item.duration_value, 'unit', item.duration_unit, 'error', COALESCE(item.error_message, 'Dataset build failed.')) ORDER BY item.item_index)
+            FROM ops_ml_dataset_build_job_items AS item
+            WHERE item.job_id = job.id AND item.status = 'failed'
+          ), '[]'::jsonb),
+          skips = COALESCE((
+            SELECT jsonb_agg(jsonb_build_object('value', item.duration_value, 'unit', item.duration_unit, 'reason', COALESCE(item.error_message, 'Horizon is not currently feasible for dataset construction.')) ORDER BY item.item_index)
+            FROM ops_ml_dataset_build_job_items AS item
+            WHERE item.job_id = job.id AND item.status = 'skipped'
+          ), '[]'::jsonb),
+          status = CASE
+            WHEN counts.total_count > 0 AND counts.completed_count + counts.failed_count + counts.skipped_count + counts.cancelled_count >= counts.total_count
+              THEN CASE WHEN counts.failed_count > 0 THEN 'failed' ELSE 'completed' END
+            ELSE 'running'
+          END,
+          finished_at = CASE
+            WHEN counts.total_count > 0 AND counts.completed_count + counts.failed_count + counts.skipped_count + counts.cancelled_count >= counts.total_count
+              THEN COALESCE(job.finished_at, NOW())
+            ELSE NULL
+          END,
+          updated_at = NOW()
+      FROM counts
+      WHERE job.id = counts.id
+      RETURNING job.id
+    `;
+    return rows.length;
+  })();
+  try {
+    return await historicalFeasibilityMigration;
+  } catch (error) {
+    historicalFeasibilityMigration = null;
+    throw error;
+  }
+}
+
 export async function getAutoDatasetJob(jobId: string): Promise<AutoDatasetJob | null> {
   await ensureSchema();
+  await migrateHistoricalFeasibilityFailures();
   const sql = getDbOrThrow();
   const rows = await sql`SELECT * FROM ops_ml_dataset_build_jobs WHERE id = ${jobId} LIMIT 1`;
   return rows.length ? mapJob(rows[0]) : null;
 }
 export async function getLatestAutoDatasetJob(): Promise<AutoDatasetJob | null> {
   await ensureSchema();
+  await migrateHistoricalFeasibilityFailures();
   const sql = getDbOrThrow();
   const rows = await sql`SELECT * FROM ops_ml_dataset_build_jobs WHERE archived_at IS NULL ORDER BY started_at DESC LIMIT 1`;
   return rows.length ? mapJob(rows[0]) : null;
