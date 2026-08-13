@@ -1,4 +1,3 @@
-import crypto from 'crypto';
 import { neon } from '@neondatabase/serverless';
 import { getDbConnectionString, initDbSchema } from '@/lib/db';
 import {
@@ -167,7 +166,6 @@ export async function ingestDerivHistoricalBackfill(input: {
   const missingCount = targetCount - currentCount;
   const checkpoint = await getHistoricalIngestionCheckpoint(symbol);
   const endEpoch = checkpoint?.lastTickEpoch ? Math.max(1, Math.floor(checkpoint.lastTickEpoch) - 1) : undefined;
-
   const batchRun = await ingestDerivHistoricalTicks({ symbol, count: missingCount, resumeFromCheckpoint: false, endEpoch });
 
   if (!latestRun) {
@@ -238,13 +236,12 @@ export async function ingestDerivHistoricalBatch(input: {
   symbols: string[];
   targetCount: number;
   resumeFromCheckpoint: boolean;
-  concurrency?: number;
+  concurrency: number;
 }) {
   const symbols = normalizeSymbols(input.symbols);
   if (!symbols.length) throw new Error('At least one valid Deriv symbol is required.');
-  if (symbols.length > 25) throw new Error('A maximum of 25 assets can be ingested in one batch.');
 
-  const concurrency = Math.min(2, Math.max(1, Math.floor(input.concurrency || 2)));
+  const concurrency = Math.max(1, Math.floor(input.concurrency));
   const results: Array<{ symbol: string; success: boolean; status: string; recordsInserted: number; requestedCount: number; errorMessage: string | null }> = [];
 
   for (let index = 0; index < symbols.length; index += concurrency) {
