@@ -5,6 +5,7 @@ const sources = [
   ['app/api/signals/predict/route.ts', 'Signal prediction route'],
   ['components/custom/ai-trader-controls.tsx', 'AI Trader UI'],
   ['lib/production-ensemble.ts', 'Production ensemble'],
+  ['lib/production-model-resolver.ts', 'Production model resolver'],
   ['lib/ml-model-artifact-store.ts', 'Durable model artifact store'],
   ['scripts/ml_ensemble_runtime.py', 'Native production ensemble runtime'],
   ['app/admin/final-verification/page.tsx', 'Admin final verification'],
@@ -16,6 +17,7 @@ const mlPredictionRoute = contents.get('app/api/ml/predict/route.ts');
 const predictionRoute = contents.get('app/api/signals/predict/route.ts');
 const aiTrader = contents.get('components/custom/ai-trader-controls.tsx');
 const ensemble = contents.get('lib/production-ensemble.ts');
+const resolver = contents.get('lib/production-model-resolver.ts');
 const artifactStore = contents.get('lib/ml-model-artifact-store.ts');
 const nativeEnsemble = contents.get('scripts/ml_ensemble_runtime.py');
 const adminVerification = contents.get('app/admin/final-verification/page.tsx');
@@ -45,9 +47,13 @@ require(aiTrader, /\/api\/signals\/predict/, 'AI Trader must consume the canonic
 require(aiTrader, /strategyGate\.accepted/, 'AI Trader must honor the server-side strategy gate');
 if (/models_cache|model_path\(|load_duration|predict_ensemble.*fallback/i.test(aiTrader)) violations.push('AI Trader must not resolve or load ML artifacts directly');
 
-require(ensemble, /status = .*production|status.*production/, 'Production ensemble must resolve persisted production models');
-require(ensemble, /materializeModelArtifact/, 'Production ensemble must resolve durable model artifacts');
+require(ensemble, /resolveProductionModels\(/, 'Production ensemble must delegate production model selection to the canonical resolver');
+require(ensemble, /resolveAndMaterializeProductionModel\(/, 'Production ensemble must delegate durable artifact materialization to the canonical resolver');
 require(ensemble, /NO_VALIDATED_TRAINED_MODELS_AVAILABLE/, 'Production ensemble must fail closed when no validated production model is executable');
+
+require(resolver, /status = [^\n]*production/, 'Production resolver must select only persisted production models');
+require(resolver, /resolveAndMaterializeProductionModel/, 'Production resolver must expose governed artifact materialization');
+require(resolver, /hasModelArtifact/, 'Production resolver must verify durable model artifacts');
 require(artifactStore, /sha256/, 'Durable artifact store must checksum model artifacts');
 require(artifactStore, /BYTEA/, 'Durable artifact store must persist artifact bytes durably');
 require(nativeEnsemble, /productionModels/, 'Native ensemble must receive registry-selected production models');
