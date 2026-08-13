@@ -78,8 +78,8 @@ export async function createMlHorizonCohort(input: {
   const modelFamily = normalizeModelFamily(input.modelFamily);
   const metadata = input.metadata && typeof input.metadata === 'object' ? input.metadata : {};
 
-  await sql.begin(async (tx: any) => {
-    await tx`
+  await sql.transaction((tx) => [
+    tx`
       INSERT INTO ml_horizon_cohorts (
         cohort_id, asset_symbol, model_family, status,
         feature_schema_version, pipeline_version, feature_window_ticks,
@@ -90,12 +90,11 @@ export async function createMlHorizonCohort(input: {
         ${cohort.featureWindowTicks}::integer, ${JSON.stringify(cohort.featureOrder)}::jsonb,
         ${JSON.stringify(cohort.horizons)}::jsonb, ${JSON.stringify(metadata)}::jsonb
       )
-    `;
-
-    for (const dataset of input.datasets) {
+    `,
+    ...input.datasets.map((dataset) => {
       const horizon = horizons.find((item) => item.key === `${Number(dataset.durationValue)}${dataset.durationUnit}`);
       if (!horizon) throw new Error('COHORT_HORIZON_MAPPING_FAILED');
-      await tx`
+      return tx`
         INSERT INTO ml_horizon_cohort_datasets (
           cohort_id, dataset_id, horizon_key, effective_horizon_ticks
         ) VALUES (
@@ -103,8 +102,8 @@ export async function createMlHorizonCohort(input: {
           ${horizon.key}::varchar, ${horizon.effectiveHorizonTicks}::integer
         )
       `;
-    }
-  });
+    }),
+  ]);
 
   return { cohortId, cohort };
 }
