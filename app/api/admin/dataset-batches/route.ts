@@ -10,6 +10,8 @@ import { formatReadableDatasetName } from '@/lib/ml-display-formatters';
 
 const activeWorkers = new Set<string>();
 const scheduledJobs = new Set<string>();
+type RequestedDuration = { value: number; unit: DerivDurationUnit };
+type DatasetJobDuration = RequestedDuration & { rangeId: string };
 
 function auth(req: NextRequest) {
   const cookie = req.cookies.get('admin_session_token')?.value;
@@ -148,16 +150,16 @@ export async function POST(req: NextRequest) {
     if (runtime.maxAssets !== null && symbols.length > runtime.maxAssets) return NextResponse.json({ success: false, error: `A maximum of ${runtime.maxAssets} assets may be selected.`, limits: { maxAssets: runtime.maxAssets, concurrency: runtime.concurrency, pollIntervalMs: runtime.pollIntervalMs } }, { status: 422, headers: noStore() });
     await initializeMlPipelineConfig();
     const buildAll = body?.buildAllSupportedHorizons === true;
-    const rawDurations = Array.isArray(body?.durations) ? body.durations : [];
-    const requestedDurations = rawDurations
-      .map((entry: unknown) => {
+    const rawDurations: unknown[] = Array.isArray(body?.durations) ? body.durations : [];
+    const requestedDurations: RequestedDuration[] = rawDurations
+      .map((entry: unknown): RequestedDuration | null => {
         if (!entry || typeof entry !== 'object') return null;
         const value = Number((entry as { value?: unknown }).value);
         const unit = (entry as { unit?: unknown }).unit;
         return Number.isSafeInteger(value) && value > 0 && validUnit(unit) ? { value, unit } : null;
       })
-      .filter((entry): entry is { value: number; unit: DerivDurationUnit } => Boolean(entry))
-      .filter((entry, index, all) => all.findIndex((candidate) => candidate.value === entry.value && candidate.unit === entry.unit) === index);
+      .filter((entry): entry is RequestedDuration => entry !== null)
+      .filter((entry: RequestedDuration, index: number, all: RequestedDuration[]) => all.findIndex((candidate: RequestedDuration) => candidate.value === entry.value && candidate.unit === entry.unit) === index);
     const legacyValue = Number(body?.durationValue);
     const legacyUnit = body?.durationUnit;
     if (!buildAll && !requestedDurations.length && Number.isSafeInteger(legacyValue) && legacyValue > 0 && validUnit(legacyUnit)) requestedDurations.push({ value: legacyValue, unit: legacyUnit });
@@ -168,12 +170,12 @@ export async function POST(req: NextRequest) {
     for (const symbol of symbols) {
       try {
         const resolved = await getCachedOrDiscoverDuration(symbol);
-        const durations = buildAll
+        const durations: DatasetJobDuration[] = buildAll
           ? ladder(resolved.discovery.ranges.filter((range) => !legacyUnit || range.unit === legacyUnit))
-          : requestedDurations.flatMap((requested) => {
+          : requestedDurations.flatMap((requested: RequestedDuration): DatasetJobDuration[] => {
               const matches = matching(resolved.discovery.ranges, requested.value, requested.unit);
               return matches.length ? [{ value: requested.value, unit: requested.unit, rangeId: matches[0].id }] : [];
-            }).filter((duration, index, all) => all.findIndex((candidate) => candidate.value === duration.value && candidate.unit === duration.unit) === index);
+            }).filter((duration: DatasetJobDuration, index: number, all: DatasetJobDuration[]) => all.findIndex((candidate: DatasetJobDuration) => candidate.value === duration.value && candidate.unit === duration.unit) === index);
         if (!durations.length) { results.push({ symbol, accepted: false, status: 'skipped', reason: 'HORIZON_NOT_SUPPORTED' }); continue; }
         const job = await createAutoDatasetJob(symbol, durations);
         jobs.push(job);
