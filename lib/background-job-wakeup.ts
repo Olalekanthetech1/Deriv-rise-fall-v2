@@ -27,6 +27,13 @@ function connectionString(): string {
  * Installs idempotent PostgreSQL triggers that turn durable queue writes into
  * best-effort wake-up notifications. The notification is never the source of
  * truth; workers always reconcile the durable queue after reconnects.
+ *
+ * PostgreSQL DDL does not accept bind parameters for identifiers or trigger
+ * function arguments. The previous tagged-template construction allowed
+ * Neon to encode those interpolations as $1-style parameters, which PostgreSQL
+ * rejects while parsing CREATE TRIGGER. All interpolated values here come only
+ * from the closed CHANNEL_CONFIG enum, so the complete DDL is intentionally
+ * sent as raw SQL rather than parameterized SQL.
  */
 export async function ensureBackgroundJobWakeupTriggers(): Promise<void> {
   const sql = neon(connectionString());
@@ -47,23 +54,23 @@ export async function ensureBackgroundJobWakeupTriggers(): Promise<void> {
       ? 'trg_ops_ml_dataset_jobs_wakeup'
       : 'trg_ml_training_job_queue_wakeup';
 
-    await sql`DROP TRIGGER IF EXISTS ${sql.unsafe(triggerName)} ON ${sql.unsafe(config.table)}`;
+    await sql.unsafe(`DROP TRIGGER IF EXISTS ${triggerName} ON ${config.table}`);
 
     if (config.queuedPredicate) {
-      await sql`
-        CREATE TRIGGER ${sql.unsafe(triggerName)}
-        AFTER INSERT OR UPDATE OF status ON ${sql.unsafe(config.table)}
+      await sql.unsafe(`
+        CREATE TRIGGER ${triggerName}
+        AFTER INSERT OR UPDATE OF status ON ${config.table}
         FOR EACH ROW
-        WHEN (${sql.unsafe(config.queuedPredicate)})
-        EXECUTE FUNCTION ops_notify_background_job(${channel})
-      `;
+        WHEN (${config.queuedPredicate})
+        EXECUTE FUNCTION ops_notify_background_job('${channel}')
+      `);
     } else {
-      await sql`
-        CREATE TRIGGER ${sql.unsafe(triggerName)}
-        AFTER INSERT ON ${sql.unsafe(config.table)}
+      await sql.unsafe(`
+        CREATE TRIGGER ${triggerName}
+        AFTER INSERT ON ${config.table}
         FOR EACH ROW
-        EXECUTE FUNCTION ops_notify_background_job(${channel})
-      `;
+        EXECUTE FUNCTION ops_notify_background_job('${channel}')
+      `);
     }
   }
 }
