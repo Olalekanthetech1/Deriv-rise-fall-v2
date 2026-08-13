@@ -65,6 +65,11 @@ let historicalFeasibilityMigration: Promise<number> | null = null;
  * Reclassify feasibility outcomes persisted before the builder introduced the
  * explicit skipped state. This is intentionally narrow: genuine infrastructure,
  * database, runtime, and model failures remain failed.
+ *
+ * This migration is deliberately non-resurrecting: a historical terminal job
+ * may be recalculated to completed/failed when all of its items are terminal,
+ * but it can never be changed back to running. Only an already-running job may
+ * remain running. This preserves the partial unique invariant on symbol.
  */
 export async function migrateHistoricalFeasibilityFailures(): Promise<number> {
   if (historicalFeasibilityMigration) return historicalFeasibilityMigration;
@@ -118,12 +123,12 @@ export async function migrateHistoricalFeasibilityFailures(): Promise<number> {
           status = CASE
             WHEN counts.total_count > 0 AND counts.completed_count + counts.failed_count + counts.skipped_count + counts.cancelled_count >= counts.total_count
               THEN CASE WHEN counts.failed_count > 0 THEN 'failed' ELSE 'completed' END
-            ELSE 'running'
+            ELSE job.status
           END,
           finished_at = CASE
             WHEN counts.total_count > 0 AND counts.completed_count + counts.failed_count + counts.skipped_count + counts.cancelled_count >= counts.total_count
               THEN COALESCE(job.finished_at, NOW())
-            ELSE NULL
+            ELSE job.finished_at
           END,
           updated_at = NOW()
       FROM counts
@@ -142,14 +147,12 @@ export async function migrateHistoricalFeasibilityFailures(): Promise<number> {
 
 export async function getAutoDatasetJob(jobId: string): Promise<AutoDatasetJob | null> {
   await ensureSchema();
-  await migrateHistoricalFeasibilityFailures();
   const sql = getDbOrThrow();
   const rows = await sql`SELECT * FROM ops_ml_dataset_build_jobs WHERE id = ${jobId} LIMIT 1`;
   return rows.length ? mapJob(rows[0]) : null;
 }
 export async function getLatestAutoDatasetJob(): Promise<AutoDatasetJob | null> {
   await ensureSchema();
-  await migrateHistoricalFeasibilityFailures();
   const sql = getDbOrThrow();
   const rows = await sql`SELECT * FROM ops_ml_dataset_build_jobs WHERE archived_at IS NULL ORDER BY started_at DESC LIMIT 1`;
   return rows.length ? mapJob(rows[0]) : null;
