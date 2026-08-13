@@ -1,6 +1,6 @@
 import crypto from 'node:crypto';
 import { getDbOrThrow } from '@/lib/db';
-import { getLatestAutoDatasetJob, getAutoDatasetJob, claimNextAutoDatasetJobItem, getAutoDatasetJobItemStatus, completeAutoDatasetJobItem, failAutoDatasetJobItem, skipAutoDatasetJobItem, discardAutoDatasetBuild, refreshAutoDatasetJobStatus } from '@/lib/auto-dataset-job-store';
+import { migrateHistoricalFeasibilityFailures, getAutoDatasetJob, claimNextAutoDatasetJobItem, getAutoDatasetJobItemStatus, completeAutoDatasetJobItem, failAutoDatasetJobItem, skipAutoDatasetJobItem, discardAutoDatasetBuild, refreshAutoDatasetJobStatus } from '@/lib/auto-dataset-job-store';
 import { listDurationTrainingDatasets, buildDurationTrainingDataset } from '@/lib/training-dataset-builder-duration-v2';
 import type { DerivDurationUnit } from '@/lib/deriv-duration-registry';
 
@@ -39,7 +39,6 @@ function stopHeartbeat() {
 }
 
 async function runningJobIds(): Promise<string[]> {
-  await getLatestAutoDatasetJob();
   const sql = getDbOrThrow();
   const rows = await sql`SELECT id FROM ops_ml_dataset_build_jobs WHERE status = 'running' AND archived_at IS NULL ORDER BY started_at ASC`;
   return rows.map((row: any) => String(row.id));
@@ -93,6 +92,13 @@ async function processJob(jobId: string): Promise<boolean> {
 
 async function main() {
   console.log(`[Dataset Worker] started id=${workerId} poll=${pollMs}ms stale=${staleAfterMinutes}m heartbeat=${heartbeatMs}ms`);
+  try {
+    const migrated = await migrateHistoricalFeasibilityFailures();
+    if (migrated > 0) console.log(`[Dataset Worker] migrated ${migrated} historical feasibility job(s).`);
+  } catch (error) {
+    console.error('[Dataset Worker] historical migration failed:', error);
+    await sleep(Math.min(30000, pollMs * 2));
+  }
   while (!stopping) {
     try {
       const jobs = await runningJobIds();
