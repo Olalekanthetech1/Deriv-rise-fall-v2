@@ -11,9 +11,10 @@ import time
 
 import ml_native_runtime as runtime
 import ml_duration_training_governed as duration_training
+import ml_horizon_cohort_training as horizon_cohort_training
 from ml_ensemble_runtime import predict_ensemble
 
-ACTIONS = ("predict", "predict_ensemble", "train", "train_partitioned", "list_models", "ping", "backtest")
+ACTIONS = ("predict", "predict_ensemble", "train", "train_partitioned", "train_horizon_cohort", "list_models", "ping", "backtest")
 
 
 def _attach_runtime_timing(output: dict, elapsed_ms: float) -> dict:
@@ -71,6 +72,8 @@ def dispatch(request: dict) -> dict:
     if action == "train_partitioned":
         _expand_compact_sequence_payload(request)
         return duration_training.train_partitioned(request.get("modelType", "xgboost"), request)
+    if action == "train_horizon_cohort":
+        return horizon_cohort_training.train_horizon_cohort(request.get("modelType", "xgboost"), request)
     if action == "predict_ensemble": return predict_ensemble(request)
     if action == "backtest": return runtime.backtest(request)
     if action == "ping":
