@@ -1,28 +1,42 @@
 import crypto from 'node:crypto';
-import {
-  claimNextTrainingJob,
-  finishTrainingJob,
-  heartbeatTrainingJob,
-  recoverAbandonedTrainingJobs,
-  recordWorkerHeartbeat,
-  type TrainingQueueJob,
-} from '@/lib/ml-training-queue';
+import { recordWorkerHeartbeat, claimNextTrainingJob, finishTrainingJob, heartbeatTrainingJob, recoverAbandonedTrainingJobs, type TrainingQueueJob } from '@/lib/ml-training-queue';
 import { mlRuntimeClient } from '@/lib/ml-runtime-client';
 import { trainDatasetModels } from '@/lib/ml-training-orchestrator';
+import { ensureBackgroundJobWakeupTriggers, startBackgroundJobWakeupListener } from '@/lib/background-job-wakeup';
 
 type ModelType = Parameters<typeof trainDatasetModels>[0]['modelTypes'];
 
 const workerId = `${process.env.RENDER_INSTANCE_ID?.trim() || 'ml-worker'}:${process.pid}:${crypto.randomUUID().slice(0, 8)}`;
-const pollRaw = Number(process.env.ML_WORKER_POLL_INTERVAL_MS || 2000);
-const pollMs = Math.max(1000, Math.min(60_000, Number.isFinite(pollRaw) ? Math.trunc(pollRaw) : 2000));
+const reconciliationRaw = Number(process.env.ML_WORKER_RECONCILIATION_INTERVAL_MS || 60000);
+const reconciliationMs = Math.max(10000, Math.min(300000, Number.isFinite(reconciliationRaw) ? Math.trunc(reconciliationRaw) : 60000));
 const heartbeatRaw = Number(process.env.ML_WORKER_HEARTBEAT_INTERVAL_MS || 5000);
-const heartbeatMs = Math.max(2000, Math.min(30_000, Number.isFinite(heartbeatRaw) ? Math.trunc(heartbeatRaw) : 5000));
+const heartbeatMs = Math.max(2000, Math.min(30000, Number.isFinite(heartbeatRaw) ? Math.trunc(heartbeatRaw) : 5000));
+const workerStatusHeartbeatMs = Math.max(5000, Math.min(60000, Number(process.env.ML_WORKER_STATUS_HEARTBEAT_INTERVAL_MS || 15000)));
 let stopping = false;
 let activeJob: TrainingQueueJob | null = null;
 let stopActiveHeartbeat: (() => void) | null = null;
+let stopWakeupListener: (() => Promise<void>) | null = null;
+let workerStatusTimer: ReturnType<typeof setInterval> | null = null;
+let wakeupResolver: (() => void) | null = null;
+
+function sleep(ms: number) { return new Promise((resolve) => setTimeout(resolve, ms)); }
+function waitForWakeup(timeoutMs: number) {
+  return new Promise<void>((resolve) => {
+    const timer = setTimeout(() => {
+      if (wakeupResolver === resolveWake) wakeupResolver = null;
+      resolve();
+    }, timeoutMs);
+    const resolveWake = () => {
+      clearTimeout(timer);
+      if (wakeupResolver === resolveWake) wakeupResolver = null;
+      resolve();
+    };
+    wakeupResolver = resolveWake;
+  });
+}
+function wakeWorker() { wakeupResolver?.(); }
 
 // Keep native BLAS/OpenMP runtimes conservative on small Render instances.
-// These are inherited by the Python daemon when it is spawned by Node.
 process.env.OMP_NUM_THREADS = process.env.OMP_NUM_THREADS || '1';
 process.env.OPENBLAS_NUM_THREADS = process.env.OPENBLAS_NUM_THREADS || '1';
 process.env.MKL_NUM_THREADS = process.env.MKL_NUM_THREADS || '1';
@@ -30,8 +44,6 @@ process.env.NUMEXPR_NUM_THREADS = process.env.NUMEXPR_NUM_THREADS || '1';
 process.env.TORCH_NUM_THREADS = process.env.TORCH_NUM_THREADS || '1';
 process.env.TORCH_N_THREADS = process.env.TORCH_N_THREADS || '1';
 process.env.MALLOC_ARENA_MAX = process.env.MALLOC_ARENA_MAX || '2';
-
-function sleep(ms: number) { return new Promise((resolve) => setTimeout(resolve, ms)); }
 
 function startJobHeartbeat(job: TrainingQueueJob) {
   let active = true;
@@ -79,28 +91,39 @@ async function processJob(job: TrainingQueueJob) {
     stopActiveHeartbeat?.();
     stopActiveHeartbeat = null;
     activeJob = null;
-    // Recycle the native Python runtime after every queue item so allocator,
-    // Torch and BLAS memory cannot accumulate across repeated jobs.
     try { mlRuntimeClient.resetAfterTraining(); } catch (error) {
       console.error('[ML Worker] runtime recycle failed:', error);
     }
   }
 }
 
+async function processAvailableJob(): Promise<boolean> {
+  const recovered = await recoverAbandonedTrainingJobs();
+  if (recovered > 0) console.warn(`[ML Worker] recovered ${recovered} abandoned job(s) after worker lease expiry.`);
+  const job = await claimNextTrainingJob(workerId);
+  if (!job) return false;
+  await processJob(job);
+  return true;
+}
+
 async function main() {
-  console.log(`[ML Worker] started id=${workerId} pid=${process.pid} poll=${pollMs}ms heartbeat=${heartbeatMs}ms`);
+  console.log(`[ML Worker] started id=${workerId} reconciliation=${reconciliationMs}ms heartbeat=${heartbeatMs}ms`);
+  await ensureBackgroundJobWakeupTriggers();
+  stopWakeupListener = await startBackgroundJobWakeupListener('ml_training_jobs', wakeWorker);
   await recordWorkerHeartbeat(workerId, 'online');
+  workerStatusTimer = setInterval(() => {
+    void recordWorkerHeartbeat(workerId, stopping ? 'stopping' : 'online').catch((error) => {
+      console.error('[ML Worker] worker status heartbeat failed:', error);
+    });
+  }, workerStatusHeartbeatMs);
+
   while (!stopping) {
     try {
-      await recordWorkerHeartbeat(workerId, 'online');
-      const recovered = await recoverAbandonedTrainingJobs();
-      if (recovered > 0) console.warn(`[ML Worker] recovered ${recovered} abandoned job(s) after worker lease expiry.`);
-      const job = await claimNextTrainingJob(workerId);
-      if (job) await processJob(job);
-      else await sleep(pollMs);
+      const progressed = await processAvailableJob();
+      if (!progressed && !stopping) await waitForWakeup(reconciliationMs);
     } catch (error) {
       console.error('[ML Worker] loop error:', error);
-      await sleep(Math.min(30_000, pollMs * 2));
+      await sleep(Math.min(30000, reconciliationMs));
     }
   }
 }
@@ -108,19 +131,22 @@ async function main() {
 async function shutdown(signal: string) {
   if (stopping) return;
   stopping = true;
+  wakeWorker();
+  if (workerStatusTimer) clearInterval(workerStatusTimer);
+  workerStatusTimer = null;
+  stopActiveHeartbeat?.();
+  stopActiveHeartbeat = null;
+  if (stopWakeupListener) {
+    try { await stopWakeupListener(); } catch (error) { console.error('[ML Worker] listener shutdown failed:', error); }
+  }
   try { await recordWorkerHeartbeat(workerId, activeJob ? 'online' : 'stopping'); } catch { /* best effort */ }
-  console.warn(`[ML Worker] received ${signal}; activeJob=${activeJob?.jobId || 'none'}; active training keeps heartbeating until termination.`);
+  console.warn(`[ML Worker] received ${signal}; activeJob=${activeJob?.jobId || 'none'}.`);
 }
 
 process.on('SIGTERM', () => { void shutdown('SIGTERM'); });
 process.on('SIGINT', () => { void shutdown('SIGINT'); });
-process.on('uncaughtException', (error) => {
-  console.error('[ML Worker] uncaught exception:', error);
-});
-process.on('unhandledRejection', (reason) => {
-  console.error('[ML Worker] unhandled rejection:', reason);
-});
-
+process.on('uncaughtException', (error) => console.error('[ML Worker] uncaught exception:', error));
+process.on('unhandledRejection', (reason) => console.error('[ML Worker] unhandled rejection:', reason));
 void main().catch(async (error) => {
   console.error('[ML Worker] fatal:', error);
   try { await recordWorkerHeartbeat(workerId, 'stopping'); } catch { /* best effort */ }
