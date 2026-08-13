@@ -1,6 +1,7 @@
+import { randomUUID } from 'node:crypto';
 import { getDbOrThrow } from '@/lib/db';
 import type { DerivDurationUnit } from '@/lib/deriv-duration-registry';
-import { getAutoDatasetJob } from '@/lib/auto-dataset-job-store';
+import { getAutoDatasetJob, getLatestAutoDatasetJob } from '@/lib/auto-dataset-job-store';
 import type { AutoDatasetJob } from '@/lib/auto-dataset-job-store';
 
 type ScopeDuration = { value: number; unit: DerivDurationUnit; rangeId: string | null };
@@ -15,15 +16,18 @@ type ScopeDuration = { value: number; unit: DerivDurationUnit; rangeId: string |
 export async function createAutoDatasetJobAtomic(symbol: string, durations: ScopeDuration[]): Promise<AutoDatasetJob> {
   if (!durations.length) throw new Error('AUTO_DATASET_SCOPE_EMPTY: at least one horizon is required.');
 
-  // Calling the canonical store reader initializes the same runtime schema and
-  // performs the existing historical-feasibility migration before we write.
+  // This initializes the canonical runtime schema and runs the existing
+  // historical-feasibility migration before we perform the write.
+  await getLatestAutoDatasetJob();
+
   const existing = await getAutoDatasetJobBySymbol(symbol);
   if (existing) {
-    if (await runningScopeMatches(symbol, existing.id, durations)) return existing;
+    if (await runningScopeMatches(existing.id, durations)) return existing;
     throw new Error(`AUTO_DATASET_SCOPE_CONFLICT:${existing.id}:another dataset build is already running for ${symbol}.`);
   }
 
   const sql = getDbOrThrow();
+  const jobId = randomUUID();
   const requestedCount = durations.length;
   const indices = durations.map((_, index) => index);
   const values = durations.map((item) => item.value);
@@ -33,7 +37,7 @@ export async function createAutoDatasetJobAtomic(symbol: string, durations: Scop
   const rows = await sql`
     WITH inserted_job AS (
       INSERT INTO ops_ml_dataset_build_jobs (id, symbol, status, requested_count)
-      VALUES (gen_random_uuid(), ${symbol}, 'running', ${requestedCount})
+      VALUES (${jobId}, ${symbol}, 'running', ${requestedCount})
       ON CONFLICT DO NOTHING
       RETURNING id
     )
@@ -61,7 +65,7 @@ export async function createAutoDatasetJobAtomic(symbol: string, durations: Scop
   }
 
   const winner = await getAutoDatasetJobBySymbol(symbol);
-  if (winner && await runningScopeMatches(symbol, winner.id, durations)) return winner;
+  if (winner && await runningScopeMatches(winner.id, durations)) return winner;
   if (winner) {
     throw new Error(`AUTO_DATASET_SCOPE_CONFLICT:${winner.id}:another dataset build won the concurrent scope reservation for ${symbol}.`);
   }
@@ -69,10 +73,6 @@ export async function createAutoDatasetJobAtomic(symbol: string, durations: Scop
 }
 
 async function getAutoDatasetJobBySymbol(symbol: string): Promise<AutoDatasetJob | null> {
-  // getAutoDatasetJob requires an id, so use the database directly for the
-  // symbol lookup while retaining the same canonical schema initialization.
-  // The table is guaranteed to exist because all callers pass through the
-  // dataset job store before this helper is invoked.
   const sql = getDbOrThrow();
   const rows = await sql`
     SELECT *
@@ -99,7 +99,7 @@ async function getAutoDatasetJobBySymbol(symbol: string): Promise<AutoDatasetJob
   } as AutoDatasetJob;
 }
 
-async function runningScopeMatches(symbol: string, jobId: string, durations: ScopeDuration[]): Promise<boolean> {
+async function runningScopeMatches(jobId: string, durations: ScopeDuration[]): Promise<boolean> {
   const sql = getDbOrThrow();
   const rows = await sql`
     SELECT item_index, duration_value, duration_unit, duration_range_id
