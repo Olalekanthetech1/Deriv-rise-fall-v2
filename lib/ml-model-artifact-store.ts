@@ -20,6 +20,7 @@ export async function ensureModelArtifactStore(): Promise<void> {
   if (!sql) throw new Error('DATABASE_UNAVAILABLE');
   await sql`ALTER TABLE ml_model_artifacts ADD COLUMN IF NOT EXISTS artifact_bytes BYTEA`;
   await sql`ALTER TABLE ml_model_artifacts ADD COLUMN IF NOT EXISTS artifact_status TEXT NOT NULL DEFAULT 'active'`;
+  await sql`ALTER TABLE ml_model_artifacts ADD COLUMN IF NOT EXISTS updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()`;
   await sql`CREATE UNIQUE INDEX IF NOT EXISTS uq_ml_model_artifacts_model_type ON ml_model_artifacts (model_id, artifact_type)`;
 }
 
@@ -43,15 +44,15 @@ export async function persistModelArtifact(modelId: string, artifactPath: string
   const sha256 = crypto.createHash('sha256').update(bytes).digest('hex');
   await ensureModelArtifactStore();
   await getDb()!`
-    INSERT INTO ml_model_artifacts (model_id, artifact_type, uri, checksum, size_bytes, artifact_bytes, artifact_status, created_at)
-    VALUES (${safeId}::text, ${ARTIFACT_TYPE}::varchar, ${`db://ml_model_artifacts/${safeId}`}::text, ${sha256}::varchar, ${bytes.length}::bigint, ${bytes}::bytea, 'active'::text, NOW())
+    INSERT INTO ml_model_artifacts (model_id, artifact_type, uri, checksum, size_bytes, artifact_bytes, artifact_status, created_at, updated_at)
+    VALUES (${safeId}::text, ${ARTIFACT_TYPE}::varchar, ${`db://ml_model_artifacts/${safeId}`}::text, ${sha256}::varchar, ${bytes.length}::bigint, ${bytes}::bytea, 'active'::text, NOW(), NOW())
     ON CONFLICT (model_id, artifact_type) DO UPDATE SET
       uri = EXCLUDED.uri,
       checksum = EXCLUDED.checksum,
       size_bytes = EXCLUDED.size_bytes,
       artifact_bytes = EXCLUDED.artifact_bytes,
       artifact_status = 'active',
-      created_at = EXCLUDED.created_at
+      updated_at = NOW()
   `;
   return { sha256, byteSize: bytes.length };
 }
@@ -59,7 +60,7 @@ export async function persistModelArtifact(modelId: string, artifactPath: string
 export async function setModelArtifactStatus(modelId: string, status: ArtifactStatus): Promise<void> {
   const safeId = safeModelId(modelId);
   await ensureModelArtifactStore();
-  const result = await getDb()!`UPDATE ml_model_artifacts SET artifact_status=${status}::text,created_at=created_at WHERE model_id=${safeId}::text AND artifact_type=${ARTIFACT_TYPE}::varchar RETURNING model_id`;
+  const result = await getDb()!`UPDATE ml_model_artifacts SET artifact_status=${status}::text,updated_at=NOW() WHERE model_id=${safeId}::text AND artifact_type=${ARTIFACT_TYPE}::varchar RETURNING model_id`;
   if (!result.length && status !== 'retired') throw new Error('PRODUCTION_MODEL_ARTIFACT_MISSING');
 }
 
