@@ -24,41 +24,6 @@ def model_path(kind: str, symbol: str, duration_value: int, duration_unit: str, 
     return MODEL_DIR / f"{_safe(symbol)}_{_safe(duration_unit)}{int(duration_value)}_{_safe(kind)}{lineage}.pkl"
 
 
-def load_duration(
-    kind: str,
-    symbol: str,
-    duration_value: int,
-    duration_unit: str,
-    training_run_id: str | None = None,
-) -> Any | None:
-    """Load the exact duration-aware artifact selected by the production registry."""
-    candidates = [model_path(kind, symbol, duration_value, duration_unit, training_run_id)]
-    if training_run_id:
-        candidates.append(model_path(kind, symbol, duration_value, duration_unit, None))
-
-    for path in candidates:
-        if not path.exists():
-            continue
-        try:
-            with path.open("rb") as handle:
-                record = pickle.load(handle)
-            if not isinstance(record, dict):
-                continue
-            native.validate_model_schema(record)
-            if str(record.get("modelType") or "") != str(kind):
-                continue
-            if training_run_id and record.get("trainingRunId") not in {None, training_run_id}:
-                continue
-            if int(record.get("durationValue")) != int(duration_value):
-                continue
-            if str(record.get("durationUnit")) != str(duration_unit):
-                continue
-            return record
-        except Exception:
-            continue
-    return None
-
-
 def save_duration(kind: str, symbol: str, duration_value: int, duration_unit: str, model: dict[str, Any], training_run_id: str | None = None) -> Path:
     schema = native.require_schema()
     model.update({
