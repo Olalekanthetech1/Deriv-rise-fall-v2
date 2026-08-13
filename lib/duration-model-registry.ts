@@ -1,6 +1,7 @@
 import { neon } from '@neondatabase/serverless';
 import { initDbSchema, getDbConnectionString } from './db';
 import { ensureTrainingDurationSchema } from './training-duration-schema';
+import { persistModelArtifact } from './ml-model-artifact-store';
 
 export type DurationModelRegistration = {
   modelId: string;
@@ -35,18 +36,31 @@ function normalizeUuid(value: string, fieldName: string): string {
   return normalized;
 }
 
+function metricsWithArtifactMetadata(value: unknown, artifact: { sha256: string; byteSize: number } | null) {
+  const metrics = value && typeof value === 'object' && !Array.isArray(value) ? { ...(value as Record<string, unknown>) } : {};
+  if (artifact) {
+    metrics.artifactSha256 = artifact.sha256;
+    metrics.artifactByteSize = artifact.byteSize;
+    metrics.artifactStore = 'durable-postgres';
+  }
+  return metrics;
+}
+
 export async function registerDurationModel(data: DurationModelRegistration): Promise<void> {
   const url = getDbConnectionString();
   if (!url || !(await initDbSchema())) throw new Error('DATABASE_UNAVAILABLE');
   const sql = neon(url);
   await ensureTrainingDurationSchema(sql);
 
-  // training_datasets.id and ml_model_registry_v2.dataset_id are UUID columns.
-  // Bind the value as UUID at the SQL boundary instead of leaving it as an
-  // untyped/text parameter. This prevents PostgreSQL from rejecting otherwise
-  // valid model registrations after the native training step has completed.
   const datasetId = normalizeUuid(data.datasetId, 'dataset_id');
   const trainingRunId = normalizeUuid(data.trainingRunId, 'training_run_id');
+  const suppliedMetrics = data.metrics && typeof data.metrics === 'object' && !Array.isArray(data.metrics)
+    ? data.metrics as Record<string, unknown>
+    : {};
+  const artifactPath = typeof suppliedMetrics.artifactPath === 'string' ? suppliedMetrics.artifactPath.trim() : '';
+
+  const artifact = artifactPath ? await persistModelArtifact(data.modelId, artifactPath) : null;
+  const metrics = metricsWithArtifactMetadata(suppliedMetrics, artifact);
 
   await sql`
     INSERT INTO ml_model_registry_v2 (
@@ -59,7 +73,7 @@ export async function registerDurationModel(data: DurationModelRegistration): Pr
       ${data.durationValue}::integer, ${data.durationUnit}::varchar, ${data.durationSeconds}::numeric, ${data.durationUnit === 't' ? 'tick' : 'time'}::varchar,
       ${datasetId}::uuid, ${data.format}::text, ${data.status}::varchar, ${data.featureSchemaVersion}::text, ${data.framework}::text, ${trainingRunId}::uuid,
       ${data.strategyKey}::text, ${data.strategyVersion}::text, ${JSON.stringify(data.strategyMetadata ?? {})}::jsonb,
-      ${JSON.stringify(data.metrics ?? {})}::jsonb, ${JSON.stringify(data.hyperparameters ?? {})}::jsonb, NOW()
+      ${JSON.stringify(metrics)}::jsonb, ${JSON.stringify(data.hyperparameters ?? {})}::jsonb, NOW()
     )
     ON CONFLICT (model_id) DO UPDATE SET
       model_family = EXCLUDED.model_family,
