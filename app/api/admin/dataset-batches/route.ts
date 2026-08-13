@@ -20,7 +20,7 @@ function noStore() { return { 'Cache-Control': 'no-store, max-age=0' }; }
 function validUnit(v: unknown): v is DerivDurationUnit { return v === 't' || v === 's' || v === 'm' || v === 'h' || v === 'd'; }
 function symbolsFrom(value: unknown) {
   const values = Array.isArray(value) ? value : typeof value === 'string' ? value.split(',') : [];
-  return [...new Set(values.filter((v): v is string => typeof v === 'string').map((v) => v.trim().toUpperCase()).filter((v) => /^[A-Z0-9_./:-]{2,64}$/.test(v)))].slice(0, MAX_ASSETS);
+  return [...new Set(values.filter((v): v is string => typeof v === 'string').map((v) => v.trim().toUpperCase()).filter((v) => /^[A-Z0-9_./:-]{2,64}$/.test(v)))];
 }
 function ladder(ranges: DerivDurationRange[]) { return expandTrainingDurations(ranges, 10000); }
 function matching(ranges: DerivDurationRange[], value: number, unit: DerivDurationUnit) {
@@ -67,6 +67,7 @@ export async function GET(req: NextRequest) {
   try {
     const jobIds = symbolsFrom(req.nextUrl.searchParams.get('jobIds') || '').filter((id) => id.includes('-'));
     if (jobIds.length) {
+      if (jobIds.length > MAX_ASSETS) return NextResponse.json({ success: false, error: `A maximum of ${MAX_ASSETS} job IDs may be polled at once.` }, { status: 422, headers: noStore() });
       const running: string[] = [];
       for (const id of jobIds) { const job = await getAutoDatasetJob(id); if (job?.status === 'running') running.push(id); }
       resume(running);
@@ -76,6 +77,7 @@ export async function GET(req: NextRequest) {
     }
     const symbols = symbolsFrom(req.nextUrl.searchParams.get('symbols') || req.nextUrl.searchParams.get('symbol') || '');
     if (!symbols.length) return NextResponse.json({ success: false, error: 'At least one asset is required.' }, { status: 400, headers: noStore() });
+    if (symbols.length > MAX_ASSETS) return NextResponse.json({ success: false, error: `A maximum of ${MAX_ASSETS} assets may be selected.` }, { status: 422, headers: noStore() });
     const assets = await Promise.all(symbols.map(state));
     return NextResponse.json({ success: true, assets, datasets: assets.flatMap((asset) => asset.datasets), selectedSymbols: symbols }, { headers: noStore() });
   } catch (error) { return NextResponse.json({ success: false, error: error instanceof Error ? error.message : 'Unable to load dataset builder state.' }, { status: 503, headers: noStore() }); }
@@ -87,10 +89,10 @@ export async function POST(req: NextRequest) {
     const body = await req.json().catch(() => ({}));
     const symbols = symbolsFrom(body?.symbols ?? body?.symbol);
     if (!symbols.length) return NextResponse.json({ success: false, error: 'Select at least one Deriv asset.' }, { status: 400, headers: noStore() });
-    if (symbols.length > MAX_ASSETS) return NextResponse.json({ success: false, error: `A maximum of ${MAX_ASSETS} assets can be selected.` }, { status: 422, headers: noStore() });
+    if (symbols.length > MAX_ASSETS) return NextResponse.json({ success: false, error: `A maximum of ${MAX_ASSETS} assets may be selected.` }, { status: 422, headers: noStore() });
     await initializeMlPipelineConfig();
     const buildAll = body?.buildAllSupportedHorizons === true;
-    const value = body?.durationValue == null ? undefined : Number(body.durationValue);
+    const value = Number(body?.durationValue);
     const unit = body?.durationUnit;
     if (!buildAll && (!Number.isSafeInteger(value) || value <= 0 || !validUnit(unit))) return NextResponse.json({ success: false, error: 'A valid duration value and unit are required.' }, { status: 400, headers: noStore() });
 
@@ -101,7 +103,7 @@ export async function POST(req: NextRequest) {
         const resolved = await getCachedOrDiscoverDuration(symbol);
         const durations = buildAll
           ? ladder(resolved.discovery.ranges.filter((range) => !unit || range.unit === unit))
-          : (() => { const matches = matching(resolved.discovery.ranges, value!, unit as DerivDurationUnit); return matches.length ? [{ value: value!, unit: unit as DerivDurationUnit, rangeId: matches[0].id }] : []; })();
+          : (() => { const matches = matching(resolved.discovery.ranges, value, unit as DerivDurationUnit); return matches.length ? [{ value, unit: unit as DerivDurationUnit, rangeId: matches[0].id }] : []; })();
         if (!durations.length) { results.push({ symbol, accepted: false, status: 'skipped', reason: 'HORIZON_NOT_SUPPORTED' }); continue; }
         const job = await createAutoDatasetJob(symbol, durations);
         jobs.push(job);
@@ -121,6 +123,7 @@ export async function DELETE(req: NextRequest) {
   try {
     const ids = symbolsFrom(req.nextUrl.searchParams.get('jobIds') || '').filter((id) => id.includes('-'));
     if (!ids.length) return NextResponse.json({ success: false, error: 'jobIds are required.' }, { status: 400, headers: noStore() });
+    if (ids.length > MAX_ASSETS) return NextResponse.json({ success: false, error: `A maximum of ${MAX_ASSETS} job IDs may be archived at once.` }, { status: 422, headers: noStore() });
     const results = await Promise.all(ids.map((id) => archiveAutoDatasetJob(id)));
     if (results.some((result) => result.active)) return NextResponse.json({ success: false, error: 'One or more dataset builds are still running.' }, { status: 409, headers: noStore() });
     return NextResponse.json({ success: true, archivedCount: results.filter((result) => result.archived).length }, { headers: noStore() });
