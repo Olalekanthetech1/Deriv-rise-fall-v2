@@ -5,6 +5,7 @@ import { expandTrainingDurations, type DerivDurationRange, type DerivDurationUni
 import { getCachedOrDiscoverDuration } from '@/lib/deriv-duration-cache';
 import { initializeMlPipelineConfig } from '@/lib/ml-pipeline-config';
 import { getDatasetBuildRuntimeConfig } from '@/lib/dataset-build-runtime-config';
+import { isWithinDerivDurationBand } from '@/lib/deriv-duration-policy';
 import { archiveAutoDatasetJob, claimNextAutoDatasetJobItem, completeAutoDatasetJobItem, createAutoDatasetJob, failAutoDatasetJobItem, getAutoDatasetJob, getAutoDatasetJobItemStatus, refreshAutoDatasetJobStatus, discardAutoDatasetBuild, skipAutoDatasetJobItem } from '@/lib/auto-dataset-job-store';
 import { formatReadableDatasetName } from '@/lib/ml-display-formatters';
 
@@ -31,6 +32,14 @@ function matching(ranges: DerivDurationRange[], value: number, unit: DerivDurati
     const step = Number.isSafeInteger(range.step) && range.step > 0 ? range.step : 1;
     return (value - range.min) % step === 0;
   });
+}
+function requestedDurationAllowed(value: number, unit: DerivDurationUnit): boolean {
+  if (!Number.isSafeInteger(value) || value <= 0) return false;
+  if (unit === 't') return true;
+  return isWithinDerivDurationBand(value, unit);
+}
+function requestedRangeId(symbol: string, value: number, unit: DerivDurationUnit): string {
+  return `${symbol}:REQUESTED:${unit}:${value}`;
 }
 function pretty(datasets: any[]) {
   return datasets.map((dataset) => ({ ...dataset, name: formatReadableDatasetName({ name: dataset.name, assetSymbol: dataset.asset_symbol, assetDisplayName: dataset.metadata?.assetDisplayName, durationValue: dataset.duration_value, durationUnit: dataset.duration_unit }), raw_name: dataset.name }));
@@ -59,14 +68,12 @@ async function worker(jobId: string, concurrency: number): Promise<void> {
         await refreshAutoDatasetJobStatus(jobId);
         return;
       }
-
       const identity = datasetIdentity(item.value, item.unit);
       if (existingIds.has(identity) || hasReusableDataset(existingDatasets, item.value, item.unit)) {
         await skipAutoDatasetJobItem(jobId, item.id, `ALREADY_EXISTS: a completed leakage-safe dataset already exists for ${job.symbol} at ${item.value}${item.unit}.`);
         existingIds.add(identity);
         continue;
       }
-
       try {
         const result = await buildDurationTrainingDataset({ symbol: job.symbol, durationValue: item.value, durationUnit: item.unit, durationRangeId: item.rangeId });
         const itemStatus = await getAutoDatasetJobItemStatus(jobId, item.id);
@@ -92,7 +99,6 @@ async function worker(jobId: string, concurrency: number): Promise<void> {
     pumpWorkers(runtime.concurrency);
   }
 }
-
 function pumpWorkers(concurrency: number): void {
   if (!Number.isSafeInteger(concurrency) || concurrency <= 0) return;
   while (activeWorkers.size < concurrency && scheduledJobs.size) {
@@ -102,17 +108,14 @@ function pumpWorkers(concurrency: number): void {
     void worker(next, concurrency);
   }
 }
-
 function scheduleWorkers(jobIds: string[], concurrency: number): void {
   for (const id of [...new Set(jobIds)]) scheduledJobs.add(id);
   pumpWorkers(concurrency);
 }
-
 async function state(symbol: string) {
   const [datasets, resolved] = await Promise.all([listDurationTrainingDatasets(symbol), getCachedOrDiscoverDuration(symbol)]);
   return { symbol, datasets: pretty(datasets as any[]), durationSource: resolved.source, durationRefreshing: resolved.refreshing, durationCachedAt: resolved.cachedAt, durationDiscovery: resolved.discovery, trainingHorizons: expandTrainingDurations(resolved.discovery.ranges), autoTrainingHorizons: ladder(resolved.discovery.ranges) };
 }
-
 function limits() {
   const config = getDatasetBuildRuntimeConfig();
   return { maxAssets: config.maxAssets, concurrency: config.concurrency, pollIntervalMs: config.pollIntervalMs };
@@ -137,7 +140,9 @@ export async function GET(req: NextRequest) {
     if (runtime.maxAssets !== null && symbols.length > runtime.maxAssets) return NextResponse.json({ success: false, error: `A maximum of ${runtime.maxAssets} assets may be selected.`, limits: limits() }, { status: 422, headers: noStore() });
     const assets = await Promise.all(symbols.map(state));
     return NextResponse.json({ success: true, assets, datasets: assets.flatMap((asset) => asset.datasets), selectedSymbols: symbols, limits: { maxAssets: runtime.maxAssets, concurrency: runtime.concurrency, pollIntervalMs: runtime.pollIntervalMs } }, { headers: noStore() });
-  } catch (error) { return NextResponse.json({ success: false, error: error instanceof Error ? error.message : 'Unable to load dataset builder state.' }, { status: 503, headers: noStore() }); }
+  } catch (error) {
+    return NextResponse.json({ success: false, error: error instanceof Error ? error.message : 'Unable to load dataset builder state.' }, { status: 503, headers: noStore() });
+  }
 }
 
 export async function POST(req: NextRequest) {
@@ -159,11 +164,12 @@ export async function POST(req: NextRequest) {
         return Number.isSafeInteger(value) && value > 0 && validUnit(unit) ? { value, unit } : null;
       })
       .filter((entry): entry is RequestedDuration => entry !== null)
-      .filter((entry: RequestedDuration, index: number, all: RequestedDuration[]) => all.findIndex((candidate: RequestedDuration) => candidate.value === entry.value && candidate.unit === entry.unit) === index);
+      .filter((entry, index, all) => all.findIndex((candidate) => candidate.value === entry.value && candidate.unit === entry.unit) === index)
+      .filter((entry) => requestedDurationAllowed(entry.value, entry.unit));
     const legacyValue = Number(body?.durationValue);
     const legacyUnit = body?.durationUnit;
-    if (!buildAll && !requestedDurations.length && Number.isSafeInteger(legacyValue) && legacyValue > 0 && validUnit(legacyUnit)) requestedDurations.push({ value: legacyValue, unit: legacyUnit });
-    if (!buildAll && !requestedDurations.length) return NextResponse.json({ success: false, error: 'Select at least one valid prediction horizon.' , limits: { maxAssets: runtime.maxAssets, concurrency: runtime.concurrency, pollIntervalMs: runtime.pollIntervalMs } }, { status: 400, headers: noStore() });
+    if (!buildAll && !requestedDurations.length && Number.isSafeInteger(legacyValue) && legacyValue > 0 && validUnit(legacyUnit) && requestedDurationAllowed(legacyValue, legacyUnit)) requestedDurations.push({ value: legacyValue, unit: legacyUnit });
+    if (!buildAll && !requestedDurations.length) return NextResponse.json({ success: false, error: 'Select at least one valid prediction horizon within the supported Deriv duration policy.', limits: { maxAssets: runtime.maxAssets, concurrency: runtime.concurrency, pollIntervalMs: runtime.pollIntervalMs } }, { status: 400, headers: noStore() });
 
     const jobs: any[] = [];
     const results: any[] = [];
@@ -172,23 +178,45 @@ export async function POST(req: NextRequest) {
         const resolved = await getCachedOrDiscoverDuration(symbol);
         const durations: DatasetJobDuration[] = buildAll
           ? ladder(resolved.discovery.ranges.filter((range) => !legacyUnit || range.unit === legacyUnit))
-          : requestedDurations.flatMap((requested: RequestedDuration): DatasetJobDuration[] => {
+          : requestedDurations.map((requested) => {
               const matches = matching(resolved.discovery.ranges, requested.value, requested.unit);
-              return matches.length ? [{ value: requested.value, unit: requested.unit, rangeId: matches[0].id }] : [];
-            }).filter((duration: DatasetJobDuration, index: number, all: DatasetJobDuration[]) => all.findIndex((candidate: DatasetJobDuration) => candidate.value === duration.value && candidate.unit === duration.unit) === index);
-        if (!durations.length) { results.push({ symbol, accepted: false, status: 'skipped', reason: 'HORIZON_NOT_SUPPORTED' }); continue; }
-        const job = await createAutoDatasetJob(symbol, durations);
+              return matches.length
+                ? { value: requested.value, unit: requested.unit, rangeId: matches[0].id }
+                : { value: requested.value, unit: requested.unit, rangeId: requestedRangeId(symbol, requested.value, requested.unit) };
+            });
+        const uniqueDurations = durations.filter((duration, index, all) => all.findIndex((candidate) => candidate.value === duration.value && candidate.unit === duration.unit) === index);
+        if (!uniqueDurations.length) {
+          results.push({ symbol, accepted: false, status: 'skipped', reason: 'HORIZON_NOT_SUPPORTED' });
+          continue;
+        }
+        const job = await createAutoDatasetJob(symbol, uniqueDurations);
         jobs.push(job);
-        results.push({ symbol, accepted: true, status: job.status, jobId: job.id, requestedCount: job.requestedCount, selectedCount: durations.length });
+        const discoveredCount = uniqueDurations.filter((duration) => !duration.rangeId.startsWith(`${symbol}:REQUESTED:`)).length;
+        const policyFallbackCount = uniqueDurations.length - discoveredCount;
+        results.push({ symbol, accepted: true, status: job.status, jobId: job.id, requestedCount: job.requestedCount, selectedCount: uniqueDurations.length, discoveredCount, policyFallbackCount });
       } catch (error) {
         results.push({ symbol, accepted: false, status: 'failed', error: error instanceof Error ? error.message : String(error) });
       }
     }
-    if (!jobs.length) return NextResponse.json({ success: false, error: 'None of the selected assets had a supported build scope.', results, limits: { maxAssets: runtime.maxAssets, concurrency: runtime.concurrency, pollIntervalMs: runtime.pollIntervalMs } }, { status: 422, headers: noStore() });
+    if (!jobs.length) {
+      return NextResponse.json({
+        success: true,
+        mode: 'MULTI_ASSET_DATASET_BUILD',
+        selectedSymbols: symbols,
+        autoJobIds: [],
+        jobs: [],
+        results,
+        limits: { maxAssets: runtime.maxAssets, concurrency: runtime.concurrency, pollIntervalMs: runtime.pollIntervalMs },
+        message: 'No selected asset/horizon combinations are currently buildable. Nothing was queued.'
+      }, { status: 202, headers: noStore() });
+    }
     scheduleWorkers(jobs.map((job) => job.id), runtime.concurrency);
     const selectedCount = jobs.reduce((sum, job) => sum + Number(job.requestedCount ?? 0), 0);
-    return NextResponse.json({ success: true, mode: 'MULTI_ASSET_DATASET_BUILD', selectedSymbols: symbols, autoJobIds: jobs.map((job) => job.id), jobs, results, limits: { maxAssets: runtime.maxAssets, concurrency: runtime.concurrency, pollIntervalMs: runtime.pollIntervalMs }, message: buildAll ? `Dataset builds started for ${jobs.length} assets using their own supported horizon ladders.` : `Dataset builds started for ${jobs.length} assets across ${selectedCount} selected horizon jobs.` }, { status: 202, headers: noStore() });
-  } catch (error) { return NextResponse.json({ success: false, error: error instanceof Error ? error.message : 'Unable to start dataset build.' }, { status: 500, headers: noStore() }); }
+    const fallbackCount = results.reduce((sum, result) => sum + Number(result.policyFallbackCount ?? 0), 0);
+    return NextResponse.json({ success: true, mode: 'MULTI_ASSET_DATASET_BUILD', selectedSymbols: symbols, autoJobIds: jobs.map((job) => job.id), jobs, results, limits: { maxAssets: runtime.maxAssets, concurrency: runtime.concurrency, pollIntervalMs: runtime.pollIntervalMs }, message: buildAll ? `Dataset builds started for ${jobs.length} assets using their dynamically discovered supported horizon ladders.` : `Dataset builds started for ${jobs.length} assets across ${selectedCount} selected horizons${fallbackCount ? `; ${fallbackCount} horizons used the canonical Deriv duration policy because live proposal discovery did not return a range on this request.` : ''}.` }, { status: 202, headers: noStore() });
+  } catch (error) {
+    return NextResponse.json({ success: false, error: error instanceof Error ? error.message : 'Unable to start dataset build.' }, { status: 500, headers: noStore() });
+  }
 }
 
 export async function DELETE(req: NextRequest) {
@@ -201,5 +229,7 @@ export async function DELETE(req: NextRequest) {
     const results = await Promise.all(ids.map((id) => archiveAutoDatasetJob(id)));
     if (results.some((result) => result.active)) return NextResponse.json({ success: false, error: 'One or more dataset builds are still running.' }, { status: 409, headers: noStore() });
     return NextResponse.json({ success: true, archivedCount: results.filter((result) => result.archived).length, limits: { maxAssets: runtime.maxAssets, concurrency: runtime.concurrency, pollIntervalMs: runtime.pollIntervalMs } }, { headers: noStore() });
-  } catch (error) { return NextResponse.json({ success: false, error: error instanceof Error ? error.message : 'Unable to archive dataset reports.' }, { status: 500, headers: noStore() }); }
+  } catch (error) {
+    return NextResponse.json({ success: false, error: error instanceof Error ? error.message : 'Unable to archive dataset reports.' }, { status: 500, headers: noStore() });
+  }
 }
