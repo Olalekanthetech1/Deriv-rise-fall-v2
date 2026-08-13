@@ -20,10 +20,13 @@
     "verify-asset-aware-strategy": "node scripts/tests/asset-aware-strategy-invariants.mjs",
     "verify-ml-promotion-metrics": "node scripts/tests/ml-promotion-metrics-invariants.mjs",
     "verify-dataset-builder-scope": "node scripts/tests/dataset-builder-scope-contract-invariants.mjs",
+    "verify-prediction-trading-integration": "node scripts/tests/prediction-trading-integration-invariants.mjs",
+    "verify-production-model-contract": "node scripts/tests/production-model-contract-invariants.mjs",
+    "backfill-production-model-artifacts": "tsx scripts/backfill-production-model-artifacts.ts",
     "db:storage:audit": "node scripts/db-storage-maintenance.mjs",
     "db:storage:prune": "node scripts/db-storage-maintenance.mjs --prune-ticks",
     "postinstall": "node scripts/copy-smartcharts-assets.js",
-    "prebuild": "node scripts/copy-smartcharts-assets.js && npm run verify-ml-architecture && npm run verify-gate6-legacy && npm run verify-signal-forensics && npm run verify-model-operations && npm run verify-ml-config && npm run verify-retraining-automation && npm run verify-asset-aware-strategy && npm run verify-ml-promotion-metrics && npm run verify-dataset-builder-scope"
+    "prebuild": "node scripts/copy-smartcharts-assets.js && npm run verify-ml-architecture && npm run verify-gate6-legacy && npm run verify-signal-forensics && npm run verify-model-operations && npm run verify-ml-config && npm run verify-retraining-automation && npm run verify-asset-aware-strategy && npm run verify-ml-promotion-metrics && npm run verify-dataset-builder-scope && npm run verify-prediction-trading-integration && npm run verify-production-model-contract"
   },
   "dependencies": {
     "@deriv-com/smartcharts-champion": "^1.9.13",
@@ -89,7 +92,7 @@
     "@types/opossum": "^8.1.9",
     "@types/react": "^19.2.17",
     "@types/react-dom": "^19.2.3",
-    "autoprefixer": "^10.0.1",
+    "autoprefixer": "^10.0.0",
     "postcss": "8.5.23",
     "tailwindcss": "^3.3.0",
     "typescript": "^5.0.0"

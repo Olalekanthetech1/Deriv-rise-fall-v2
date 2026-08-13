@@ -3,6 +3,7 @@ import { getRegisteredModels, promoteModelInRegistry, initDbSchema, getDb } from
 import { getMlModelDefinition } from '@/lib/ml-model-registry';
 import { verifySessionToken } from '../../admin/auth/route';
 import { evaluateChampionChallengerPromotion } from '@/lib/champion-challenger-governance';
+import { hasModelArtifact } from '@/lib/ml-model-artifact-store';
 
 function isAuthValid(req: NextRequest): boolean {
   const cookieToken = req.cookies.get('admin_session_token')?.value;
@@ -26,7 +27,6 @@ function normalizeRegistryModel(model: Record<string, any>) {
   const persistedModelKey = String((model.metrics as Record<string, unknown> | null)?.modelKey || '').trim().toLowerCase();
   const definition = getMlModelDefinition(persistedModelKey) || getMlModelDefinition(rawModelFamily.toLowerCase());
   const horizonTicks = Number(model.horizon_ticks ?? model.horizon_secs);
-
   return {
     ...model,
     symbol: rawSymbol || undefined,
@@ -46,11 +46,9 @@ async function resolveCanonicalModelDefinition(sql: any, registered: Record<stri
     const definition = getMlModelDefinition(persistedModelKey);
     if (definition) return { definition, modelKey: persistedModelKey, source: 'persisted-metadata' as const };
   }
-
   const trainingRunId = String(registered.training_run_id || '').trim();
   const modelId = String(registered.model_id || '').trim();
   if (!trainingRunId || !modelId) return { definition: undefined, modelKey: '', source: 'unresolved' as const };
-
   const rows = await sql`
     SELECT model_type
     FROM ml_training_run_models
@@ -64,163 +62,76 @@ async function resolveCanonicalModelDefinition(sql: any, registered: Record<stri
 }
 
 export async function GET(req: NextRequest) {
-  if (!isAuthValid(req)) {
-    return NextResponse.json({ success: false, error: 'Unauthorized admin access.' }, { status: 401 });
-  }
-
+  if (!isAuthValid(req)) return NextResponse.json({ success: false, error: 'Unauthorized admin access.' }, { status: 401 });
   try {
     const dbReady = await initDbSchema();
-    if (!dbReady) {
-      return NextResponse.json({
-        success: false,
-        models: [],
-        count: 0,
-        dataSource: 'database-unavailable',
-        error: 'Model registry database is unavailable; no synthetic registry entries are returned.',
-      }, { status: 503 });
-    }
-
+    if (!dbReady) return NextResponse.json({ success: false, models: [], count: 0, dataSource: 'database-unavailable', error: 'Model registry database is unavailable; no synthetic registry entries are returned.' }, { status: 503 });
     const { searchParams } = new URL(req.url);
     const symbol = searchParams.get('symbol') || undefined;
     const status = searchParams.get('status') || undefined;
     const models = await getRegisteredModels(symbol, status);
-
-    return NextResponse.json({
-      success: true,
-      count: models?.length || 0,
-      models: (models || []).map((model: Record<string, any>) => normalizeRegistryModel(model)),
-      dataSource: 'live-database',
-    }, { headers: { 'Cache-Control': 'no-store' } });
+    return NextResponse.json({ success: true, count: models?.length || 0, models: (models || []).map((model: Record<string, any>) => normalizeRegistryModel(model)), dataSource: 'live-database' }, { headers: { 'Cache-Control': 'no-store' } });
   } catch (err: any) {
     return NextResponse.json({ success: false, error: err.message || 'Failed to fetch model registry' }, { status: 500 });
   }
 }
 
 export async function POST(req: NextRequest) {
-  if (!isAuthValid(req)) {
-    return NextResponse.json({ success: false, error: 'Unauthorized admin access.' }, { status: 401 });
-  }
-
+  if (!isAuthValid(req)) return NextResponse.json({ success: false, error: 'Unauthorized admin access.' }, { status: 401 });
   try {
     const dbReady = await initDbSchema();
-    if (!dbReady) {
-      return NextResponse.json({ success: false, error: 'Model registry database is unavailable.' }, { status: 503 });
-    }
-
+    if (!dbReady) return NextResponse.json({ success: false, error: 'Model registry database is unavailable.' }, { status: 503 });
     const body = await req.json().catch(() => ({}));
     const { action, modelId, symbol, horizonSecs } = body;
-
-    if (action === 'initialize' || action === 'seed') {
-      return NextResponse.json({
-        success: false,
-        error: 'Synthetic/default model registration is disabled. Register only models backed by real trained artifacts and measured validation metrics.',
-      }, { status: 410 });
-    }
+    if (action === 'initialize' || action === 'seed') return NextResponse.json({ success: false, error: 'Synthetic/default model registration is disabled. Register only models backed by real trained artifacts and measured validation metrics.' }, { status: 410 });
 
     if (action === 'promote') {
-      if (!modelId || typeof modelId !== 'string' || !symbol || typeof symbol !== 'string') {
-        return NextResponse.json({ error: 'Missing or invalid modelId or symbol.' }, { status: 400 });
-      }
-
+      if (!modelId || typeof modelId !== 'string' || !symbol || typeof symbol !== 'string') return NextResponse.json({ error: 'Missing or invalid modelId or symbol.' }, { status: 400 });
       const horizon = Number(horizonSecs);
-      if (!Number.isFinite(horizon) || horizon <= 0) {
-        return NextResponse.json({ error: 'A positive numeric horizonSecs value is required.' }, { status: 400 });
-      }
-
+      if (!Number.isFinite(horizon) || horizon <= 0) return NextResponse.json({ error: 'A positive numeric horizonSecs value is required.' }, { status: 400 });
       const sql = getDb();
       if (!sql) return NextResponse.json({ success: false, error: 'Model registry database is unavailable.' }, { status: 503 });
-
       const rows = await sql`
-        SELECT model_id, asset_symbol, horizon_ticks, model_family, framework, metrics, status, dataset_id, training_run_id, strategy_key, strategy_version, feature_schema_version
-        FROM ml_model_registry_v2
-        WHERE model_id = ${modelId}
-        LIMIT 1
+        SELECT model_id, asset_symbol, horizon_ticks, model_family, framework, metrics, status,
+               dataset_id, training_run_id, strategy_key, strategy_version, feature_schema_version
+        FROM ml_model_registry_v2 WHERE model_id = ${modelId} LIMIT 1
       `;
       const registered = rows[0] as any;
-      if (!registered) {
-        return NextResponse.json({ success: false, error: 'Model promotion failed: model is not registered.' }, { status: 409 });
-      }
-
-      if (String(registered.asset_symbol) !== symbol) {
-        return NextResponse.json({ success: false, error: 'Model promotion rejected: symbol does not match the persisted model lineage.' }, { status: 409 });
-      }
-
-      if (Number(registered.horizon_ticks) !== horizon) {
-        return NextResponse.json({ success: false, error: 'Model promotion rejected: horizon does not match the persisted model lineage.' }, { status: 409 });
-      }
+      if (!registered) return NextResponse.json({ success: false, error: 'Model promotion failed: model is not registered.' }, { status: 409 });
+      if (String(registered.asset_symbol) !== symbol) return NextResponse.json({ success: false, error: 'Model promotion rejected: symbol does not match the persisted model lineage.' }, { status: 409 });
+      if (Number(registered.horizon_ticks) !== horizon) return NextResponse.json({ success: false, error: 'Model promotion rejected: horizon does not match the persisted model lineage.' }, { status: 409 });
 
       const { definition, modelKey, source } = await resolveCanonicalModelDefinition(sql, registered);
       const persistedLifecycleTier = String((registered.metrics as Record<string, unknown> | null)?.lifecycleTier || '').toLowerCase();
       const lifecycleTier = persistedLifecycleTier || String(definition?.lifecycleTier || '').toLowerCase();
-      if (lifecycleTier !== 'production_candidate') {
-        return NextResponse.json({
-          success: false,
-          error: 'Model promotion rejected: experimental models must remain isolated from production.',
-          lifecycleTier: lifecycleTier || 'unknown',
-          modelKey: modelKey || null,
-          lifecycleResolutionSource: source,
-        }, { status: 409 });
-      }
+      if (lifecycleTier !== 'production_candidate') return NextResponse.json({ success: false, error: 'Model promotion rejected: experimental models must remain isolated from production.', lifecycleTier: lifecycleTier || 'unknown', modelKey: modelKey || null, lifecycleResolutionSource: source }, { status: 409 });
+      if (!['candidate', 'staging'].includes(String(registered.status).toLowerCase())) return NextResponse.json({ success: false, error: `Model promotion rejected: status ${registered.status || 'unknown'} is not promotable.` }, { status: 409 });
+      if (!registered.dataset_id || !registered.training_run_id || !registered.strategy_key || !registered.strategy_version || !registered.feature_schema_version) return NextResponse.json({ success: false, error: 'Model promotion rejected: complete training and strategy lineage is required.' }, { status: 409 });
 
-      if (String(registered.status).toLowerCase() !== 'candidate' && String(registered.status).toLowerCase() !== 'staging') {
-        return NextResponse.json({ success: false, error: `Model promotion rejected: status ${registered.status || 'unknown'} is not promotable.` }, { status: 409 });
-      }
-
-      if (!registered.dataset_id || !registered.training_run_id || !registered.strategy_key || !registered.strategy_version || !registered.feature_schema_version) {
-        return NextResponse.json({ success: false, error: 'Model promotion rejected: complete training and strategy lineage is required.' }, { status: 409 });
-      }
+      const persistedArtifact = await hasModelArtifact(String(modelId));
+      if (!persistedArtifact) return NextResponse.json({ success: false, error: 'Model promotion rejected: durable trained artifact is missing. The model must be re-registered from a persisted native artifact before production promotion.', modelId, modelKey: modelKey || null }, { status: 409 });
 
       const championRows = await sql`
-        SELECT model_id, metrics
-        FROM ml_model_registry_v2
-        WHERE asset_symbol = ${symbol}
-          AND horizon_ticks = ${horizon}
-          AND status = 'production'
-          AND model_id <> ${modelId}
-        ORDER BY updated_at DESC
-        LIMIT 1
+        SELECT model_id, metrics FROM ml_model_registry_v2
+        WHERE asset_symbol = ${symbol} AND horizon_ticks = ${horizon}
+          AND status = 'production' AND model_id <> ${modelId}
+        ORDER BY updated_at DESC LIMIT 1
       `;
       const champion = championRows[0] as any | undefined;
       const governance = evaluateChampionChallengerPromotion(registered, champion ?? null);
-      if (!governance.eligible) {
-        return NextResponse.json({
-          success: false,
-          error: `Model promotion rejected: ${governance.reason}`,
-          governance,
-          championModelId: champion?.model_id || null,
-        }, { status: 409 });
-      }
-
+      if (!governance.eligible) return NextResponse.json({ success: false, error: `Model promotion rejected: ${governance.reason}`, governance, championModelId: champion?.model_id || null }, { status: 409 });
       const success = await promoteModelInRegistry(modelId, symbol, horizon);
-      if (!success) {
-        return NextResponse.json({ success: false, error: 'Model promotion failed or model is not registered.' }, { status: 409 });
-      }
-
-      return NextResponse.json({
-        success: true,
-        modelId,
-        symbol,
-        horizonSecs: horizon,
-        status: 'production',
-        promotedAt: new Date().toISOString(),
-        governance,
-        championModelId: champion?.model_id || null,
-        modelKey: modelKey || null,
-        lifecycleResolutionSource: source,
-      });
+      if (!success) return NextResponse.json({ success: false, error: 'Model promotion failed or model is not registered.' }, { status: 409 });
+      return NextResponse.json({ success: true, modelId, symbol, horizonSecs: horizon, status: 'production', promotedAt: new Date().toISOString(), governance, championModelId: champion?.model_id || null, modelKey: modelKey || null, lifecycleResolutionSource: source });
     }
 
     if (action === 'delete') {
-      if (!modelId || typeof modelId !== 'string') {
-        return NextResponse.json({ error: 'Missing modelId.' }, { status: 400 });
-      }
+      if (!modelId || typeof modelId !== 'string') return NextResponse.json({ error: 'Missing modelId.' }, { status: 400 });
       const sql = getDb();
       if (!sql) return NextResponse.json({ success: false, error: 'Database unavailable.' }, { status: 503 });
-
       await sql`DELETE FROM ml_model_registry WHERE model_id = ${modelId}`;
       return NextResponse.json({ success: true, message: `Model ${modelId} deleted from registry.` });
     }
-
     return NextResponse.json({ error: 'Invalid action.' }, { status: 400 });
   } catch (err: any) {
     return NextResponse.json({ success: false, error: err.message || 'Registry action failed' }, { status: 500 });
