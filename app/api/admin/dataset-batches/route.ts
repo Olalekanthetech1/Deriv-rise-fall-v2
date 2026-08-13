@@ -12,7 +12,7 @@ import { formatReadableDatasetName } from '@/lib/ml-display-formatters';
 const activeWorkers = new Set<string>();
 const scheduledJobs = new Set<string>();
 type RequestedDuration = { value: number; unit: DerivDurationUnit };
-type DatasetJobDuration = RequestedDuration & { rangeId: string };
+type DatasetJobDuration = RequestedDuration & { rangeId: string | null };
 
 function auth(req: NextRequest) {
   const cookie = req.cookies.get('admin_session_token')?.value;
@@ -37,9 +37,6 @@ function requestedDurationAllowed(value: number, unit: DerivDurationUnit): boole
   if (!Number.isSafeInteger(value) || value <= 0) return false;
   if (unit === 't') return true;
   return isWithinDerivDurationBand(value, unit);
-}
-function requestedRangeId(symbol: string, value: number, unit: DerivDurationUnit): string {
-  return `${symbol}:REQUESTED:${unit}:${value}`;
 }
 function pretty(datasets: any[]) {
   return datasets.map((dataset) => ({ ...dataset, name: formatReadableDatasetName({ name: dataset.name, assetSymbol: dataset.asset_symbol, assetDisplayName: dataset.metadata?.assetDisplayName, durationValue: dataset.duration_value, durationUnit: dataset.duration_unit }), raw_name: dataset.name }));
@@ -75,7 +72,7 @@ async function worker(jobId: string, concurrency: number): Promise<void> {
         continue;
       }
       try {
-        const result = await buildDurationTrainingDataset({ symbol: job.symbol, durationValue: item.value, durationUnit: item.unit, durationRangeId: item.rangeId });
+        const result = await buildDurationTrainingDataset({ symbol: job.symbol, durationValue: item.value, durationUnit: item.unit, durationRangeId: item.rangeId ?? undefined });
         const itemStatus = await getAutoDatasetJobItemStatus(jobId, item.id);
         if (itemStatus === 'cancelled') {
           await discardAutoDatasetBuild(result.datasetId);
@@ -177,12 +174,10 @@ export async function POST(req: NextRequest) {
       try {
         const resolved = await getCachedOrDiscoverDuration(symbol);
         const durations: DatasetJobDuration[] = buildAll
-          ? ladder(resolved.discovery.ranges.filter((range) => !legacyUnit || range.unit === legacyUnit))
+          ? ladder(resolved.discovery.ranges).filter((duration) => !legacyUnit || duration.unit === legacyUnit)
           : requestedDurations.map((requested) => {
               const matches = matching(resolved.discovery.ranges, requested.value, requested.unit);
-              return matches.length
-                ? { value: requested.value, unit: requested.unit, rangeId: matches[0].id }
-                : { value: requested.value, unit: requested.unit, rangeId: requestedRangeId(symbol, requested.value, requested.unit) };
+              return { value: requested.value, unit: requested.unit, rangeId: matches[0]?.id ?? null };
             });
         const uniqueDurations = durations.filter((duration, index, all) => all.findIndex((candidate) => candidate.value === duration.value && candidate.unit === duration.unit) === index);
         if (!uniqueDurations.length) {
@@ -191,9 +186,9 @@ export async function POST(req: NextRequest) {
         }
         const job = await createAutoDatasetJob(symbol, uniqueDurations);
         jobs.push(job);
-        const discoveredCount = uniqueDurations.filter((duration) => !duration.rangeId.startsWith(`${symbol}:REQUESTED:`)).length;
-        const policyFallbackCount = uniqueDurations.length - discoveredCount;
-        results.push({ symbol, accepted: true, status: job.status, jobId: job.id, requestedCount: job.requestedCount, selectedCount: uniqueDurations.length, discoveredCount, policyFallbackCount });
+        const discoveryMatchedCount = uniqueDurations.filter((duration) => duration.rangeId !== null).length;
+        const discoveryUnmatchedCount = uniqueDurations.length - discoveryMatchedCount;
+        results.push({ symbol, accepted: true, status: job.status, jobId: job.id, requestedCount: job.requestedCount, selectedCount: uniqueDurations.length, discoveryMatchedCount, discoveryUnmatchedCount });
       } catch (error) {
         results.push({ symbol, accepted: false, status: 'failed', error: error instanceof Error ? error.message : String(error) });
       }
@@ -207,13 +202,24 @@ export async function POST(req: NextRequest) {
         jobs: [],
         results,
         limits: { maxAssets: runtime.maxAssets, concurrency: runtime.concurrency, pollIntervalMs: runtime.pollIntervalMs },
-        message: 'No selected asset/horizon combinations are currently buildable. Nothing was queued.'
+        message: 'No selected asset/horizon combinations were queued. Check the per-asset results for the exact rejection reason.'
       }, { status: 202, headers: noStore() });
     }
     scheduleWorkers(jobs.map((job) => job.id), runtime.concurrency);
     const selectedCount = jobs.reduce((sum, job) => sum + Number(job.requestedCount ?? 0), 0);
-    const fallbackCount = results.reduce((sum, result) => sum + Number(result.policyFallbackCount ?? 0), 0);
-    return NextResponse.json({ success: true, mode: 'MULTI_ASSET_DATASET_BUILD', selectedSymbols: symbols, autoJobIds: jobs.map((job) => job.id), jobs, results, limits: { maxAssets: runtime.maxAssets, concurrency: runtime.concurrency, pollIntervalMs: runtime.pollIntervalMs }, message: buildAll ? `Dataset builds started for ${jobs.length} assets using their dynamically discovered supported horizon ladders.` : `Dataset builds started for ${jobs.length} assets across ${selectedCount} selected horizons${fallbackCount ? `; ${fallbackCount} horizons used the canonical Deriv duration policy because live proposal discovery did not return a range on this request.` : ''}.` }, { status: 202, headers: noStore() });
+    const discoveryUnmatchedCount = results.reduce((sum, result) => sum + Number(result.discoveryUnmatchedCount ?? 0), 0);
+    return NextResponse.json({
+      success: true,
+      mode: 'MULTI_ASSET_DATASET_BUILD',
+      selectedSymbols: symbols,
+      autoJobIds: jobs.map((job) => job.id),
+      jobs,
+      results,
+      limits: { maxAssets: runtime.maxAssets, concurrency: runtime.concurrency, pollIntervalMs: runtime.pollIntervalMs },
+      message: buildAll
+        ? `Dataset builds started for ${jobs.length} assets using dynamically discovered supported horizon ladders.`
+        : `Dataset builds started for ${jobs.length} assets across ${selectedCount} selected horizons${discoveryUnmatchedCount ? `; ${discoveryUnmatchedCount} selected horizons had no matching live range ID and will build from the persisted duration scope.` : ''}.`
+    }, { status: 202, headers: noStore() });
   } catch (error) {
     return NextResponse.json({ success: false, error: error instanceof Error ? error.message : 'Unable to start dataset build.' }, { status: 500, headers: noStore() });
   }
