@@ -1,10 +1,10 @@
 import crypto from 'crypto';
-import { neon } from '@neondatabase/serverless';
+import { neon, type NeonQueryFunction } from '@neondatabase/serverless';
 import { getDbConnectionString } from './db';
 import { buildMlHorizonCohort, createMlHorizonDescriptor, type MlHorizonCohort } from './ml-horizon-contract';
 import { ensureMlHorizonCohortSchema } from './ml-horizon-cohort-schema';
 
-type Sql = ReturnType<typeof neon>;
+type Sql = NeonQueryFunction<false, false>;
 
 type CohortDatasetInput = {
   datasetId: string;
