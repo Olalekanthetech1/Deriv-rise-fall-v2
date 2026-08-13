@@ -6,7 +6,8 @@ import { getCachedOrDiscoverDuration } from '@/lib/deriv-duration-cache';
 import { initializeMlPipelineConfig } from '@/lib/ml-pipeline-config';
 import { getDatasetBuildRuntimeConfig } from '@/lib/dataset-build-runtime-config';
 import { isWithinDerivDurationBand } from '@/lib/deriv-duration-policy';
-import { archiveAutoDatasetJob, claimNextAutoDatasetJobItem, completeAutoDatasetJobItem, createAutoDatasetJob, failAutoDatasetJobItem, getAutoDatasetJob, getAutoDatasetJobItemStatus, refreshAutoDatasetJobStatus, discardAutoDatasetBuild, skipAutoDatasetJobItem } from '@/lib/auto-dataset-job-store';
+import { archiveAutoDatasetJob, claimNextAutoDatasetJobItem, completeAutoDatasetJobItem, failAutoDatasetJobItem, getAutoDatasetJob, getAutoDatasetJobItemStatus, refreshAutoDatasetJobStatus, discardAutoDatasetBuild, skipAutoDatasetJobItem } from '@/lib/auto-dataset-job-store';
+import { createAutoDatasetJobAtomic } from '@/lib/auto-dataset-job-store-atomic';
 import { formatReadableDatasetName } from '@/lib/ml-display-formatters';
 
 const activeWorkers = new Set<string>();
@@ -184,26 +185,30 @@ export async function POST(req: NextRequest) {
           results.push({ symbol, accepted: false, status: 'skipped', reason: 'HORIZON_NOT_SUPPORTED' });
           continue;
         }
-        const job = await createAutoDatasetJob(symbol, uniqueDurations);
+        const job = await createAutoDatasetJobAtomic(symbol, uniqueDurations);
         jobs.push(job);
         const discoveryMatchedCount = uniqueDurations.filter((duration) => duration.rangeId !== null).length;
         const discoveryUnmatchedCount = uniqueDurations.length - discoveryMatchedCount;
         results.push({ symbol, accepted: true, status: job.status, jobId: job.id, requestedCount: job.requestedCount, selectedCount: uniqueDurations.length, discoveryMatchedCount, discoveryUnmatchedCount });
       } catch (error) {
-        results.push({ symbol, accepted: false, status: 'failed', error: error instanceof Error ? error.message : String(error) });
+        const message = error instanceof Error ? error.message : String(error);
+        results.push({ symbol, accepted: false, status: message.startsWith('AUTO_DATASET_SCOPE_CONFLICT:') ? 'conflict' : 'failed', error: message });
       }
     }
     if (!jobs.length) {
+      const hasConflict = results.some((result) => result.status === 'conflict');
       return NextResponse.json({
-        success: true,
+        success: false,
         mode: 'MULTI_ASSET_DATASET_BUILD',
         selectedSymbols: symbols,
         autoJobIds: [],
         jobs: [],
         results,
         limits: { maxAssets: runtime.maxAssets, concurrency: runtime.concurrency, pollIntervalMs: runtime.pollIntervalMs },
-        message: 'No selected asset/horizon combinations were queued. Check the per-asset results for the exact rejection reason.'
-      }, { status: 202, headers: noStore() });
+        message: hasConflict
+          ? 'No new dataset builds were queued because one or more selected assets already have a different AUTO scope running. The per-asset results contain the active job ID.'
+          : 'No selected asset/horizon combinations were queued. Check the per-asset results for the exact rejection reason.'
+      }, { status: hasConflict ? 409 : 422, headers: noStore() });
     }
     scheduleWorkers(jobs.map((job) => job.id), runtime.concurrency);
     const selectedCount = jobs.reduce((sum, job) => sum + Number(job.requestedCount ?? 0), 0);
