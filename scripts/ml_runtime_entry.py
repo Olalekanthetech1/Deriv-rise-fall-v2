@@ -1,7 +1,7 @@
 """Production ML daemon entrypoint.
 
-Node/TypeScript owns feature calculation and sends validated canonical vectors,
-datasets and schema contracts. Python owns only native model execution.
+Node/TypeScript owns feature calculation and production model governance.
+Python owns only native model execution for the already-resolved artifact.
 """
 from __future__ import annotations
 
@@ -23,12 +23,12 @@ def _attach_runtime_timing(output: dict, elapsed_ms: float) -> dict:
     metrics = next_output.get("metrics")
     if isinstance(metrics, dict):
         next_metrics = dict(metrics)
-        timings = dict(next_metrics.get("timings") if isinstance(next_metrics.get("timings"), dict) else {})
+        timings = dict(next_metrics.get("timings") or {})
         timings["daemonDispatchMs"] = elapsed
         next_metrics["timings"] = timings
         next_output["metrics"] = next_metrics
         return next_output
-    timings = dict(next_output.get("timings") if isinstance(next_output.get("timings"), dict) else {})
+    timings = dict(next_output.get("timings") or {})
     timings["daemonDispatchMs"] = elapsed
     next_output["timings"] = timings
     return next_output
@@ -37,7 +37,7 @@ def _attach_runtime_timing(output: dict, elapsed_ms: float) -> dict:
 def _attach_request_context(output: dict, request: dict) -> dict:
     if not isinstance(output, dict): return output
     next_output = dict(output)
-    if "id" not in next_output: next_output["id"] = request.get("id")
+    next_output.setdefault("id", request.get("id"))
     return next_output
 
 
@@ -78,7 +78,7 @@ def dispatch(request: dict) -> dict:
         return {"success": True, "id": request.get("id"), "pong": True, "schemaVersion": schema["featureSchemaVersion"], "schemaFingerprint": schema["schemaFingerprint"], "featureCount": schema["featureCount"], "models": runtime.model_types()}
     if action == "list_models":
         schema = runtime.require_schema()
-        return {"success": True, "id": request.get("id"), "schemaFingerprint": schema["schemaFingerprint"], "models": [path.name for path in runtime.MODEL_DIR.glob("*.pkl")], "supportedModelTypes": runtime.model_types()}
+        return {"success": True, "id": request.get("id"), "schemaFingerprint": schema["schemaFingerprint"], "models": [path.name for path in runtime.MODEL_DIR.glob("*.pkl")], "supportedModelTypes": runtime.model_types(), "note": "Local listing is diagnostic only; production inference is registry-governed."}
     return {"success": False, "id": request.get("id"), "error": f"Unknown action {action}"}
 
 
@@ -88,14 +88,14 @@ def main() -> None:
     for line in sys.stdin:
         request: dict = {}
         started = time.perf_counter()
+        output: dict = {"success": False, "error": "UNINITIALIZED_RUNTIME_RESULT"}
         try:
             request = json.loads(line)
             output = _attach_request_context(dispatch(request), request)
         except Exception as exc:
             output = {"success": False, "id": request.get("id") if isinstance(request, dict) else None, "error": str(exc)}
         finally:
-            elapsed_ms = (time.perf_counter() - started) * 1000.0
-            if isinstance(output, dict): output = _attach_runtime_timing(output, elapsed_ms)
+            output = _attach_runtime_timing(output, (time.perf_counter() - started) * 1000.0)
         sys.stdout.write(json.dumps(output, default=str) + "\n")
         sys.stdout.flush()
 
