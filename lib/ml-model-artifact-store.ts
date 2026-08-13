@@ -4,7 +4,6 @@ import os from 'node:os';
 import path from 'node:path';
 import { getDb, initDbSchema } from './db';
 
-const ARTIFACT_TABLE = 'ml_model_artifacts';
 const MAX_ARTIFACT_BYTES = 100 * 1024 * 1024;
 
 function safeModelId(value: string): string {
@@ -18,7 +17,7 @@ export async function ensureModelArtifactStore(): Promise<void> {
   const sql = getDb();
   if (!sql) throw new Error('DATABASE_UNAVAILABLE');
   await sql`
-    CREATE TABLE IF NOT EXISTS ${sql.unsafe(ARTIFACT_TABLE)} (
+    CREATE TABLE IF NOT EXISTS ml_model_artifacts (
       model_id TEXT PRIMARY KEY,
       artifact_bytes BYTEA NOT NULL,
       sha256 TEXT NOT NULL,
@@ -30,6 +29,15 @@ export async function ensureModelArtifactStore(): Promise<void> {
   `;
 }
 
+export async function hasModelArtifact(modelId: string): Promise<boolean> {
+  const safeId = safeModelId(modelId);
+  await ensureModelArtifactStore();
+  const rows = await getDb()!`
+    SELECT 1 AS present FROM ml_model_artifacts WHERE model_id = ${safeId}::text LIMIT 1
+  `;
+  return rows.length > 0;
+}
+
 export async function persistModelArtifact(modelId: string, artifactPath: string): Promise<{ sha256: string; byteSize: number }> {
   const safeId = safeModelId(modelId);
   const bytes = await fs.readFile(artifactPath);
@@ -37,8 +45,7 @@ export async function persistModelArtifact(modelId: string, artifactPath: string
   if (bytes.length > MAX_ARTIFACT_BYTES) throw new Error(`MODEL_ARTIFACT_TOO_LARGE:${bytes.length}`);
   const sha256 = crypto.createHash('sha256').update(bytes).digest('hex');
   await ensureModelArtifactStore();
-  const sql = getDb()!;
-  await sql`
+  await getDb()!`
     INSERT INTO ml_model_artifacts (model_id, artifact_bytes, sha256, byte_size, updated_at)
     VALUES (${safeId}::text, ${bytes}::bytea, ${sha256}::text, ${bytes.length}::integer, NOW())
     ON CONFLICT (model_id) DO UPDATE SET
@@ -53,8 +60,7 @@ export async function persistModelArtifact(modelId: string, artifactPath: string
 export async function materializeModelArtifact(modelId: string): Promise<{ path: string; sha256: string; byteSize: number }> {
   const safeId = safeModelId(modelId);
   await ensureModelArtifactStore();
-  const sql = getDb()!;
-  const rows = await sql`
+  const rows = await getDb()!`
     SELECT artifact_bytes, sha256, byte_size
     FROM ml_model_artifacts
     WHERE model_id = ${safeId}::text
