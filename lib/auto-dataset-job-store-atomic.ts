@@ -12,12 +12,13 @@ type ScopeDuration = { value: number; unit: DerivDurationUnit; rangeId: string |
  * scope. Existing running work for the same asset/scope is reused; a different
  * running scope is reported as an explicit conflict instead of being silently
  * superseded.
+ *
+ * Scope identity is intentionally symbol + duration value + duration unit.
+ * Deriv discovery range IDs are metadata only and never define build identity.
  */
 export async function createAutoDatasetJobAtomic(symbol: string, durations: ScopeDuration[]): Promise<AutoDatasetJob> {
   if (!durations.length) throw new Error('AUTO_DATASET_SCOPE_EMPTY: at least one horizon is required.');
 
-  // This initializes the canonical runtime schema and runs the existing
-  // historical-feasibility migration before we perform the write.
   await getLatestAutoDatasetJob();
 
   const existing = await getAutoDatasetJobBySymbol(symbol);
@@ -102,7 +103,7 @@ async function getAutoDatasetJobBySymbol(symbol: string): Promise<AutoDatasetJob
 async function runningScopeMatches(jobId: string, durations: ScopeDuration[]): Promise<boolean> {
   const sql = getDbOrThrow();
   const rows = await sql`
-    SELECT item_index, duration_value, duration_unit, duration_range_id
+    SELECT item_index, duration_value, duration_unit
     FROM ops_ml_dataset_build_job_items
     WHERE job_id = ${jobId}
     ORDER BY item_index
@@ -111,7 +112,6 @@ async function runningScopeMatches(jobId: string, durations: ScopeDuration[]): P
   return rows.every((row: any, index: number) =>
     Number(row.item_index) === index
       && Number(row.duration_value) === durations[index].value
-      && String(row.duration_unit) === durations[index].unit
-      && (row.duration_range_id == null ? null : String(row.duration_range_id)) === durations[index].rangeId,
+      && String(row.duration_unit) === durations[index].unit,
   );
 }
