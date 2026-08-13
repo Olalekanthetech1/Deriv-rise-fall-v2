@@ -1,9 +1,10 @@
 import { EngineeredTickFeatures, extractTickFeatures, featureObjToArray, TickPoint } from './ml-feature-extractor';
 import { buildFeatureSequence } from './ml-feature-dataset';
-import { getMlModelDefinition, getMlModelKeys, getPredictiveModelDefinitions, type MlModelKey } from './ml-model-registry';
+import { getMlModelDefinition, getPredictiveModelDefinitions, type MlModelKey } from './ml-model-registry';
 import { mlRuntimeClient } from './ml-runtime-client';
 import { evaluateSignalStrategyGate, resolveAssetAwareSignalContext, type AssetAwareSignalContext, type SignalStrategyGate } from './asset-context';
 import { getDb } from './db';
+import { materializeModelArtifact } from './ml-model-artifact-store';
 
 export type Signal = 'RISE' | 'FALL';
 export type ModelStatus = 'AVAILABLE' | 'UNAVAILABLE';
@@ -18,7 +19,7 @@ export interface ProductionEnsembleResult {
   anomalyScore: number | null;
   assetContext: AssetAwareSignalContext;
   strategyGate: SignalStrategyGate;
-  features: EngineeredTickFeatures;
+  features: EngineedTickFeatures;
   evaluations: Array<{ modelKey: string; modelName: string; family: 'tabular' | 'sequential'; status: ModelStatus; probabilityUp: number | null; probabilityDown: number | null; signal: Signal | null; confidence: number | null; dynamicWeight: number | null; runtimeMode: string; details: string; validation: any }>;
   modelBreakdown: Record<string, any>;
   regime: any;
@@ -77,6 +78,7 @@ async function resolveProductionModels(symbol: string, durationValue: number, du
     if (!definition || definition.family === 'regime' || definition.family === 'anomaly') continue;
     if (productionModels[modelKey]) continue;
 
+    const artifact = await materializeModelArtifact(String(row.model_id));
     productionModels[modelKey] = {
       modelId: String(row.model_id),
       modelKey,
@@ -89,12 +91,13 @@ async function resolveProductionModels(symbol: string, durationValue: number, du
       framework: String(row.framework || ''),
       format: String(row.format || ''),
       validation: metrics,
+      artifactPath: artifact.path,
+      artifactSha256: artifact.sha256,
+      artifactByteSize: artifact.byteSize,
     };
   }
 
-  if (!Object.keys(productionModels).length) {
-    throw new Error('NO_PRODUCTION_MODEL_REGISTERED');
-  }
+  if (!Object.keys(productionModels).length) throw new Error('NO_PRODUCTION_MODEL_REGISTERED');
   return productionModels;
 }
 
@@ -117,14 +120,8 @@ export async function evaluateProductionEnsemble(
   const featureSequence = await buildFeatureSequence(ticks, featureContext);
 
   const assetContext = resolveAssetAwareSignalContext({
-    symbol,
-    durationValue,
-    durationUnit,
-    durationSeconds: Number(durationSecs),
-    assetCategory,
-    assetClass: options.assetClass,
-    marketType: options.marketType,
-    tickCount: ticks.length,
+    symbol, durationValue, durationUnit, durationSeconds: Number(durationSecs), assetCategory,
+    assetClass: options.assetClass, marketType: options.marketType, tickCount: ticks.length,
     requiredContextTicks: options.requiredContextTicks ?? Math.max(25, featureSequence.length || 25),
   });
 
@@ -134,15 +131,8 @@ export async function evaluateProductionEnsemble(
   if (!productionModelKeys.length) throw new Error('NO_PRODUCTION_PREDICTIVE_MODEL_REGISTERED');
 
   const remote = await mlRuntimeClient.sendCommand('predict_ensemble', {
-    symbol,
-    durationSecs: Number(durationSecs),
-    durationValue,
-    durationUnit,
-    assetCategory,
-    featureVector,
-    featureSequence,
-    modelTypes: productionModelKeys,
-    productionModels,
+    symbol, durationSecs: Number(durationSecs), durationValue, durationUnit, assetCategory,
+    featureVector, featureSequence, modelTypes: productionModelKeys, productionModels,
   });
   if (!remote?.success || !remote.models) throw new Error('NATIVE_ML_ENSEMBLE_UNAVAILABLE');
 
@@ -164,17 +154,12 @@ export async function evaluateProductionEnsemble(
       confidence: valid ? Math.max(up!, down!) : null,
       dynamicWeight,
       runtimeMode: valid ? 'Native Python trained production artifact' : 'Unavailable — no promoted production artifact',
-      details: valid
-        ? `${String(result.engine || 'Native trained model')} · ${assetContext.assetLabel} · ${assetContext.duration.label} · production ${String(productionModels[definition.key]?.modelId || '')}`
-        : String(result?.error || (!selectedForProduction ? 'MODEL_NOT_PROMOTED' : 'MODEL_UNAVAILABLE')),
+      details: valid ? `${String(result.engine || 'Native trained model')} · ${assetContext.assetLabel} · ${assetContext.duration.label} · production ${String(productionModels[definition.key]?.modelId || '')}` : String(result?.error || (!selectedForProduction ? 'MODEL_NOT_PROMOTED' : 'MODEL_UNAVAILABLE')),
       validation: result?.validation || productionModels[definition.key]?.validation || null,
     };
   });
 
-  const available = evaluations
-    .filter((evaluation): evaluation is AvailableEvaluation => evaluation.status === 'AVAILABLE' && evaluation.probabilityUp !== null && evaluation.probabilityDown !== null && evaluation.dynamicWeight !== null && evaluation.signal !== null)
-    .map((evaluation) => ({ ...evaluation, probabilityUp: evaluation.probabilityUp as number, probabilityDown: evaluation.probabilityDown as number, dynamicWeight: evaluation.dynamicWeight as number, signal: evaluation.signal as Signal }));
-
+  const available = evaluations.filter((evaluation): evaluation is AvailableEvaluation => evaluation.status === 'AVAILABLE' && evaluation.probabilityUp !== null && evaluation.probabilityDown !== null && evaluation.dynamicWeight !== null && evaluation.signal !== null).map((evaluation) => ({ ...evaluation, probabilityUp: evaluation.probabilityUp as number, probabilityDown: evaluation.probabilityDown as number, dynamicWeight: evaluation.dynamicWeight as number, signal: evaluation.signal as Signal }));
   if (available.length === 0) throw new Error('NO_VALIDATED_TRAINED_MODELS_AVAILABLE');
 
   const totalWeight = available.reduce((sum, evaluation) => sum + evaluation.dynamicWeight, 0);
@@ -191,14 +176,11 @@ export async function evaluateProductionEnsemble(
   const marketRegime = hmmAvailable ? String(hmm.primaryRegime) : 'REGIME_UNAVAILABLE';
   const anomalyScore = isoAvailable ? finiteProbability(Number(iso.anomalyScore) * 100) : null;
   const anomalyRisk = isoAvailable ? (Number(iso.anomalyScore) >= 0.7 ? 'HIGH' : Number(iso.anomalyScore) >= 0.4 ? 'MODERATE' : 'LOW') : 'UNKNOWN';
-
   const strategyGate = evaluateSignalStrategyGate(assetContext, confidence, available.length, anomalyRisk, direction);
   const finalAction = strategyGate.accepted ? (direction === 'RISE' ? 'EXECUTE_CALL' : 'EXECUTE_PUT') : 'HOLD_NO_SIGNAL';
 
   const modelBreakdown: Record<string, any> = {};
-  for (const evaluation of evaluations) {
-    modelBreakdown[evaluation.modelKey] = { modelName: evaluation.modelName, runtimeMode: evaluation.runtimeMode, status: evaluation.status, vote: evaluation.signal, confidence: evaluation.confidence, probabilityUp: evaluation.probabilityUp, probabilityDown: evaluation.probabilityDown, weight: evaluation.dynamicWeight, details: evaluation.details, validation: evaluation.validation };
-  }
+  for (const evaluation of evaluations) modelBreakdown[evaluation.modelKey] = { modelName: evaluation.modelName, runtimeMode: evaluation.runtimeMode, status: evaluation.status, vote: evaluation.signal, confidence: evaluation.confidence, probabilityUp: evaluation.probabilityUp, probabilityDown: evaluation.probabilityDown, weight: evaluation.dynamicWeight, details: evaluation.details, validation: evaluation.validation };
 
   const hmmDefinition = getMlModelDefinition('hmm');
   const isoDefinition = getMlModelDefinition('isolation_forest');
@@ -208,18 +190,8 @@ export async function evaluateProductionEnsemble(
   const normalizedWeights = Object.fromEntries(available.map((evaluation) => [evaluation.modelKey, Number((evaluation.dynamicWeight / totalWeight).toFixed(6))]));
   const topPerformingModel = available.slice().sort((a, b) => b.dynamicWeight - a.dynamicWeight)[0]?.modelKey ?? null;
   return {
-    symbol,
-    direction,
-    probUp: Number(probUp.toFixed(2)),
-    probDown: Number(probDown.toFixed(2)),
-    confidence: Number(confidence.toFixed(2)),
-    marketRegime,
-    anomalyScore,
-    assetContext,
-    strategyGate,
-    features,
-    evaluations,
-    modelBreakdown,
+    symbol, direction, probUp: Number(probUp.toFixed(2)), probDown: Number(probDown.toFixed(2)), confidence: Number(confidence.toFixed(2)),
+    marketRegime, anomalyScore, assetContext, strategyGate, features, evaluations, modelBreakdown,
     regime: hmmAvailable ? hmm : { status: 'UNAVAILABLE', error: hmm?.error || 'MODEL_UNAVAILABLE' },
     anomaly: isoAvailable ? iso : { status: 'UNAVAILABLE', error: iso?.error || 'MODEL_UNAVAILABLE' },
     drift: { modelWeights: normalizedWeights, recentAccuracies: Object.fromEntries(available.map((evaluation) => [evaluation.modelKey, evaluation.validation?.accuracy ?? null])), driftStatus: `Weights derived from persisted native-model validation metrics · ${strategyGate.accepted ? 'asset-aware gate passed' : 'asset-aware gate blocked'}`, topPerformingModel },
